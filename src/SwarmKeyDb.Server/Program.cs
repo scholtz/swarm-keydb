@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -41,30 +42,22 @@ var encryptionOptions = new EncryptionOptions
     KeyHex = Environment.GetEnvironmentVariable("SWARM_KEYDB_ENCRYPTION_KEY"),
     EthPrivateKeyHex = Environment.GetEnvironmentVariable("SWARM_KEYDB_ENCRYPTION_ETH_KEY")
 };
+var aclOptions = GetAclOptions();
 var services = new ServiceCollection();
 services.AddLogging(builder => builder.AddSimpleConsole().SetMinimumLevel(GetLogLevel("SWARM_KEYDB_LOG_LEVEL", LogLevel.Information)));
 services.AddOptions();
 services.AddSingleton<IOptions<CacheOptions>>(Options.Create(cacheOptions));
 services.AddSingleton<IOptions<CompressionOptions>>(Options.Create(compressionOptions));
 services.AddSingleton<IOptions<EncryptionOptions>>(Options.Create(encryptionOptions));
+services.AddSingleton<IOptions<AclOptions>>(Options.Create(aclOptions));
 services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
-services.AddSingleton<IKeyValueStore>(sp =>
-{
-    IKeyValueStore store = new SwarmKeyValueStore(swarmClient, index);
-    if (encryptionOptions.Enabled)
-    {
-        var encOpts = sp.GetRequiredService<IOptions<EncryptionOptions>>();
-        var encLog = sp.GetRequiredService<ILogger<EncryptingKeyValueStore>>();
-        store = new EncryptingKeyValueStore(store, encOpts, encLog);
-    }
-    store = new CompressingKeyValueStore(store, sp.GetRequiredService<IOptions<CompressionOptions>>(), sp.GetRequiredService<ILogger<CompressingKeyValueStore>>());
-    store = new CachingKeyValueStore(store, sp.GetRequiredService<IMemoryCache>(), sp.GetRequiredService<IOptions<CacheOptions>>(), sp.GetRequiredService<ILogger<CachingKeyValueStore>>());
-    return store;
-});
-services.AddSingleton<ICacheStats>(sp => (ICacheStats)sp.GetRequiredService<IKeyValueStore>());
+services.AddSingleton<IEthAddressAccessor, AsyncLocalEthAddressAccessor>();
+services.AddSwarmKeyDbStore(swarmClient, index);
 
 using var provider = services.BuildServiceProvider();
-var processor = new RedisCommandProcessor(provider.GetRequiredService<IKeyValueStore>());
+var processor = new RedisCommandProcessor(
+    provider.GetRequiredService<IKeyValueStore>(),
+    provider.GetRequiredService<IEthAddressAccessor>());
 var server = new RedisServer(bind, port, processor);
 
 using var cts = new CancellationTokenSource();
@@ -90,3 +83,47 @@ static LogLevel GetLogLevel(string name, LogLevel defaultValue) =>
 
 static string RequireEnvironment(string name) =>
     Environment.GetEnvironmentVariable(name) ?? throw new InvalidOperationException($"Environment variable {name} is required.");
+
+static AclOptions GetAclOptions()
+{
+    var enabled = GetBool("SWARM_KEYDB_ACL_ENABLED", false);
+    var modeText = Environment.GetEnvironmentVariable("SWARM_KEYDB_ACL_MODE");
+    var mode = string.IsNullOrWhiteSpace(modeText)
+        ? AclMode.Allowlist
+        : Enum.TryParse<AclMode>(modeText, ignoreCase: true, out var parsedMode)
+            ? parsedMode
+            : throw new InvalidOperationException("SWARM_KEYDB_ACL_MODE must be 'allowlist' or 'denylist'.");
+
+    var entriesJson = Environment.GetEnvironmentVariable("SWARM_KEYDB_ACL_ENTRIES");
+    if (string.IsNullOrWhiteSpace(entriesJson))
+    {
+        return new AclOptions
+        {
+            Enabled = enabled,
+            Mode = mode,
+            Entries = []
+        };
+    }
+
+    try
+    {
+        var entries = JsonSerializer.Deserialize<List<AclEntry>>(entriesJson, new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        }) ?? [];
+
+        return new AclOptions
+        {
+            Enabled = enabled,
+            Mode = mode,
+            Entries = entries
+        };
+    }
+    catch (JsonException ex) when (enabled)
+    {
+        throw new InvalidOperationException(
+            "ACL is enabled (SWARM_KEYDB_ACL_ENABLED=true) but SWARM_KEYDB_ACL_ENTRIES is not valid JSON. " +
+            "Configure a JSON array of {\"address\":\"0x...\",\"permission\":\"read|write|admin\"} entries.",
+            ex);
+    }
+}

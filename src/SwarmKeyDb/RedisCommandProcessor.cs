@@ -5,40 +5,66 @@ namespace SwarmKeyDb;
 public sealed class RedisCommandProcessor : IDisposable
 {
     private readonly IKeyValueStore _store;
+    private readonly IEthAddressAccessor? _ethAddressAccessor;
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
 
-    public RedisCommandProcessor(IKeyValueStore store)
+    public RedisCommandProcessor(IKeyValueStore store, IEthAddressAccessor? ethAddressAccessor = null)
     {
         _store = store;
+        _ethAddressAccessor = ethAddressAccessor;
     }
 
     public async Task ProcessAsync(Stream input, Stream output, CancellationToken cancellationToken = default)
     {
         var reader = new RespReader(input);
         var writer = new RespWriter(output);
+        string? currentAddress = null;
 
-        while (!cancellationToken.IsCancellationRequested)
+        if (_ethAddressAccessor is not null)
         {
-            RespValue? request;
-            try
+            _ethAddressAccessor.CurrentAddress = null;
+        }
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
             {
-                request = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-            }
-            catch (EndOfStreamException)
-            {
-                break;
-            }
+                RespValue? request;
+                try
+                {
+                    request = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (EndOfStreamException)
+                {
+                    break;
+                }
 
-            if (request is null)
-            {
-                break;
-            }
+                if (request is null)
+                {
+                    break;
+                }
 
-            var response = await ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
-            await writer.WriteAsync(response, cancellationToken).ConfigureAwait(false);
-            if (IsQuit(request))
+                if (_ethAddressAccessor is not null)
+                {
+                    _ethAddressAccessor.CurrentAddress = currentAddress;
+                }
+
+                var response = await ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
+                if (TryGetAuthorizedAddress(request, response, out var authorizedAddress))
+                {
+                    currentAddress = authorizedAddress;
+                }
+                await writer.WriteAsync(response, cancellationToken).ConfigureAwait(false);
+                if (IsQuit(request))
+                {
+                    break;
+                }
+            }
+        }
+        finally
+        {
+            if (_ethAddressAccessor is not null)
             {
-                break;
+                _ethAddressAccessor.CurrentAddress = null;
             }
         }
     }
@@ -58,6 +84,7 @@ public sealed class RedisCommandProcessor : IDisposable
             {
                 "PING" => args.Count > 1 ? RespValue.BulkString(args[1].Bytes) : RespValue.SimpleString("PONG"),
                 "ECHO" => RequireArity(args, 2) ?? RespValue.BulkString(args[1].Bytes),
+                "AUTHADDR" => SetCallerAddress(args),
                 "SET" => await SetAsync(args, cancellationToken).ConfigureAwait(false),
                 "SETEX" => await SetExAsync(args, milliseconds: false, cancellationToken).ConfigureAwait(false),
                 "PSETEX" => await SetExAsync(args, milliseconds: true, cancellationToken).ConfigureAwait(false),
@@ -81,6 +108,10 @@ public sealed class RedisCommandProcessor : IDisposable
                 _ => RespValue.Error($"ERR unknown command '{command}'")
             };
         }
+        catch (AccessDeniedException ex)
+        {
+            return RespValue.Error("ERR " + ex.Message);
+        }
         catch (ArgumentException ex)
         {
             return RespValue.Error("ERR " + ex.Message);
@@ -90,6 +121,30 @@ public sealed class RedisCommandProcessor : IDisposable
             return RespValue.Error("ERR " + ex.Message);
         }
         catch (OverflowException ex)
+        {
+            return RespValue.Error("ERR " + ex.Message);
+        }
+    }
+
+    private RespValue SetCallerAddress(IReadOnlyList<RespValue> args)
+    {
+        var arityError = RequireArity(args, 2);
+        if (arityError is not null)
+        {
+            return arityError;
+        }
+
+        if (_ethAddressAccessor is null)
+        {
+            return RespValue.Error("ERR AUTHADDR is not available.");
+        }
+
+        try
+        {
+            _ethAddressAccessor.CurrentAddress = EthereumAddress.Normalize(args[1].AsString());
+            return RespValue.SimpleString("OK");
+        }
+        catch (ArgumentException ex)
         {
             return RespValue.Error("ERR " + ex.Message);
         }
@@ -425,6 +480,21 @@ public sealed class RedisCommandProcessor : IDisposable
 
     private static bool IsQuit(RespValue request) =>
         request.Type == RespType.Array && request.Items is { Count: > 0 } && request.Items[0].AsString().Equals("QUIT", StringComparison.OrdinalIgnoreCase);
+
+    private static bool TryGetAuthorizedAddress(RespValue request, RespValue response, out string? address)
+    {
+        address = null;
+        if (response.Type == RespType.Error ||
+            request.Type != RespType.Array ||
+            request.Items is not { Count: 2 } items ||
+            !items[0].AsString().Equals("AUTHADDR", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        address = EthereumAddress.Normalize(items[1].AsString());
+        return true;
+    }
 
     private static TimeSpan? TryParseSetExpiryOption(IReadOnlyList<RespValue> args, out string? error)
     {

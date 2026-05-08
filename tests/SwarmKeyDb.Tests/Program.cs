@@ -1,5 +1,6 @@
 using System.Text;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SwarmKeyDb;
@@ -42,7 +43,17 @@ var tests = new (string Name, Func<Task> Test)[]
     ("encrypting store tampered ciphertext throws cryptographic exception", EncryptingKeyValueStoreTamperedCiphertextThrowsCryptographicExceptionAsync),
     ("encrypting store delete and ttl pass through", EncryptingKeyValueStoreDeleteAndTtlPassThroughAsync),
     ("encrypting store ethereum key derivation produces consistent key", EncryptingKeyValueStoreEthereumKeyDerivationProducesConsistentKeyAsync),
-    ("encrypting store startup fails when enabled with no key", EncryptingKeyValueStoreStartupFailsWhenEnabledWithNoKeyAsync)
+    ("encrypting store startup fails when enabled with no key", EncryptingKeyValueStoreStartupFailsWhenEnabledWithNoKeyAsync),
+    ("acl allowlist read address can get", AclAllowlistReadAddressCanGetAsync),
+    ("acl allowlist write address can put and delete", AclAllowlistWriteAddressCanPutAndDeleteAsync),
+    ("acl allowlist unlisted address is denied on get", AclAllowlistUnlistedAddressIsDeniedOnGetAsync),
+    ("acl allowlist unlisted address is denied on put", AclAllowlistUnlistedAddressIsDeniedOnPutAsync),
+    ("acl allowlist admin grants read and write", AclAllowlistAdminGrantsReadAndWriteAsync),
+    ("acl denylist blocked address is denied and non blocked address is allowed", AclDenylistBlockedAddressIsDeniedAndNonBlockedAddressIsAllowedAsync),
+    ("acl disabled passes all operations through", AclDisabledPassesAllOperationsThroughAsync),
+    ("acl startup fails when enabled with empty entries", AclStartupFailsWhenEnabledWithEmptyEntriesAsync),
+    ("service collection places acl between swarm and encryption", ServiceCollectionPlacesAclBetweenSwarmAndEncryptionAsync),
+    ("redis protocol returns access denied error for unauthorized address", RedisProtocolReturnsAccessDeniedErrorForUnauthorizedAddressAsync)
 };
 
 foreach (var (name, test) in tests)
@@ -464,7 +475,22 @@ static EncryptingKeyValueStore CreateEncryptingStore(IKeyValueStore inner, strin
     return new EncryptingKeyValueStore(inner, options, NullLogger<EncryptingKeyValueStore>.Instance);
 }
 
+static AclKeyValueStore CreateAclStore(IKeyValueStore inner, IEthAddressAccessor? accessor = null, bool enabled = true, AclMode mode = AclMode.Allowlist, params AclEntry[] entries)
+{
+    var options = Options.Create(new AclOptions
+    {
+        Enabled = enabled,
+        Mode = mode,
+        Entries = entries.ToList()
+    });
+    return new AclKeyValueStore(inner, options, accessor ?? new AsyncLocalEthAddressAccessor());
+}
+
 static string MakeKeyHex() => Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+
+const string AllowedAddress = "0x1111111111111111111111111111111111111111";
+const string OtherAddress = "0x2222222222222222222222222222222222222222";
+const string BlockedAddress = "0x3333333333333333333333333333333333333333";
 
 static async Task EncryptingKeyValueStorePutStoresEncryptedValueAsync()
 {
@@ -613,6 +639,164 @@ static Task EncryptingKeyValueStoreStartupFailsWhenEnabledWithNoKeyAsync()
     return Task.CompletedTask;
 }
 
+static async Task AclAllowlistReadAddressCanGetAsync()
+{
+    var inner = new CountingKeyValueStore();
+    await inner.PutAsync("shared:key", Encoding.UTF8.GetBytes("value"));
+    var accessor = new AsyncLocalEthAddressAccessor { CurrentAddress = AllowedAddress };
+    var store = CreateAclStore(inner, accessor, true, AclMode.Allowlist,
+        new AclEntry { EthAddress = AllowedAddress, Permission = AclPermission.Read });
+
+    var value = await store.GetAsync("shared:key");
+
+    AssertEqual("value", Encoding.UTF8.GetString(value!));
+}
+
+static async Task AclAllowlistWriteAddressCanPutAndDeleteAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var accessor = new AsyncLocalEthAddressAccessor { CurrentAddress = AllowedAddress };
+    var store = CreateAclStore(inner, accessor, true, AclMode.Allowlist,
+        new AclEntry { EthAddress = AllowedAddress, Permission = AclPermission.Write });
+
+    await store.PutAsync("shared:key", Encoding.UTF8.GetBytes("value"));
+    Assert(await store.DeleteAsync("shared:key"), "Write permission should allow delete.");
+}
+
+static async Task AclAllowlistUnlistedAddressIsDeniedOnGetAsync()
+{
+    var inner = new CountingKeyValueStore();
+    await inner.PutAsync("shared:key", Encoding.UTF8.GetBytes("value"));
+    var accessor = new AsyncLocalEthAddressAccessor { CurrentAddress = OtherAddress };
+    var store = CreateAclStore(inner, accessor, true, AclMode.Allowlist,
+        new AclEntry { EthAddress = AllowedAddress, Permission = AclPermission.Read });
+
+    await AssertAccessDeniedAsync(
+        async () => _ = await store.GetAsync("shared:key"),
+        $"Access denied: address {EthereumAddress.Normalize(OtherAddress)} does not have read permission.");
+}
+
+static async Task AclAllowlistUnlistedAddressIsDeniedOnPutAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var accessor = new AsyncLocalEthAddressAccessor { CurrentAddress = OtherAddress };
+    var store = CreateAclStore(inner, accessor, true, AclMode.Allowlist,
+        new AclEntry { EthAddress = AllowedAddress, Permission = AclPermission.Write });
+
+    await AssertAccessDeniedAsync(
+        () => store.PutAsync("shared:key", Encoding.UTF8.GetBytes("value")),
+        $"Access denied: address {EthereumAddress.Normalize(OtherAddress)} does not have write permission.");
+}
+
+static async Task AclAllowlistAdminGrantsReadAndWriteAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var accessor = new AsyncLocalEthAddressAccessor { CurrentAddress = AllowedAddress };
+    var store = CreateAclStore(inner, accessor, true, AclMode.Allowlist,
+        new AclEntry { EthAddress = AllowedAddress, Permission = AclPermission.Admin });
+
+    await store.PutAsync("shared:key", Encoding.UTF8.GetBytes("value"));
+    var value = await store.GetAsync("shared:key");
+    AssertEqual("value", Encoding.UTF8.GetString(value!));
+    Assert(await store.DeleteAsync("shared:key"), "Admin permission should allow delete.");
+}
+
+static async Task AclDenylistBlockedAddressIsDeniedAndNonBlockedAddressIsAllowedAsync()
+{
+    var inner = new CountingKeyValueStore();
+    await inner.PutAsync("shared:key", Encoding.UTF8.GetBytes("value"));
+    var accessor = new AsyncLocalEthAddressAccessor { CurrentAddress = BlockedAddress };
+    var store = CreateAclStore(inner, accessor, true, AclMode.Denylist,
+        new AclEntry { EthAddress = BlockedAddress, Permission = AclPermission.Admin });
+
+    await AssertAccessDeniedAsync(
+        async () => _ = await store.GetAsync("shared:key"),
+        $"Access denied: address {EthereumAddress.Normalize(BlockedAddress)} does not have read permission.");
+
+    accessor.CurrentAddress = AllowedAddress;
+    var value = await store.GetAsync("shared:key");
+    AssertEqual("value", Encoding.UTF8.GetString(value!));
+}
+
+static async Task AclDisabledPassesAllOperationsThroughAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var store = CreateAclStore(inner, enabled: false);
+
+    await store.PutAsync("open:key", Encoding.UTF8.GetBytes("value"));
+    AssertEqual("value", Encoding.UTF8.GetString((await store.GetAsync("open:key"))!));
+    Assert(await store.SetTtlAsync("open:key", TimeSpan.FromMinutes(1)), "Disabled ACL should not block TTL updates.");
+    Assert(await store.DeleteAsync("open:key"), "Disabled ACL should not block deletes.");
+}
+
+static Task AclStartupFailsWhenEnabledWithEmptyEntriesAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var options = Options.Create(new AclOptions { Enabled = true, Mode = AclMode.Allowlist, Entries = [] });
+
+    var threw = false;
+    try
+    {
+        _ = new AclKeyValueStore(inner, options, new AsyncLocalEthAddressAccessor());
+    }
+    catch (InvalidOperationException ex) when (ex.Message.Contains("SWARM_KEYDB_ACL_ENTRIES", StringComparison.Ordinal))
+    {
+        threw = true;
+    }
+
+    Assert(threw, "Constructor must throw InvalidOperationException when ACL is enabled but no entries are configured.");
+    return Task.CompletedTask;
+}
+
+static async Task ServiceCollectionPlacesAclBetweenSwarmAndEncryptionAsync()
+{
+    var services = new ServiceCollection();
+    services.AddOptions();
+    services.AddSingleton<IOptions<CacheOptions>>(Options.Create(new CacheOptions { Enabled = true, MaxEntries = 8 }));
+    services.AddSingleton<IOptions<CompressionOptions>>(Options.Create(new CompressionOptions { Enabled = true, MinSizeBytes = 0 }));
+    services.AddSingleton<IOptions<EncryptionOptions>>(Options.Create(new EncryptionOptions { Enabled = true, KeyHex = MakeKeyHex() }));
+    services.AddSingleton<IOptions<AclOptions>>(Options.Create(new AclOptions
+    {
+        Enabled = true,
+        Mode = AclMode.Allowlist,
+        Entries = [new AclEntry { EthAddress = AllowedAddress, Permission = AclPermission.Admin }]
+    }));
+    services.AddSingleton<IEthAddressAccessor>(new AsyncLocalEthAddressAccessor { CurrentAddress = AllowedAddress });
+    services.AddSingleton<Microsoft.Extensions.Caching.Memory.IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
+    services.AddSingleton<Microsoft.Extensions.Logging.ILogger<CachingKeyValueStore>>(NullLogger<CachingKeyValueStore>.Instance);
+    services.AddSingleton<Microsoft.Extensions.Logging.ILogger<CompressingKeyValueStore>>(NullLogger<CompressingKeyValueStore>.Instance);
+    services.AddSingleton<Microsoft.Extensions.Logging.ILogger<EncryptingKeyValueStore>>(NullLogger<EncryptingKeyValueStore>.Instance);
+    services.AddSwarmKeyDbStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+
+    using var provider = services.BuildServiceProvider();
+    var store = provider.GetRequiredService<IKeyValueStore>();
+
+    AssertEqual(typeof(CachingKeyValueStore), store.GetType());
+    AssertEqual(typeof(CompressingKeyValueStore), GetInnerStore(store).GetType());
+    AssertEqual(typeof(EncryptingKeyValueStore), GetInnerStore(GetInnerStore(store)).GetType());
+    AssertEqual(typeof(AclKeyValueStore), GetInnerStore(GetInnerStore(GetInnerStore(store))).GetType());
+    AssertEqual(typeof(SwarmKeyValueStore), GetInnerStore(GetInnerStore(GetInnerStore(GetInnerStore(store)))).GetType());
+
+    await store.PutAsync("pipeline:key", Encoding.UTF8.GetBytes("value"));
+    AssertEqual("value", Encoding.UTF8.GetString((await store.GetAsync("pipeline:key"))!));
+}
+
+static async Task RedisProtocolReturnsAccessDeniedErrorForUnauthorizedAddressAsync()
+{
+    var accessor = new AsyncLocalEthAddressAccessor();
+    var store = CreateAclStore(new CountingKeyValueStore(), accessor, true, AclMode.Allowlist,
+        new AclEntry { EthAddress = AllowedAddress, Permission = AclPermission.Read });
+    var processor = new RedisCommandProcessor(store, accessor);
+
+    var response = await ExecuteAsync(processor,
+        RespCommand("AUTHADDR", OtherAddress) +
+        RespCommand("GET", "shared:key"));
+
+    AssertEqual(
+        $"+OK\r\n-ERR Access denied: address {EthereumAddress.Normalize(OtherAddress)} does not have read permission.\r\n",
+        response);
+}
+
 static async Task<string> ExecuteAsync(RedisCommandProcessor processor, string commands)
 {
     await using var input = new MemoryStream(Encoding.UTF8.GetBytes(commands));
@@ -632,6 +816,20 @@ static string RespCommand(params string[] parts)
     }
 
     return builder.ToString();
+}
+
+static async Task AssertAccessDeniedAsync(Func<Task> action, string expectedMessage)
+{
+    try
+    {
+        await action();
+        throw new InvalidOperationException("Expected AccessDeniedException to be thrown.");
+    }
+    catch (AccessDeniedException ex)
+    {
+        AssertEqual(expectedMessage, ex.Message);
+        AssertEqual(403, ex.StatusCode);
+    }
 }
 
 static void Assert(bool condition, string message)
@@ -682,6 +880,13 @@ static async Task<T> WaitUntilValueAsync<T>(Func<Task<T>> action, Func<T, bool> 
     }
 
     return lastValue;
+}
+
+static IKeyValueStore GetInnerStore(object store)
+{
+    var field = store.GetType().GetField("_inner", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+    Assert(field is not null, $"Expected {store.GetType().Name} to expose an _inner field.");
+    return (IKeyValueStore)field!.GetValue(store)!;
 }
 
 internal sealed record Settings(bool Enabled, int Count);
