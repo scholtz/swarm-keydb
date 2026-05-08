@@ -539,6 +539,8 @@ internal sealed class CliRuntime
             ?? throw new InvalidOperationException("Could not determine configuration directory.");
         var indexPath = Path.Combine(configDir, "index.json");
 
+        // `sync status|force --key <db-key>` reuses `--key` for the logical database key,
+        // so do not also treat that option as an encryption key file path for those commands.
         var keyPath = parsed.Command is not null && parsed.Command.Equals("sync", StringComparison.OrdinalIgnoreCase)
             ? null
             : parsed.TryGetOptionValue("--key");

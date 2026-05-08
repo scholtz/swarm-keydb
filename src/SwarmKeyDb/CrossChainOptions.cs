@@ -7,6 +7,7 @@ public sealed class CrossChainOptions
     public List<ChainAdapterOptions> Chains { get; set; } = [];
     public int MaxRetryAttempts { get; set; } = 5;
     public int RetryBaseDelaySeconds { get; set; } = 5;
+    public int MaxRetryDelaySeconds { get; set; } = 300;
     public int ReconcileIntervalSeconds { get; set; } = 5;
 }
 

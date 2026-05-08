@@ -593,6 +593,7 @@ CrossChainOptions GetCrossChainOptions()
         Enabled = GetBoolFromMany(defaultValue: false, "SWARM_KEYDB_CROSS_CHAIN_ENABLED", "CrossChain:Enabled"),
         MaxRetryAttempts = GetNullableIntFromMany("SWARM_KEYDB_CROSS_CHAIN_MAX_RETRIES", "CrossChain:MaxRetryAttempts") ?? 5,
         RetryBaseDelaySeconds = GetNullableIntFromMany("SWARM_KEYDB_CROSS_CHAIN_RETRY_BASE_SECONDS", "CrossChain:RetryBaseDelaySeconds") ?? 5,
+        MaxRetryDelaySeconds = GetNullableIntFromMany("SWARM_KEYDB_CROSS_CHAIN_MAX_RETRY_DELAY_SECONDS", "CrossChain:MaxRetryDelaySeconds") ?? 300,
         ReconcileIntervalSeconds = GetNullableIntFromMany("SWARM_KEYDB_CROSS_CHAIN_RECONCILE_SECONDS", "CrossChain:ReconcileIntervalSeconds") ?? 5,
         DefaultChainIds = ParseIntArray(GetFirstSetting("SWARM_KEYDB_CROSS_CHAIN_DEFAULT_CHAIN_IDS", "CrossChain:DefaultChainIds")).ToList(),
         Chains = ParseCrossChainAdapters(GetFirstSetting("SWARM_KEYDB_CROSS_CHAIN_CHAINS", "CrossChain:Chains")).ToList()
@@ -614,7 +615,12 @@ IReadOnlyList<int> ParseIntArray(string? json)
         if (document.RootElement.ValueKind == JsonValueKind.Array)
         {
             return document.RootElement.EnumerateArray()
-                .Select(static element => element.ValueKind == JsonValueKind.Number ? element.GetInt32() : int.Parse(element.GetString()!, System.Globalization.CultureInfo.InvariantCulture))
+                .Select(static element => element.ValueKind switch
+                {
+                    JsonValueKind.Number => element.GetInt32(),
+                    JsonValueKind.String when int.TryParse(element.GetString(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var value) => value,
+                    _ => throw new InvalidOperationException("Cross-chain default chain ids must be numbers or numeric strings.")
+                })
                 .ToArray();
         }
     }

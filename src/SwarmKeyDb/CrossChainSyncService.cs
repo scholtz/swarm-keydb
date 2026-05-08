@@ -22,6 +22,11 @@ public sealed class CrossChainSyncService : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(adapters);
         ArgumentNullException.ThrowIfNull(stateStore);
         ArgumentNullException.ThrowIfNull(options);
+        if (options.MaxRetryAttempts < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "MaxRetryAttempts must be at least 1.");
+        }
+
         _adapters = adapters.ToDictionary(static adapter => adapter.ChainId);
         _stateStore = stateStore;
         _options = options;
@@ -224,8 +229,9 @@ public sealed class CrossChainSyncService : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            var delay = TimeSpan.FromSeconds(Math.Max(1, _options.RetryBaseDelaySeconds) * Math.Pow(2, Math.Max(0, chain.Attempts - 1)));
-            var canRetry = chain.Attempts < Math.Max(1, _options.MaxRetryAttempts);
+            var seconds = Math.Max(1, _options.RetryBaseDelaySeconds) * Math.Pow(2, Math.Max(0, chain.Attempts - 1));
+            var delay = TimeSpan.FromSeconds(Math.Min(seconds, Math.Max(1, _options.MaxRetryDelaySeconds)));
+            var canRetry = chain.Attempts < _options.MaxRetryAttempts;
             chain.State = canRetry ? SyncState.Pending : SyncState.Failed;
             chain.LastError = $"Failed to sync to chain {chain.ChainId} ({chain.ChainName}): {ex.Message}";
             chain.NextRetryUtc = canRetry ? DateTimeOffset.UtcNow.Add(delay) : null;

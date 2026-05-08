@@ -367,7 +367,23 @@ public sealed class MonitoringHttpServer : IDisposable
                                                 payload.chains.forEach(chain => {
                                                   const row = document.createElement('tr');
                                                   const healthClass = chain.health === 'green' ? 'ok' : chain.health === 'yellow' ? 'warn' : 'bad';
-                                                  row.innerHTML = `<td>${chain.chainName} (${chain.chainId})</td><td>${chain.pendingCount}</td><td>${chain.syncedCount}</td><td>${chain.failedCount}</td><td><span class="${healthClass}">${chain.health}</span></td>`;
+                                                  const cells = [
+                                                    `${chain.chainName} (${chain.chainId})`,
+                                                    String(chain.pendingCount),
+                                                    String(chain.syncedCount),
+                                                    String(chain.failedCount)
+                                                  ];
+                                                  cells.forEach(value => {
+                                                    const cell = document.createElement('td');
+                                                    cell.textContent = value;
+                                                    row.appendChild(cell);
+                                                  });
+                                                  const healthCell = document.createElement('td');
+                                                  const badge = document.createElement('span');
+                                                  badge.className = healthClass;
+                                                  badge.textContent = chain.health;
+                                                  healthCell.appendChild(badge);
+                                                  row.appendChild(healthCell);
                                                   syncSummaryEl.appendChild(row);
                                                 });
                                                 if (!payload.chains.length) {

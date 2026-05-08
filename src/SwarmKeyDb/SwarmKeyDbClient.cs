@@ -10,15 +10,26 @@ public sealed class SwarmKeyDbClient
     private readonly IKeyValueStore _store;
     private readonly CrossChainSyncService? _crossChainSyncService;
     private readonly ILogger<SwarmKeyDbClient> _logger;
+    private readonly string _crossChainKeyPrefix;
 
     public SwarmKeyDbClient(
         IKeyValueStore store,
         CrossChainSyncService? crossChainSyncService = null,
         ILogger<SwarmKeyDbClient>? logger = null)
+        : this(store, crossChainSyncService, logger, string.Empty)
+    {
+    }
+
+    private SwarmKeyDbClient(
+        IKeyValueStore store,
+        CrossChainSyncService? crossChainSyncService,
+        ILogger<SwarmKeyDbClient>? logger,
+        string crossChainKeyPrefix)
     {
         _store = store;
         _crossChainSyncService = crossChainSyncService;
         _logger = logger ?? NullLogger<SwarmKeyDbClient>.Instance;
+        _crossChainKeyPrefix = crossChainKeyPrefix;
     }
 
     public Task PutBytesAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default) =>
@@ -33,7 +44,7 @@ public sealed class SwarmKeyDbClient
         await _store.PutAsync(key, value, cancellationToken).ConfigureAwait(false);
         if (_crossChainSyncService is not null)
         {
-            await _crossChainSyncService.PutAsync(key, value, chainIds, cancellationToken).ConfigureAwait(false);
+            await _crossChainSyncService.PutAsync(GetCrossChainKey(key), value, chainIds, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -97,7 +108,7 @@ public sealed class SwarmKeyDbClient
         await _store.PutAsync(key, bytes, cancellationToken).ConfigureAwait(false);
         if (_crossChainSyncService is not null)
         {
-            await _crossChainSyncService.PutAsync(key, bytes, chainIds, cancellationToken).ConfigureAwait(false);
+            await _crossChainSyncService.PutAsync(GetCrossChainKey(key), bytes, chainIds, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -123,7 +134,7 @@ public sealed class SwarmKeyDbClient
         await _store.PutAsync(key, bytes, cancellationToken).ConfigureAwait(false);
         if (_crossChainSyncService is not null)
         {
-            await _crossChainSyncService.PutAsync(key, bytes, chainIds, cancellationToken).ConfigureAwait(false);
+            await _crossChainSyncService.PutAsync(GetCrossChainKey(key), bytes, chainIds, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -141,17 +152,17 @@ public sealed class SwarmKeyDbClient
         var deleted = await _store.DeleteAsync(key, cancellationToken).ConfigureAwait(false);
         if (deleted && _crossChainSyncService is not null)
         {
-            await _crossChainSyncService.DeleteAsync(key, chainIds, cancellationToken).ConfigureAwait(false);
+            await _crossChainSyncService.DeleteAsync(GetCrossChainKey(key), chainIds, cancellationToken).ConfigureAwait(false);
         }
 
         return deleted;
     }
 
     public Task<CrossChainSyncStatus?> GetSyncStatusAsync(string key, CancellationToken cancellationToken = default) =>
-        _crossChainSyncService?.GetStatusAsync(key, cancellationToken) ?? Task.FromResult<CrossChainSyncStatus?>(null);
+        _crossChainSyncService?.GetStatusAsync(GetCrossChainKey(key), cancellationToken) ?? Task.FromResult<CrossChainSyncStatus?>(null);
 
     public Task<bool> ForceSyncAsync(string key, CancellationToken cancellationToken = default) =>
-        _crossChainSyncService?.ForceSyncAsync(key, cancellationToken) ?? Task.FromResult(false);
+        _crossChainSyncService?.ForceSyncAsync(GetCrossChainKey(key), cancellationToken) ?? Task.FromResult(false);
 
     public async Task<IReadOnlyList<byte[]?>> BatchGetAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default)
     {
@@ -203,7 +214,7 @@ public sealed class SwarmKeyDbClient
     /// </code>
     /// </example>
     public SwarmKeyDbClient WithNamespace(string prefix) =>
-        new SwarmKeyDbClient(new NamespacedKeyValueStore(_store, prefix), _crossChainSyncService);
+        new SwarmKeyDbClient(new NamespacedKeyValueStore(_store, prefix), _crossChainSyncService, _logger, _crossChainKeyPrefix + prefix);
 
     /// <summary>
     /// Deletes all keys that start with <paramref name="prefix"/>.
@@ -282,4 +293,6 @@ public sealed class SwarmKeyDbClient
     {
         _logger.LogError(exception, "Fire-and-forget operation '{OperationName}' failed.", operationName);
     }
+
+    private string GetCrossChainKey(string key) => _crossChainKeyPrefix + key;
 }
