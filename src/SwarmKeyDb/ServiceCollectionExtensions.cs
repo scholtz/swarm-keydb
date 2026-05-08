@@ -12,7 +12,10 @@ public static class ServiceCollectionExtensions
     {
         services.AddSingleton<IKeyValueStore>(sp =>
         {
-            IKeyValueStore store = new SwarmKeyValueStore(swarmClient, index);
+            IKeyValueStore store = new SwarmKeyValueStore(
+                swarmClient,
+                index,
+                sp.GetService<IOptions<IntegrityOptions>>()?.Value);
 
             if (sp.GetRequiredService<IOptions<AclOptions>>().Value.Enabled)
             {

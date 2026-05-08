@@ -14,6 +14,7 @@
 | `SWARM_KEYDB_COMPRESSION_ENABLED` | `false` | Enables transparent compression. |
 | `SWARM_KEYDB_COMPRESSION_ALGORITHM` | `GZip` | Compression algorithm. |
 | `SWARM_KEYDB_COMPRESSION_MIN_SIZE_BYTES` | `64` | Minimum payload size for compression. |
+| `SWARM_KEYDB_INTEGRITY_ENABLED` | `true` | Enables SHA-256 integrity verification envelopes for stored values. |
 | `SWARM_KEYDB_ENCRYPTION_ENABLED` | `false` | Enables AES-256-GCM encryption. |
 | `SWARM_KEYDB_ENCRYPTION_ALGORITHM` | `AesGcm256` | Encryption algorithm. |
 | `SWARM_KEYDB_ENCRYPTION_KEY` | unset | 32-byte hex key for encryption. |

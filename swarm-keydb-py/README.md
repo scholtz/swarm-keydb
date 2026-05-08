@@ -24,6 +24,10 @@ print(db.get("hello"))
 
 Async equivalents are available in `AsyncSwarmKeyDb`.
 
+## Data integrity
+
+The SwarmKeyDb server verifies a SHA-256 integrity envelope on every read by default. If stored Swarm data has been corrupted or tampered with, `get()`/`batch_get()` raise the underlying Redis error from the server, so callers should treat failed reads as integrity-sensitive and handle them explicitly.
+
 ## Examples
 
 - `examples/user_profile.py`
