@@ -310,6 +310,7 @@ static async Task CliSupportsDataCommandsAsync()
 
     var missingResult = await RunCliAsync(new[] { "get", "user:alice" }, options);
     AssertEqual(1, missingResult.ExitCode);
+    Assert(missingResult.Stderr.Contains("Key not found: user:alice", StringComparison.Ordinal), "Expected explicit missing key error message.");
 }
 
 static async Task CliConfigSetAndGetPersistsSettingsAsync()
@@ -355,7 +356,7 @@ static async Task CliUsesEnvironmentVariableOverridesAsync()
     {
         EnvironmentFactory = static () => new EnvironmentSnapshot
         {
-            Home = "/tmp/swarm-keydb-cli-env",
+            Home = Path.Combine(Path.GetTempPath(), "swarm-keydb-cli-env"),
             BeeUrl = "http://127.0.0.1:1/",
             BatchId = "env-batch"
         }

@@ -234,14 +234,20 @@ internal sealed class CliRuntime
                 await WriteOutputAsync(context.Settings.Output,
                     new { key, found = value is not null, value = utf8Value, valueBase64 = value is null ? null : Convert.ToBase64String(value) },
                     value is null ? string.Empty : utf8Value ?? string.Empty).ConfigureAwait(false);
-                return value is null ? 1 : 0;
+                if (value is null)
+                {
+                    await _stderr.WriteLineAsync($"Key not found: {key}").ConfigureAwait(false);
+                    return 1;
+                }
+
+                return 0;
             }
             case "delete":
             {
                 var key = parsed.Positionals.FirstOrDefault() ?? throw new CliUsageException("delete requires <key>.");
                 var deleted = await context.Client.DeleteAsync(key, cancellationToken).ConfigureAwait(false);
                 await WriteOutputAsync(context.Settings.Output, new { key, deleted }, deleted ? "1" : "0").ConfigureAwait(false);
-                return deleted ? 0 : 1;
+                return 0;
             }
             case "list":
             {
