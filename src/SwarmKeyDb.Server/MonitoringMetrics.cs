@@ -225,9 +225,16 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
                 return 0;
             }
 
-            var index = (int)Math.Ceiling(sortedValues.Count * percentile) - 1;
-            index = Math.Clamp(index, 0, sortedValues.Count - 1);
-            return sortedValues[index];
+            var position = percentile * (sortedValues.Count - 1);
+            var lowerIndex = (int)Math.Floor(position);
+            var upperIndex = (int)Math.Ceiling(position);
+            if (lowerIndex == upperIndex)
+            {
+                return sortedValues[lowerIndex];
+            }
+
+            var weight = position - lowerIndex;
+            return sortedValues[lowerIndex] + (sortedValues[upperIndex] - sortedValues[lowerIndex]) * weight;
         }
     }
 

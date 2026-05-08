@@ -17,10 +17,6 @@ var metricsEnabled = GetBool("METRICS_ENABLED", true);
 var metricsPort = GetInt("METRICS_PORT", 9090);
 var dashboardEnabled = GetBool("DASHBOARD_ENABLED", true);
 var dashboardPort = GetInt("DASHBOARD_PORT", 8080);
-if (dashboardEnabled && !metricsEnabled)
-{
-    metricsEnabled = true;
-}
 
 var logLevel = GetLogLevel("LOG_LEVEL", GetLogLevel("SWARM_KEYDB_LOG_LEVEL", LogLevel.Information));
 var environment = GetString("DOTNET_ENVIRONMENT", GetString("ASPNETCORE_ENVIRONMENT", "Production"));
@@ -59,8 +55,8 @@ var compressionOptions = new CompressionOptions
 {
     Enabled = GetBool("SWARM_KEYDB_COMPRESSION_ENABLED", false),
     Algorithm = Enum.TryParse<CompressionAlgorithm>(
-        GetSetting("SWARM_KEYDB_COMPRESSION_ALGORITHM"), ignoreCase: true, out var algo)
-        ? algo
+        GetSetting("SWARM_KEYDB_COMPRESSION_ALGORITHM"), ignoreCase: true, out var algorithm)
+        ? algorithm
         : CompressionAlgorithm.GZip,
     MinSizeBytes = GetInt("SWARM_KEYDB_COMPRESSION_MIN_SIZE_BYTES", 64)
 };
@@ -68,8 +64,8 @@ var encryptionOptions = new EncryptionOptions
 {
     Enabled = GetBool("SWARM_KEYDB_ENCRYPTION_ENABLED", false),
     Algorithm = Enum.TryParse<EncryptionAlgorithm>(
-        GetSetting("SWARM_KEYDB_ENCRYPTION_ALGORITHM"), ignoreCase: true, out var encAlgo)
-        ? encAlgo
+        GetSetting("SWARM_KEYDB_ENCRYPTION_ALGORITHM"), ignoreCase: true, out var encryptionAlgorithm)
+        ? encryptionAlgorithm
         : EncryptionAlgorithm.AesGcm256,
     KeyHex = GetSetting("SWARM_KEYDB_ENCRYPTION_KEY"),
     EthPrivateKeyHex = GetSetting("SWARM_KEYDB_ENCRYPTION_ETH_KEY")
@@ -144,7 +140,7 @@ if (dashboardEnabled)
         dashboardPort,
         monitoringMetrics,
         readinessProbe,
-        metricsEnabled: true,
+        metricsEnabled: metricsEnabled,
         dashboardEnabled: true,
         provider.GetRequiredService<ILogger<MonitoringHttpServer>>());
     monitoringServers.Add(dashboardServer);
@@ -282,9 +278,5 @@ void FlattenJson(JsonElement element, Dictionary<string, string> destination, st
         }
 
         destination[key] = property.Value.ToString();
-        if (string.IsNullOrEmpty(prefix))
-        {
-            destination[property.Name] = property.Value.ToString();
-        }
     }
 }

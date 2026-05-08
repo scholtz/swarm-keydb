@@ -176,6 +176,8 @@ Configuration (environment variables override `appsettings.json`):
 - `DASHBOARD_PORT` (default `8080`)
 - `LOG_LEVEL` (`Debug`, `Information`, `Warning`, `Error`; default `Information`)
 
+Monitoring endpoints bind to the same host as Redis (`SWARM_KEYDB_BIND`, default `0.0.0.0`). For local-only exposure, set `SWARM_KEYDB_BIND=127.0.0.1`.
+
 Quick check:
 
 ```bash

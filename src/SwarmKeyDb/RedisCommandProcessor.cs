@@ -84,7 +84,9 @@ public sealed class RedisCommandProcessor : IDisposable
     {
         var correlationId = Guid.NewGuid().ToString("N");
         var stopwatch = Stopwatch.StartNew();
-        var command = GetCommand(request);
+        var command = request.Type == RespType.Array && request.Items is { Count: > 0 }
+            ? request.Items[0].AsString().ToUpperInvariant()
+            : "INVALID";
         RespValue response;
 
         using var scope = _logger.BeginScope(new Dictionary<string, object>
@@ -664,11 +666,6 @@ public sealed class RedisCommandProcessor : IDisposable
         var errorType = succeeded ? null : ClassifyError(response.Text);
         _observer?.OnCommandCompleted(command, operation, succeeded, errorType, elapsed, correlationId);
     }
-
-    private static string GetCommand(RespValue request) =>
-        request.Type == RespType.Array && request.Items is { Count: > 0 }
-            ? request.Items[0].AsString().ToUpperInvariant()
-            : "INVALID";
 
     private static string MapCommandToOperation(string command) => command switch
     {
