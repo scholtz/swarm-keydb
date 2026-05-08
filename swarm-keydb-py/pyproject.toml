@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swarm-keydb"
+version = "0.1.0"
+description = "Python SDK for SwarmKeyDb over Redis protocol"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["redis>=5.0.0,<6.0.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["swarm_keydb*"]

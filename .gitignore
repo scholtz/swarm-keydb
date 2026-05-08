@@ -6,3 +6,7 @@ obj/
 TestResults/
 .swarm-keydb/
 data/
+node_modules/
+__pycache__/
+*.egg-info/
+build/

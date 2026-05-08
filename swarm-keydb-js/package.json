@@ -1,0 +1,16 @@
+{
+  "name": "swarm-keydb-js",
+  "version": "0.1.0",
+  "description": "JavaScript/TypeScript SDK for SwarmKeyDb over Redis protocol",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": ["swarm", "redis", "key-value", "swarm-keydb"],
+  "license": "MIT",
+  "dependencies": {
+    "redis": "^4.7.0"
+  }
+}

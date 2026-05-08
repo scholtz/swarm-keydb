@@ -22,7 +22,7 @@
 - [ ] Enable privacy-preserving queries without revealing data.
 
 ## Developer Experience
-- [ ] Create comprehensive SDKs for JavaScript, Python, and Go.
+- [x] Create comprehensive SDKs for JavaScript, Python, and Go. (100%: `swarm-keydb-js`, `swarm-keydb-py`, and `swarm-keydb-go` added with core API, examples, and unit tests)
 - [ ] Provide detailed documentation with tutorials and examples. (35%: docs structure, development guide, deployment guide, and configuration reference added)
 - [x] Add CLI tools for database management and debugging. (100%)
 - [ ] Implement monitoring dashboard with metrics and logs.

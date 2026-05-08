@@ -31,6 +31,20 @@ dotnet build SwarmKeyDb.slnx
 dotnet run --project tests/SwarmKeyDb.Tests/SwarmKeyDb.Tests.csproj
 ```
 
+## Multi-language SDKs
+
+- `swarm-keydb-js/` - JavaScript/TypeScript SDK (`get`, `put`, `delete`, `list`, `batchGet`, `batchPut`, `setWithTTL`)
+- `swarm-keydb-py/` - Python SDK with sync and async clients
+- `swarm-keydb-go/` - Go SDK with context-aware API and JSON helpers
+
+SDK test commands:
+
+```bash
+(cd swarm-keydb-js && npm install && npm test)
+(cd swarm-keydb-py && pip install . && python -m unittest discover -s tests -v)
+(cd swarm-keydb-go && go test ./...)
+```
+
 ## CLI (`skdb`)
 
 Install as a .NET tool:
