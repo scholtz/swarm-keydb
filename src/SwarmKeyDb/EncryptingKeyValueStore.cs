@@ -118,7 +118,14 @@ public sealed class EncryptingKeyValueStore : IKeyValueStore
     /// </summary>
     public static byte[] DeriveKeyFromEthPrivateKey(string ethPrivateKeyHex)
     {
-        var privKeyBytes = Convert.FromHexString(ethPrivateKeyHex.TrimStart('0', ' '));
+        // Strip optional '0x' prefix; do not strip leading zero digits as they are significant.
+        var hex = ethPrivateKeyHex.Trim();
+        if (hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            hex = hex[2..];
+        }
+
+        var privKeyBytes = Convert.FromHexString(hex);
 
         // Ensure exactly 32 bytes (zero-pad on the left if the hex had leading zeros stripped).
         if (privKeyBytes.Length > 32)
@@ -129,8 +136,9 @@ public sealed class EncryptingKeyValueStore : IKeyValueStore
         var keyMaterial = new byte[32];
         privKeyBytes.CopyTo(keyMaterial, 32 - privKeyBytes.Length);
 
+        var salt = Encoding.UTF8.GetBytes("SwarmKeyDb-v1-salt");
         var info = Encoding.UTF8.GetBytes("SwarmKeyDb-v1-AES256GCM");
-        return HKDF.DeriveKey(HashAlgorithmName.SHA256, keyMaterial, 32, salt: [], info: info);
+        return HKDF.DeriveKey(HashAlgorithmName.SHA256, keyMaterial, 32, salt: salt, info: info);
     }
 
     private static byte[] ResolveKey(EncryptionOptions options)

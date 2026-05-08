@@ -53,7 +53,9 @@ services.AddSingleton<IKeyValueStore>(sp =>
     IKeyValueStore store = new SwarmKeyValueStore(swarmClient, index);
     if (encryptionOptions.Enabled)
     {
-        store = new EncryptingKeyValueStore(store, sp.GetRequiredService<IOptions<EncryptionOptions>>(), sp.GetRequiredService<ILogger<EncryptingKeyValueStore>>());
+        var encOpts = sp.GetRequiredService<IOptions<EncryptionOptions>>();
+        var encLog = sp.GetRequiredService<ILogger<EncryptingKeyValueStore>>();
+        store = new EncryptingKeyValueStore(store, encOpts, encLog);
     }
     store = new CompressingKeyValueStore(store, sp.GetRequiredService<IOptions<CompressionOptions>>(), sp.GetRequiredService<ILogger<CompressingKeyValueStore>>());
     store = new CachingKeyValueStore(store, sp.GetRequiredService<IMemoryCache>(), sp.GetRequiredService<IOptions<CacheOptions>>(), sp.GetRequiredService<ILogger<CachingKeyValueStore>>());
