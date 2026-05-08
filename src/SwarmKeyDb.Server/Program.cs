@@ -3,18 +3,50 @@ using System.Text.Json;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Console;
 using Microsoft.Extensions.Options;
 using SwarmKeyDb;
 using SwarmKeyDb.Server;
 
+var appSettings = LoadAppSettings();
 var port = GetInt("SWARM_KEYDB_PORT", 6379);
-var bind = IPAddress.Parse(Environment.GetEnvironmentVariable("SWARM_KEYDB_BIND") ?? "0.0.0.0");
-var dataDir = Environment.GetEnvironmentVariable("SWARM_KEYDB_DATA_DIR") ?? Path.Combine(AppContext.BaseDirectory, "data");
-var backend = Environment.GetEnvironmentVariable("SWARM_KEYDB_BACKEND") ?? "local";
+var bind = IPAddress.Parse(GetString("SWARM_KEYDB_BIND", "0.0.0.0"));
+var dataDir = GetString("SWARM_KEYDB_DATA_DIR", Path.Combine(AppContext.BaseDirectory, "data"));
+var backend = GetString("SWARM_KEYDB_BACKEND", "local");
+var metricsEnabled = GetBool("METRICS_ENABLED", true);
+var metricsPort = GetInt("METRICS_PORT", 9090);
+var dashboardEnabled = GetBool("DASHBOARD_ENABLED", true);
+var dashboardPort = GetInt("DASHBOARD_PORT", 8080);
+if (dashboardEnabled && !metricsEnabled)
+{
+    metricsEnabled = true;
+}
+
+var logLevel = GetLogLevel("LOG_LEVEL", GetLogLevel("SWARM_KEYDB_LOG_LEVEL", LogLevel.Information));
+var environment = GetString("DOTNET_ENVIRONMENT", GetString("ASPNETCORE_ENVIRONMENT", "Production"));
+var useJsonLogging = GetBool("JSON_LOGS", !environment.Equals("Development", StringComparison.OrdinalIgnoreCase));
+
 var index = new FileKeyIndex(Path.Combine(dataDir, "index.json"));
-ISwarmClient swarmClient = backend.Equals("bee", StringComparison.OrdinalIgnoreCase)
-    ? new BeeSwarmClient(new Uri(Environment.GetEnvironmentVariable("BEE_URL") ?? "http://localhost:1633/"), RequireEnvironment("BEE_POSTAGE_BATCH_ID"))
-    : new FileSwarmClient(Path.Combine(dataDir, "objects"));
+ICacheStats? cacheStats = null;
+var monitoringMetrics = new MonitoringMetrics(() => cacheStats ?? NoOpCacheStats.Instance);
+IReadinessProbe readinessProbe;
+ISwarmClient swarmClient;
+if (backend.Equals("bee", StringComparison.OrdinalIgnoreCase))
+{
+    var beeUrl = new Uri(GetString("BEE_URL", "http://localhost:1633/"));
+    var batchId = RequireSetting("BEE_POSTAGE_BATCH_ID");
+    readinessProbe = new BeeReadinessProbe(beeUrl, batchId);
+    swarmClient = new BeeSwarmClient(beeUrl, batchId);
+}
+else
+{
+    readinessProbe = new AlwaysReadyProbe();
+    swarmClient = new FileSwarmClient(Path.Combine(dataDir, "objects"));
+}
+
+using var readinessProbeLifetime = readinessProbe as IDisposable;
+swarmClient = new InstrumentedSwarmClient(swarmClient, monitoringMetrics);
+
 var cacheOptions = new CacheOptions
 {
     Enabled = GetBool("SWARM_KEYDB_CACHE_ENABLED", true),
@@ -27,7 +59,7 @@ var compressionOptions = new CompressionOptions
 {
     Enabled = GetBool("SWARM_KEYDB_COMPRESSION_ENABLED", false),
     Algorithm = Enum.TryParse<CompressionAlgorithm>(
-        Environment.GetEnvironmentVariable("SWARM_KEYDB_COMPRESSION_ALGORITHM"), ignoreCase: true, out var algo)
+        GetSetting("SWARM_KEYDB_COMPRESSION_ALGORITHM"), ignoreCase: true, out var algo)
         ? algo
         : CompressionAlgorithm.GZip,
     MinSizeBytes = GetInt("SWARM_KEYDB_COMPRESSION_MIN_SIZE_BYTES", 64)
@@ -36,11 +68,11 @@ var encryptionOptions = new EncryptionOptions
 {
     Enabled = GetBool("SWARM_KEYDB_ENCRYPTION_ENABLED", false),
     Algorithm = Enum.TryParse<EncryptionAlgorithm>(
-        Environment.GetEnvironmentVariable("SWARM_KEYDB_ENCRYPTION_ALGORITHM"), ignoreCase: true, out var encAlgo)
+        GetSetting("SWARM_KEYDB_ENCRYPTION_ALGORITHM"), ignoreCase: true, out var encAlgo)
         ? encAlgo
         : EncryptionAlgorithm.AesGcm256,
-    KeyHex = Environment.GetEnvironmentVariable("SWARM_KEYDB_ENCRYPTION_KEY"),
-    EthPrivateKeyHex = Environment.GetEnvironmentVariable("SWARM_KEYDB_ENCRYPTION_ETH_KEY")
+    KeyHex = GetSetting("SWARM_KEYDB_ENCRYPTION_KEY"),
+    EthPrivateKeyHex = GetSetting("SWARM_KEYDB_ENCRYPTION_ETH_KEY")
 };
 var aclOptions = GetAclOptions();
 var asyncProcessingOptions = new AsyncProcessingOptions
@@ -51,7 +83,26 @@ var asyncProcessingOptions = new AsyncProcessingOptions
     BatchFlushIntervalMs = Math.Max(0, GetInt("SWARM_KEYDB_BATCH_FLUSH_INTERVAL_MS", 100))
 };
 var services = new ServiceCollection();
-services.AddLogging(builder => builder.AddSimpleConsole().SetMinimumLevel(GetLogLevel("SWARM_KEYDB_LOG_LEVEL", LogLevel.Information)));
+services.AddLogging(builder =>
+{
+    builder.SetMinimumLevel(logLevel);
+    if (useJsonLogging)
+    {
+        builder.AddJsonConsole(options =>
+        {
+            options.TimestampFormat = "O";
+            options.IncludeScopes = true;
+        });
+    }
+    else
+    {
+        builder.AddSimpleConsole(options =>
+        {
+            options.TimestampFormat = "O ";
+            options.IncludeScopes = true;
+        });
+    }
+});
 services.AddOptions();
 services.AddSingleton<IOptions<CacheOptions>>(Options.Create(cacheOptions));
 services.AddSingleton<IOptions<CompressionOptions>>(Options.Create(compressionOptions));
@@ -63,10 +114,19 @@ services.AddSingleton<IEthAddressAccessor, AsyncLocalEthAddressAccessor>();
 services.AddSwarmKeyDbStore(swarmClient, index);
 
 using var provider = services.BuildServiceProvider();
+cacheStats = provider.GetRequiredService<ICacheStats>();
 var processor = new RedisCommandProcessor(
     provider.GetRequiredService<IKeyValueStore>(),
-    provider.GetRequiredService<IEthAddressAccessor>());
-var server = new RedisServer(bind, port, processor);
+    provider.GetRequiredService<IEthAddressAccessor>(),
+    monitoringMetrics,
+    provider.GetRequiredService<ILogger<RedisCommandProcessor>>());
+var server = new RedisServer(
+    bind,
+    port,
+    processor,
+    monitoringMetrics.OnConnectionOpened,
+    monitoringMetrics.OnConnectionClosed,
+    provider.GetRequiredService<ILogger<RedisServer>>());
 
 using var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, eventArgs) =>
@@ -75,34 +135,74 @@ Console.CancelKeyPress += (_, eventArgs) =>
     cts.Cancel();
 };
 
+var monitoringServers = new List<MonitoringHttpServer>();
+var monitoringTasks = new List<Task>();
+if (dashboardEnabled)
+{
+    var dashboardServer = new MonitoringHttpServer(
+        bind,
+        dashboardPort,
+        monitoringMetrics,
+        readinessProbe,
+        metricsEnabled: true,
+        dashboardEnabled: true,
+        provider.GetRequiredService<ILogger<MonitoringHttpServer>>());
+    monitoringServers.Add(dashboardServer);
+    monitoringTasks.Add(dashboardServer.RunAsync(cts.Token));
+}
+
+if (metricsEnabled && (!dashboardEnabled || metricsPort != dashboardPort))
+{
+    var metricsServer = new MonitoringHttpServer(
+        bind,
+        metricsPort,
+        monitoringMetrics,
+        readinessProbe,
+        metricsEnabled: true,
+        dashboardEnabled: false,
+        provider.GetRequiredService<ILogger<MonitoringHttpServer>>());
+    monitoringServers.Add(metricsServer);
+    monitoringTasks.Add(metricsServer.RunAsync(cts.Token));
+}
+
 await server.RunAsync(cts.Token);
+await Task.WhenAll(monitoringTasks);
+foreach (var monitoringServer in monitoringServers)
+{
+    monitoringServer.Dispose();
+}
 
-static int GetInt(string name, int defaultValue) =>
-    int.TryParse(Environment.GetEnvironmentVariable(name), out var value) ? value : defaultValue;
+int GetInt(string name, int defaultValue) =>
+    int.TryParse(GetSetting(name), out var value) ? value : defaultValue;
 
-static int? GetNullableInt(string name) =>
-    int.TryParse(Environment.GetEnvironmentVariable(name), out var value) ? value : null;
+int? GetNullableInt(string name) =>
+    int.TryParse(GetSetting(name), out var value) ? value : null;
 
-static bool GetBool(string name, bool defaultValue) =>
-    bool.TryParse(Environment.GetEnvironmentVariable(name), out var value) ? value : defaultValue;
+bool GetBool(string name, bool defaultValue) =>
+    bool.TryParse(GetSetting(name), out var value) ? value : defaultValue;
 
-static LogLevel GetLogLevel(string name, LogLevel defaultValue) =>
-    Enum.TryParse<LogLevel>(Environment.GetEnvironmentVariable(name), ignoreCase: true, out var level) ? level : defaultValue;
+LogLevel GetLogLevel(string name, LogLevel defaultValue) =>
+    Enum.TryParse<LogLevel>(GetSetting(name), ignoreCase: true, out var level) ? level : defaultValue;
 
-static string RequireEnvironment(string name) =>
-    Environment.GetEnvironmentVariable(name) ?? throw new InvalidOperationException($"Environment variable {name} is required.");
+string GetString(string name, string defaultValue) => GetSetting(name) ?? defaultValue;
 
-static AclOptions GetAclOptions()
+string RequireSetting(string name) =>
+    GetSetting(name) ?? throw new InvalidOperationException($"Configuration value {name} is required.");
+
+string? GetSetting(string name) =>
+    Environment.GetEnvironmentVariable(name) ?? (appSettings.TryGetValue(name, out var value) ? value : null);
+
+AclOptions GetAclOptions()
 {
     var enabled = GetBool("SWARM_KEYDB_ACL_ENABLED", false);
-    var modeText = Environment.GetEnvironmentVariable("SWARM_KEYDB_ACL_MODE");
+    var modeText = GetSetting("SWARM_KEYDB_ACL_MODE");
     var mode = string.IsNullOrWhiteSpace(modeText)
         ? AclMode.Allowlist
         : Enum.TryParse<AclMode>(modeText, ignoreCase: true, out var parsedMode)
             ? parsedMode
             : throw new InvalidOperationException("SWARM_KEYDB_ACL_MODE must be 'allowlist' or 'denylist'.");
 
-    var entriesJson = Environment.GetEnvironmentVariable("SWARM_KEYDB_ACL_ENTRIES");
+    var entriesJson = GetSetting("SWARM_KEYDB_ACL_ENTRIES");
     if (string.IsNullOrWhiteSpace(entriesJson))
     {
         return new AclOptions
@@ -143,5 +243,48 @@ static AclOptions GetAclOptions()
             "ACL is enabled (SWARM_KEYDB_ACL_ENABLED=true) but SWARM_KEYDB_ACL_ENTRIES is not valid JSON. " +
             "Configure a JSON array of {\"address\":\"0x...\",\"permission\":\"read|write|admin\"} entries.",
             ex);
+    }
+}
+
+Dictionary<string, string> LoadAppSettings()
+{
+    var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    var path = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+    if (!File.Exists(path))
+    {
+        path = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
+        if (!File.Exists(path))
+        {
+            return settings;
+        }
+    }
+
+    using var stream = File.OpenRead(path);
+    using var document = JsonDocument.Parse(stream);
+    FlattenJson(document.RootElement, settings, prefix: null);
+    return settings;
+}
+
+void FlattenJson(JsonElement element, Dictionary<string, string> destination, string? prefix)
+{
+    if (element.ValueKind != JsonValueKind.Object)
+    {
+        return;
+    }
+
+    foreach (var property in element.EnumerateObject())
+    {
+        var key = string.IsNullOrEmpty(prefix) ? property.Name : $"{prefix}:{property.Name}";
+        if (property.Value.ValueKind == JsonValueKind.Object)
+        {
+            FlattenJson(property.Value, destination, key);
+            continue;
+        }
+
+        destination[key] = property.Value.ToString();
+        if (string.IsNullOrEmpty(prefix))
+        {
+            destination[property.Name] = property.Value.ToString();
+        }
     }
 }

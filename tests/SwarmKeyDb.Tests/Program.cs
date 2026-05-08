@@ -1,11 +1,15 @@
 using System.Text;
 using System.Text.Json;
+using System.Net;
+using System.Net.Sockets;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SwarmKeyDb;
 using SwarmKeyDb.Cli;
+using SwarmKeyDb.Server;
 
 var tests = new (string Name, Func<Task> Test)[]
 {
@@ -98,6 +102,9 @@ var tests = new (string Name, Func<Task> Test)[]
     ("btree index range scan open bounds", BTreeIndexRangeScanOpenBoundsAsync),
     ("swarm store with btree index range scan", SwarmStoreWithBTreeIndexRangeScanAsync),
     ("swarm store with btree index prefix scan", SwarmStoreWithBTreeIndexPrefixScanAsync),
+    ("monitoring metrics endpoint exposes operation counters and cache ratio", MonitoringMetricsEndpointExposesCountersAsync),
+    ("monitoring health and readiness endpoints return expected status codes", MonitoringHealthAndReadinessEndpointsAsync),
+    ("redis command logging includes correlation ids", RedisCommandLoggingIncludesCorrelationIdsAsync),
 };
 
 foreach (var (name, test) in tests)
@@ -812,6 +819,82 @@ static async Task CachingKeyValueStoreMaxEntriesEvictsLruAsync()
 
     AssertEqual(2, inner.GetCallCount("a"));
     Assert(store.Evictions > 0, "Expected at least one cache eviction.");
+}
+
+static async Task MonitoringMetricsEndpointExposesCountersAsync()
+{
+    var cacheStats = new FakeCacheStats { Hits = 3, Misses = 1 };
+    var metrics = new MonitoringMetrics(() => cacheStats);
+    var readinessProbe = new AlwaysReadyProbe();
+    var port = TestNetHelpers.GetFreePort();
+    var server = new MonitoringHttpServer(
+        IPAddress.Loopback,
+        port,
+        metrics,
+        readinessProbe,
+        metricsEnabled: true,
+        dashboardEnabled: true,
+        NullLogger<MonitoringHttpServer>.Instance);
+    using var cts = new CancellationTokenSource();
+    var runTask = server.RunAsync(cts.Token);
+
+    var processor = new RedisCommandProcessor(
+        new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()),
+        observer: metrics,
+        logger: NullLogger<RedisCommandProcessor>.Instance);
+    _ = await ExecuteAsync(processor, RespCommand("SET", "m:k", "v") + RespCommand("GET", "m:k") + RespCommand("DEL", "m:k"));
+
+    using var client = new HttpClient();
+    var payload = await client.GetStringAsync($"http://127.0.0.1:{port}/metrics");
+    Assert(payload.Contains("swarmkeydb_operations_total{operation=\"get\",status=\"success\"}", StringComparison.Ordinal), "GET metrics should be exposed.");
+    Assert(payload.Contains("swarmkeydb_operations_total{operation=\"put\",status=\"success\"}", StringComparison.Ordinal), "PUT metrics should be exposed.");
+    Assert(payload.Contains("swarmkeydb_operations_total{operation=\"delete\",status=\"success\"}", StringComparison.Ordinal), "DELETE metrics should be exposed.");
+    Assert(payload.Contains("swarmkeydb_cache_hit_ratio 0.75", StringComparison.Ordinal), "Cache hit ratio should be computed from cache stats.");
+
+    cts.Cancel();
+    await runTask;
+    server.Dispose();
+}
+
+static async Task MonitoringHealthAndReadinessEndpointsAsync()
+{
+    var metrics = new MonitoringMetrics(() => NoOpCacheStats.Instance);
+    var port = TestNetHelpers.GetFreePort();
+    var server = new MonitoringHttpServer(
+        IPAddress.Loopback,
+        port,
+        metrics,
+        new StaticReadinessProbe(ready: false, message: "bee not reachable"),
+        metricsEnabled: true,
+        dashboardEnabled: false,
+        NullLogger<MonitoringHttpServer>.Instance);
+    using var cts = new CancellationTokenSource();
+    var runTask = server.RunAsync(cts.Token);
+    using var client = new HttpClient();
+
+    var health = await client.GetAsync($"http://127.0.0.1:{port}/health");
+    AssertEqual(HttpStatusCode.OK, health.StatusCode);
+
+    var ready = await client.GetAsync($"http://127.0.0.1:{port}/ready");
+    AssertEqual(HttpStatusCode.ServiceUnavailable, ready.StatusCode);
+
+    cts.Cancel();
+    await runTask;
+    server.Dispose();
+}
+
+static async Task RedisCommandLoggingIncludesCorrelationIdsAsync()
+{
+    var logger = new CaptureLogger<RedisCommandProcessor>();
+    var processor = new RedisCommandProcessor(
+        new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()),
+        logger: logger);
+
+    _ = await ExecuteAsync(processor, RespCommand("PING"));
+
+    Assert(logger.Scopes.Count > 0, "Expected at least one logging scope.");
+    Assert(logger.Scopes.Any(scope => scope.TryGetValue("correlationId", out var value) && !string.IsNullOrWhiteSpace(value)),
+        "Expected correlationId in command logging scope.");
 }
 
 static RedisCommandProcessor CreateProcessor() =>
@@ -1963,5 +2046,84 @@ internal sealed class TestLogger<T> : Microsoft.Extensions.Logging.ILogger<T>
         Func<TState, Exception?, string> formatter)
     {
         Messages.Add(formatter(state, exception));
+    }
+}
+
+internal sealed class FakeCacheStats : ICacheStats
+{
+    public long Hits { get; init; }
+    public long Misses { get; init; }
+    public long Evictions { get; init; }
+}
+
+internal sealed class StaticReadinessProbe : IReadinessProbe
+{
+    private readonly bool _ready;
+    private readonly string _message;
+
+    public StaticReadinessProbe(bool ready, string message)
+    {
+        _ready = ready;
+        _message = message;
+    }
+
+    public Task<(bool Ready, string Message)> CheckAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult((_ready, _message));
+}
+
+internal sealed class CaptureLogger<T> : ILogger<T>
+{
+    public List<Dictionary<string, string>> Scopes { get; } = [];
+
+    public IDisposable BeginScope<TState>(TState state) where TState : notnull
+    {
+        if (state is IEnumerable<KeyValuePair<string, object>> keyValuePairs)
+        {
+            var scopeValues = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pair in keyValuePairs)
+            {
+                scopeValues[pair.Key] = pair.Value?.ToString() ?? string.Empty;
+            }
+
+            Scopes.Add(scopeValues);
+        }
+
+        return NullScope.Instance;
+    }
+
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(
+        LogLevel logLevel,
+        EventId eventId,
+        TState state,
+        Exception? exception,
+        Func<TState, Exception?, string> formatter)
+    {
+    }
+
+    private sealed class NullScope : IDisposable
+    {
+        public static readonly NullScope Instance = new();
+        public void Dispose()
+        {
+        }
+    }
+}
+
+internal static class TestNetHelpers
+{
+    public static int GetFreePort()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
+        }
     }
 }
