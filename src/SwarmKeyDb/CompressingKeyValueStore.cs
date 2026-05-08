@@ -6,9 +6,11 @@ namespace SwarmKeyDb;
 
 public sealed class CompressingKeyValueStore : IKeyValueStore
 {
-    // GZip magic bytes
+    // GZip magic bytes (RFC 1952)
     private static readonly byte[] GZipMagic = [0x1F, 0x8B];
-    // Brotli has no universal magic bytes; we use a custom 2-byte prefix: 0xCE 0xB8
+    // Brotli has no standard magic bytes; we prepend a custom 2-byte marker (0xCE 0xB8)
+    // so we can detect our own compressed Brotli blobs. This is a SwarmKeyDb-specific
+    // wrapper format and is not compatible with standalone Brotli-encoded files.
     private static readonly byte[] BrotliMagic = [0xCE, 0xB8];
 
     private readonly IKeyValueStore _inner;

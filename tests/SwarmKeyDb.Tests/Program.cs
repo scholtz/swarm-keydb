@@ -417,8 +417,8 @@ static async Task CompressingKeyValueStoreBrotliCompressAndDecompressAsync()
 
     Assert(stored is not null, "Inner store should have data.");
     Assert(!stored!.SequenceEqual(original), "Stored bytes should be compressed.");
-    // Brotli magic prefix 0xCE 0xB8
-    Assert(stored[0] == 0xCE && stored[1] == 0xB8, "Stored data should start with Brotli magic bytes.");
+    // Custom magic prefix 0xCE 0xB8 (SwarmKeyDb-specific Brotli wrapper)
+    Assert(stored[0] == 0xCE && stored[1] == 0xB8, "Stored data should start with custom Brotli magic bytes.");
 
     var retrieved = await store.GetAsync("brotli:key");
     Assert(retrieved is not null, "Retrieved value should not be null.");
