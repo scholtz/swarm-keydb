@@ -161,6 +161,9 @@ func TestErrors(t *testing.T) {
 	if err := client.SetWithTTL(ctx, "k", "v", 0); err == nil {
 		t.Fatal("expected ttl validation error")
 	}
+	if err := client.SetWithTTL(ctx, "k", "v", -1); err == nil {
+		t.Fatal("expected ttl validation error")
+	}
 
 	failing := newMockRedis()
 	failing.err = errors.New("connection refused")

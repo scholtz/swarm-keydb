@@ -84,6 +84,8 @@ class SwarmKeyDbTests(unittest.TestCase):
             db.put("", "x")
         with self.assertRaises(ValueError):
             db.set_with_ttl("a", "b", 0)
+        with self.assertRaises(ValueError):
+            db.set_with_ttl("a", "b", -1)
         with self.assertRaises(KeyNotFoundError):
             db.get_or_raise("missing")
 
@@ -110,6 +112,8 @@ class AsyncSwarmKeyDbTests(unittest.IsolatedAsyncioTestCase):
         db = AsyncSwarmKeyDb(host="localhost", port=6379, redis_client=FakeAsyncRedis())
         with self.assertRaises(ValueError):
             await db.put("", "x")
+        with self.assertRaises(ValueError):
+            await db.set_with_ttl("a", "b", 0)
         with self.assertRaises(ValueError):
             await db.set_with_ttl("a", "b", -1)
         with self.assertRaises(KeyNotFoundError):

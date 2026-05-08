@@ -122,7 +122,7 @@ export class SwarmKeyDb {
   async setWithTTL(key, value, ttlSeconds) {
     this.#validateKey(key);
     if (!Number.isInteger(ttlSeconds) || ttlSeconds <= 0) {
-      throw new Error('ttlSeconds must be a positive integer.');
+      throw new Error('ttlSeconds must be a positive integer');
     }
 
     try {
@@ -134,7 +134,7 @@ export class SwarmKeyDb {
 
   #validateKey(key) {
     if (typeof key !== 'string' || key.length === 0) {
-      throw new Error('key must be a non-empty string.');
+      throw new Error('key must be a non-empty string');
     }
   }
 }
