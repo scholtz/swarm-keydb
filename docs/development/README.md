@@ -22,7 +22,8 @@ redis-cli -p 6379 SET profile:name Ada
 redis-cli -p 6379 GET profile:name
 ```
 
-To use Bee instead, set `SWARM_KEYDB_BACKEND=bee` together with `BEE_URL` and `BEE_POSTAGE_BATCH_ID`.
+To use Bee instead, set `SWARM_KEYDB_BACKEND=bee` together with `BEE_URL` and `BEE_POSTAGE_BATCH_ID`.  
+To use IPFS, set `BACKEND=ipfs` and `IPFS_API_URL`; for dual-write/fallback mode use `BACKEND=hybrid` plus both Bee and IPFS settings.
 
 ## CLI workflow
 

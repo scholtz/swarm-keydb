@@ -3,7 +3,7 @@ using System.Text.Json;
 
 namespace SwarmKeyDb;
 
-public sealed class SwarmKeyValueStore : IKeyValueStore
+public sealed class SwarmKeyValueStore : IKeyValueStore, IBackendMetadataProvider
 {
     private static readonly byte[] IntegrityEnvelopeMagic = [0x53, 0x4B, 0x49, 0x31];
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -204,6 +204,32 @@ public sealed class SwarmKeyValueStore : IKeyValueStore
     {
         ValidateKey(key);
         return await _index.RemoveExpiryAsync(key, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<string?> GetBackendMetadataAsync(string key, CancellationToken cancellationToken = default)
+    {
+        ValidateKey(key);
+        var reference = await _index.GetReferenceAsync(key, cancellationToken).ConfigureAwait(false);
+        if (reference is null)
+        {
+            return null;
+        }
+
+        if (HybridReferenceCodec.TryDecode(reference, out var hybridReference))
+        {
+            return JsonSerializer.Serialize(new
+            {
+                type = "hybrid",
+                swarmReference = hybridReference.SwarmReference,
+                ipfsCid = hybridReference.IpfsCid
+            }, JsonOptions);
+        }
+
+        var isIpfsCid = reference.StartsWith("baf", StringComparison.OrdinalIgnoreCase) || reference.StartsWith("Qm", StringComparison.Ordinal);
+        object metadata = isIpfsCid
+            ? new { type = "ipfs", ipfsCid = reference }
+            : new { type = "swarm", swarmReference = reference };
+        return JsonSerializer.Serialize(metadata, JsonOptions);
     }
 
     private static void ValidateKey(string key)

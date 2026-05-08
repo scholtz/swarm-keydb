@@ -30,6 +30,15 @@ fmt.Println(v)
 
 The SwarmKeyDb server verifies a SHA-256 integrity envelope on every read by default. If stored Swarm data has been corrupted or tampered with, `Get`/`BatchGet` return an error from Redis; callers should handle that error path explicitly.
 
+## Using IPFS and hybrid backends
+
+Backend selection is server-side, so Go client code stays the same:
+
+```bash
+BACKEND=ipfs IPFS_API_URL=http://localhost:5001/ dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
+BACKEND=hybrid BEE_URL=http://localhost:1633/ BEE_POSTAGE_BATCH_ID=<id> IPFS_API_URL=http://localhost:5001/ dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
+```
+
 ## Examples
 
 - `examples/user-profile/main.go`

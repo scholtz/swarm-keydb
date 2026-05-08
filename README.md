@@ -11,7 +11,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 - Default-on SHA-256 integrity verification for values stored in Swarm, with typed corruption errors.
 - CRDT-backed conflict resolution (LWW register by default, with OR-Set and PN-counter strategies available).
 - Prefix scans, lexicographic range scans, predicate queries, and cursor-based iteration.
-- Bee HTTP API storage with postage batch configuration handled by environment variables.
+- Swarm, IPFS, and hybrid dual-write storage backends selectable per deployment.
 - Optional sharding router with consistent hashing across up to 64 shards.
 - Local file storage backend for development and tests.
 - `skdb` CLI for database management and debugging from the terminal.
@@ -185,6 +185,28 @@ The checked-in Docker Compose and Kubernetes manifests default to a Bee Sepolia 
 
 The key index is persisted in `SWARM_KEYDB_DATA_DIR/index.json` and values are fetched from the Swarm references stored there.
 
+## Run against IPFS
+
+```bash
+export BACKEND=ipfs
+export IPFS_API_URL=http://localhost:5001/
+dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
+```
+
+`IPFS_PIN_ON_WRITE=true` (default) pins newly written objects to prevent IPFS garbage collection.
+
+## Run in hybrid mode (Swarm + IPFS)
+
+```bash
+export BACKEND=hybrid
+export BEE_URL=http://localhost:1633/
+export BEE_POSTAGE_BATCH_ID=<your-postage-batch-id>
+export IPFS_API_URL=http://localhost:5001/
+dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
+```
+
+Hybrid mode dual-writes to both backends and reads from whichever backend is reachable first.
+
 ### Scaling to multiple nodes (sharding)
 
 Enable sharding with a single config block:
@@ -245,7 +267,8 @@ SwarmKeyDb now exposes production observability endpoints:
 
 - `GET /metrics` (Prometheus text format, default port `9090`)
 - `GET /health` (liveness)
-- `GET /ready` (Bee connectivity + postage batch validation when using `SWARM_KEYDB_BACKEND=bee`)
+- `GET /ready` (configured backend readiness)
+- `GET /backend` (per-backend connectivity state for `swarm`, `ipfs`, or `hybrid`)
 - `GET /dashboard` (lightweight HTML dashboard, default port `8080`)
 - `GET /logs` (recent structured command logs with correlation IDs)
 
@@ -270,6 +293,7 @@ Quick check:
 curl http://localhost:9090/metrics
 curl http://localhost:8080/health
 curl http://localhost:8080/ready
+curl http://localhost:8080/backend
 open http://localhost:8080/dashboard
 ```
 

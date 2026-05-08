@@ -31,6 +31,15 @@ Async equivalents are available in `AsyncSwarmKeyDb`.
 
 The SwarmKeyDb server verifies a SHA-256 integrity envelope on every read by default. If stored Swarm data has been corrupted or tampered with, `get()`/`batch_get()` raise the underlying Redis error from the server, so callers should treat failed reads as integrity-sensitive and handle them explicitly.
 
+## Using IPFS and hybrid backends
+
+The Python SDK calls Redis-compatible commands, so you can switch server backends without changing Python code:
+
+```bash
+BACKEND=ipfs IPFS_API_URL=http://localhost:5001/ dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
+BACKEND=hybrid BEE_URL=http://localhost:1633/ BEE_POSTAGE_BATCH_ID=<id> IPFS_API_URL=http://localhost:5001/ dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
+```
+
 ## Examples
 
 - `examples/user_profile.py`

@@ -20,9 +20,10 @@ docker run --rm -p 6379:6379 -p 8080:8080 -p 9090:9090 \
 
 ## Required environment variables
 
-- `SWARM_KEYDB_BACKEND` (`local` or `bee`)
+- `SWARM_KEYDB_BACKEND` / `BACKEND` (`local`, `bee`, `swarm`, `ipfs`, or `hybrid`)
 - `BEE_URL` (required when backend is `bee`)
 - `BEE_POSTAGE_BATCH_ID` (required when backend is `bee`)
+- `IPFS_API_URL` (required when backend is `ipfs` or `hybrid`)
 
 ## Recommended production environment variables
 
@@ -41,6 +42,7 @@ See full variable reference in `docs/reference/configuration.md`.
 ```bash
 curl http://localhost:8080/health
 curl http://localhost:8080/ready
+curl http://localhost:8080/backend
 ```
 
 ## Prometheus integration
