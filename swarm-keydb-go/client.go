@@ -195,9 +195,7 @@ func (r *redisAdapter) Keys(ctx context.Context, pattern string) *redis.StringSl
 }
 
 func (r *redisAdapter) MGet(ctx context.Context, keys ...string) *redis.SliceCmd {
-	args := make([]string, len(keys))
-	copy(args, keys)
-	return r.inner.MGet(ctx, args...)
+	return r.inner.MGet(ctx, keys...)
 }
 
 func (r *redisAdapter) MSet(ctx context.Context, values ...interface{}) *redis.StatusCmd {
