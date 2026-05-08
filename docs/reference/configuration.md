@@ -27,6 +27,16 @@
 | `BEE_URL` | `http://localhost:1633/` | Bee API base URL used by the Bee-backed store. |
 | `BEE_POSTAGE_BATCH_ID` | required for `bee` backend | Postage batch id used for uploads. |
 
+## CLI (`skdb`)
+
+The CLI stores its persisted settings in `~/.swarmkeydb/config.json`.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SWARMKEYDB_BEE_URL` | `http://localhost:1633/` | Bee API base URL override for CLI commands. |
+| `SWARMKEYDB_BATCH_ID` | unset | Postage batch id override for CLI commands. |
+| `SWARMKEYDB_OUTPUT` | `plain` | CLI output format override (`plain`, `json`, `table`). |
+
 ## Deployment defaults
 
 The checked-in Docker Compose and Kubernetes manifests default to:

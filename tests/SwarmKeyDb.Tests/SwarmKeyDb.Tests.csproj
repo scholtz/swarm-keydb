@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\SwarmKeyDb\SwarmKeyDb.csproj" />
+    <ProjectReference Include="..\..\src\SwarmKeyDb.Cli\SwarmKeyDb.Cli.csproj" />
   </ItemGroup>
 
   <ItemGroup>
