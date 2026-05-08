@@ -5,6 +5,7 @@ namespace SwarmKeyDb;
 public sealed class RedisCommandProcessor
 {
     private readonly IKeyValueStore _store;
+    private readonly SemaphoreSlim _mutationGate = new(1, 1);
 
     public RedisCommandProcessor(IKeyValueStore store)
     {
@@ -198,9 +199,17 @@ public sealed class RedisCommandProcessor
             return RespValue.Error("ERR wrong number of arguments for 'MSET'");
         }
 
-        for (var i = 1; i < args.Count; i += 2)
+        await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            await _store.PutAsync(args[i].AsString(), args[i + 1].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
+            for (var i = 1; i < args.Count; i += 2)
+            {
+                await _store.PutAsync(args[i].AsString(), args[i + 1].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            _mutationGate.Release();
         }
 
         return RespValue.SimpleString("OK");
@@ -213,17 +222,25 @@ public sealed class RedisCommandProcessor
             return RespValue.Error("ERR wrong number of arguments for 'MSETNX'");
         }
 
-        for (var i = 1; i < args.Count; i += 2)
+        await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            if (await _store.GetAsync(args[i].AsString(), cancellationToken).ConfigureAwait(false) is not null)
+            for (var i = 1; i < args.Count; i += 2)
             {
-                return RespValue.IntegerValue(0);
+                if (await _store.GetAsync(args[i].AsString(), cancellationToken).ConfigureAwait(false) is not null)
+                {
+                    return RespValue.IntegerValue(0);
+                }
+            }
+
+            for (var i = 1; i < args.Count; i += 2)
+            {
+                await _store.PutAsync(args[i].AsString(), args[i + 1].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
             }
         }
-
-        for (var i = 1; i < args.Count; i += 2)
+        finally
         {
-            await _store.PutAsync(args[i].AsString(), args[i + 1].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
+            _mutationGate.Release();
         }
 
         return RespValue.IntegerValue(1);

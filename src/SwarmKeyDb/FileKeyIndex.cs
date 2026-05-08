@@ -39,7 +39,7 @@ public sealed class FileKeyIndex : IKeyIndex
         try
         {
             var index = await ReadIndexAsync(cancellationToken).ConfigureAwait(false);
-            index[key] = new KeyIndexEntry { Reference = reference, ExpiresAt = expiresAt };
+            index[key] = new KeyIndexEntry(reference, expiresAt);
             await WriteIndexAsync(index, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -65,8 +65,7 @@ public sealed class FileKeyIndex : IKeyIndex
                 return false;
             }
 
-            entry.ExpiresAt = expiresAt;
-            index[key] = entry;
+            index[key] = entry with { ExpiresAt = expiresAt };
             await WriteIndexAsync(index, cancellationToken).ConfigureAwait(false);
             return true;
         }
@@ -115,8 +114,7 @@ public sealed class FileKeyIndex : IKeyIndex
                 return false;
             }
 
-            entry.ExpiresAt = null;
-            index[key] = entry;
+            index[key] = entry with { ExpiresAt = null };
             await WriteIndexAsync(index, cancellationToken).ConfigureAwait(false);
             return true;
         }
@@ -216,7 +214,7 @@ public sealed class FileKeyIndex : IKeyIndex
                 var legacyReference = property.Value.GetString();
                 if (!string.IsNullOrEmpty(legacyReference))
                 {
-                    index[property.Name] = new KeyIndexEntry { Reference = legacyReference };
+                    index[property.Name] = new KeyIndexEntry(legacyReference, null);
                 }
 
                 continue;
@@ -233,11 +231,9 @@ public sealed class FileKeyIndex : IKeyIndex
                 continue;
             }
 
-            index[property.Name] = new KeyIndexEntry
-            {
-                Reference = reference,
-                ExpiresAt = TryGetDateTimeOffset(property.Value, "ExpiresAt") ?? TryGetDateTimeOffset(property.Value, "expiresAt")
-            };
+            index[property.Name] = new KeyIndexEntry(
+                reference,
+                TryGetDateTimeOffset(property.Value, "ExpiresAt") ?? TryGetDateTimeOffset(property.Value, "expiresAt"));
         }
 
         return index;
@@ -275,9 +271,5 @@ public sealed class FileKeyIndex : IKeyIndex
         return expiredKeys.Length > 0;
     }
 
-    private sealed class KeyIndexEntry
-    {
-        public string Reference { get; set; } = string.Empty;
-        public DateTimeOffset? ExpiresAt { get; set; }
-    }
+    private sealed record KeyIndexEntry(string Reference, DateTimeOffset? ExpiresAt);
 }
