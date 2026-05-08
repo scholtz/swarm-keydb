@@ -20,5 +20,6 @@ Core API:
 - `list(pattern?)`
 - `batchPut(entries)`, `batchGet(keys)`
 - `setWithTTL(key, value, ttlSeconds)`
+- `backup()`, `restore(ref, key?)`, `rotateKey(oldKey, newKey)`
 
 Error handling note: when the server rejects a command (invalid TTL, ACL denied, integrity/read failure), SDK methods reject with the Redis/server error.

@@ -30,6 +30,7 @@ var tests = new (string Name, Func<Task> Test)[]
     ("query async applies key and value predicates", QueryAsyncAppliesKeyAndValuePredicatesAsync),
     ("persistent file index supports restart querying", PersistentFileIndexSupportsRestartQueryingAsync),
     ("cli supports put get delete list scan and stats", CliSupportsDataCommandsAsync),
+    ("cli backup restore and rotate key commands work", CliBackupRestoreAndRotateKeyAsync),
     ("cli config set and get persists settings", CliConfigSetAndGetPersistsSettingsAsync),
     ("cli put validates value source arguments", CliPutValidatesValueSourceArgumentsAsync),
     ("cli uses environment variable overrides", CliUsesEnvironmentVariableOverridesAsync),
@@ -82,6 +83,8 @@ var tests = new (string Name, Func<Task> Test)[]
     ("encrypting store delete and ttl pass through", EncryptingKeyValueStoreDeleteAndTtlPassThroughAsync),
     ("encrypting store ethereum key derivation produces consistent key", EncryptingKeyValueStoreEthereumKeyDerivationProducesConsistentKeyAsync),
     ("encrypting store startup fails when enabled with no key", EncryptingKeyValueStoreStartupFailsWhenEnabledWithNoKeyAsync),
+    ("backup and restore services round trip encrypted snapshot", BackupAndRestoreServicesRoundTripEncryptedSnapshotAsync),
+    ("key rotation service rewrites encrypted values under new key", KeyRotationServiceRewritesEncryptedValuesUnderNewKeyAsync),
     ("acl allowlist read address can get", AclAllowlistReadAddressCanGetAsync),
     ("acl allowlist write address can put and delete", AclAllowlistWriteAddressCanPutAndDeleteAsync),
     ("acl allowlist unlisted address is denied on get", AclAllowlistUnlistedAddressIsDeniedOnGetAsync),
@@ -116,6 +119,7 @@ var tests = new (string Name, Func<Task> Test)[]
     ("monitoring health and readiness endpoints return expected status codes", MonitoringHealthAndReadinessEndpointsAsync),
     ("monitoring health endpoint reports degraded for unhealthy shard", MonitoringHealthEndpointReportsDegradedForUnhealthyShardAsync),
     ("redis command logging includes correlation ids", RedisCommandLoggingIncludesCorrelationIdsAsync),
+    ("redis management commands backup restore and rotate", RedisManagementCommandsBackupRestoreAndRotateAsync),
     ("migrate scan pattern applies prefix filter", MigrateScanPatternAppliesPrefixFilterAsync),
     ("migrate checkpoint store saves and loads", MigrateCheckpointStoreSavesAndLoadsAsync),
     ("migrate dry run does not write to destination", MigrateDryRunDoesNotWriteToDestinationAsync),
@@ -491,6 +495,60 @@ static async Task CliSupportsDataCommandsAsync()
     var missingResult = await RunCliAsync(new[] { "get", "user:alice" }, options);
     AssertEqual(1, missingResult.ExitCode);
     Assert(missingResult.Stderr.Contains("Key not found: user:alice", StringComparison.Ordinal), "Expected explicit missing key error message.");
+}
+
+static async Task CliBackupRestoreAndRotateKeyAsync()
+{
+    var swarm = new MutableSwarmClient();
+    var sourceHome = Path.Combine(Path.GetTempPath(), "swarm-keydb-cli-rotate-source", Guid.NewGuid().ToString("N"));
+    var targetHome = Path.Combine(Path.GetTempPath(), "swarm-keydb-cli-rotate-target", Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(sourceHome);
+    Directory.CreateDirectory(targetHome);
+
+    var oldKeyPath = Path.Combine(sourceHome, "old.key");
+    var newKeyPath = Path.Combine(sourceHome, "new.key");
+    await File.WriteAllTextAsync(oldKeyPath, MakeKeyHex());
+    await File.WriteAllTextAsync(newKeyPath, MakeKeyHex());
+
+    CliExecutionOptions CreateOptions(string home) => new()
+    {
+        SwarmClientFactory = _ => swarm,
+        KeyIndexFactory = path => new FileKeyIndex(path),
+        EnvironmentFactory = () => new EnvironmentSnapshot
+        {
+            Home = home,
+            BeeUrl = "http://localhost:1633/",
+            BatchId = "batch-id"
+        }
+    };
+
+    var sourceOptions = CreateOptions(sourceHome);
+    var putResult = await RunCliAsync(new[] { "put", "secure:key", "secret-value" }, sourceOptions);
+    AssertEqual(0, putResult.ExitCode);
+
+    var rotateResult = await RunCliAsync(new[] { "rotate-key", "--old-key", oldKeyPath, "--new-key", newKeyPath }, sourceOptions);
+    AssertEqual(0, rotateResult.ExitCode);
+    Assert(rotateResult.Stdout.Trim().StartsWith("swarm://", StringComparison.Ordinal), "Rotate command should return a rotation manifest reference.");
+    Assert(rotateResult.Stderr.Contains("Rotating key:", StringComparison.Ordinal), "Rotate command should emit progress.");
+
+    var encryptedRead = await RunCliAsync(new[] { "--key", newKeyPath, "get", "secure:key" }, sourceOptions);
+    AssertEqual(0, encryptedRead.ExitCode);
+    AssertEqual("secret-value", encryptedRead.Stdout.Trim());
+
+    var backupPath = Path.Combine(sourceHome, "backup.ref");
+    var backupResult = await RunCliAsync(new[] { "--key", newKeyPath, "backup", "--out", backupPath }, sourceOptions);
+    AssertEqual(0, backupResult.ExitCode);
+    Assert(File.Exists(backupPath), "Backup command should write the swarm reference when --out is provided.");
+    var backupReference = (await File.ReadAllTextAsync(backupPath)).Trim();
+    Assert(backupReference.StartsWith("swarm://", StringComparison.Ordinal), "Backup file should contain a swarm:// reference.");
+
+    var targetOptions = CreateOptions(targetHome);
+    var restoreResult = await RunCliAsync(new[] { "restore", "--ref", backupReference, "--key", newKeyPath }, targetOptions);
+    AssertEqual(0, restoreResult.ExitCode);
+
+    var restoredRead = await RunCliAsync(new[] { "--key", newKeyPath, "get", "secure:key" }, targetOptions);
+    AssertEqual(0, restoredRead.ExitCode);
+    AssertEqual("secret-value", restoredRead.Stdout.Trim());
 }
 
 static async Task CliConfigSetAndGetPersistsSettingsAsync()
@@ -1223,6 +1281,50 @@ static async Task RedisCommandLoggingIncludesCorrelationIdsAsync()
         "Expected correlationId in command logging scope.");
 }
 
+static async Task RedisManagementCommandsBackupRestoreAndRotateAsync()
+{
+    var swarm = new MutableSwarmClient();
+    var keyProvider = new MutableEncryptionKeyProvider(new EncryptionOptions
+    {
+        Enabled = true,
+        EthPrivateKeyHex = MakeKeyHex()
+    });
+    var store = new EncryptingKeyValueStore(
+        new SwarmKeyValueStore(swarm, new InMemoryKeyIndex()),
+        keyProvider,
+        NullLogger<EncryptingKeyValueStore>.Instance);
+    var backupService = new BackupService(store, swarm, keyProvider);
+    var restoreService = new RestoreService(backupService, store, keyProvider);
+    var rotationService = new KeyRotationService(store, swarm, keyProvider, backupService);
+    var processor = new RedisCommandProcessor(store, backupService: backupService, restoreService: restoreService, keyRotationService: rotationService);
+    var oldKey = keyProvider.GetOptions().EthPrivateKeyHex!;
+
+    AssertEqual("+OK\r\n", await ExecuteAsync(processor, RespCommand("SET", "managed:key", "managed-value")));
+
+    var backupResponse = await ExecuteAsync(processor, RespCommand("BACKUP"));
+    Assert(backupResponse.StartsWith("$", StringComparison.Ordinal) && backupResponse.Contains("swarm://", StringComparison.Ordinal),
+        "BACKUP should return a bulk-string swarm:// reference.");
+
+    var newKey = MakeKeyHex();
+    var rotateResponse = await ExecuteAsync(processor, RespCommand("ROTATEKEY", oldKey, newKey));
+    Assert(rotateResponse.Contains("swarm://", StringComparison.Ordinal), "ROTATEKEY should return a manifest reference.");
+    AssertEqual("$13\r\nmanaged-value\r\n", await ExecuteAsync(processor, RespCommand("GET", "managed:key")));
+
+    var restoredIndex = new InMemoryKeyIndex();
+    var restoredProvider = new MutableEncryptionKeyProvider(new EncryptionOptions());
+    var restoredStore = new EncryptingKeyValueStore(
+        new SwarmKeyValueStore(swarm, restoredIndex),
+        restoredProvider,
+        NullLogger<EncryptingKeyValueStore>.Instance);
+    var restoredBackupService = new BackupService(restoredStore, swarm, restoredProvider);
+    var restoredRestoreService = new RestoreService(restoredBackupService, restoredStore, restoredProvider);
+    var restoredProcessor = new RedisCommandProcessor(restoredStore, backupService: restoredBackupService, restoreService: restoredRestoreService);
+
+    var backupReference = backupResponse.Split("\r\n", StringSplitOptions.RemoveEmptyEntries)[1];
+    AssertEqual(":1\r\n", await ExecuteAsync(restoredProcessor, RespCommand("RESTOREDB", backupReference, oldKey)));
+    AssertEqual("$13\r\nmanaged-value\r\n", await ExecuteAsync(restoredProcessor, RespCommand("GET", "managed:key")));
+}
+
 static RedisCommandProcessor CreateProcessor() =>
     new(new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()));
 
@@ -1533,6 +1635,91 @@ static Task EncryptingKeyValueStoreStartupFailsWhenEnabledWithNoKeyAsync()
 
     Assert(threw, "Constructor must throw InvalidOperationException when encryption is enabled but no key is configured.");
     return Task.CompletedTask;
+}
+
+static async Task BackupAndRestoreServicesRoundTripEncryptedSnapshotAsync()
+{
+    var swarm = new MutableSwarmClient();
+    var sourceKey = MakeKeyHex();
+    var sourceProvider = new MutableEncryptionKeyProvider(new EncryptionOptions
+    {
+        Enabled = true,
+        EthPrivateKeyHex = sourceKey
+    });
+    var sourceStore = new EncryptingKeyValueStore(
+        new SwarmKeyValueStore(swarm, new InMemoryKeyIndex()),
+        sourceProvider,
+        NullLogger<EncryptingKeyValueStore>.Instance);
+
+    await sourceStore.PutAsync("secure:key", Encoding.UTF8.GetBytes("backup-secret"));
+    await sourceStore.SetTtlAsync("secure:key", TimeSpan.FromSeconds(30));
+
+    var backupService = new BackupService(sourceStore, swarm, sourceProvider);
+    var backupResult = await backupService.BackupAsync();
+    Assert(backupResult.Reference.StartsWith("swarm://", StringComparison.Ordinal), "Backup should return a swarm:// URI.");
+
+    var snapshotPayload = await swarm.DownloadAsync(backupResult.Reference["swarm://".Length..]);
+    Assert(snapshotPayload.Take(4).SequenceEqual(new byte[] { 0x53, 0x4B, 0x42, 0x31 }), "Encrypted backups should use the snapshot envelope header.");
+
+    var restoredProvider = new MutableEncryptionKeyProvider(new EncryptionOptions());
+    var restoredStore = new EncryptingKeyValueStore(
+        new SwarmKeyValueStore(swarm, new InMemoryKeyIndex()),
+        restoredProvider,
+        NullLogger<EncryptingKeyValueStore>.Instance);
+    var restoreService = new RestoreService(new BackupService(restoredStore, swarm, restoredProvider), restoredStore, restoredProvider);
+    var restoreResult = await restoreService.RestoreAsync(backupResult.Reference, sourceKey);
+
+    AssertEqual(1, restoreResult.RestoredKeyCount);
+    var restoredValue = await restoredStore.GetAsync("secure:key");
+    AssertEqual("backup-secret", Encoding.UTF8.GetString(restoredValue!));
+    var ttl = await restoredStore.GetTtlAsync("secure:key");
+    Assert(ttl.Exists && ttl.Ttl is not null && ttl.Ttl.Value > TimeSpan.Zero, "Restored TTL should remain positive.");
+}
+
+static async Task KeyRotationServiceRewritesEncryptedValuesUnderNewKeyAsync()
+{
+    var swarm = new MutableSwarmClient();
+    var index = new InMemoryKeyIndex();
+    var oldKey = MakeKeyHex();
+    var newKey = MakeKeyHex();
+    var provider = new MutableEncryptionKeyProvider(new EncryptionOptions
+    {
+        Enabled = true,
+        EthPrivateKeyHex = oldKey
+    });
+    var store = new EncryptingKeyValueStore(
+        new SwarmKeyValueStore(swarm, index),
+        provider,
+        NullLogger<EncryptingKeyValueStore>.Instance);
+    await store.PutAsync("rotate:key", Encoding.UTF8.GetBytes("rotated-secret"));
+
+    var originalReference = await index.GetReferenceAsync("rotate:key");
+    var rotationService = new KeyRotationService(store, swarm, provider, new BackupService(store, swarm, provider));
+    var result = await rotationService.RotateAsync(oldKey, newKey);
+
+    Assert(result.ManifestReference.StartsWith("swarm://", StringComparison.Ordinal), "Rotation should publish a manifest URI.");
+    var rotatedReference = await index.GetReferenceAsync("rotate:key");
+    Assert(originalReference is not null && rotatedReference is not null && !string.Equals(originalReference, rotatedReference, StringComparison.Ordinal),
+        "Rotation should rewrite the stored reference under the new key.");
+    AssertEqual("rotated-secret", Encoding.UTF8.GetString((await store.GetAsync("rotate:key"))!));
+
+    provider.Update(new EncryptionOptions
+    {
+        Enabled = true,
+        EthPrivateKeyHex = oldKey
+    });
+
+    var threw = false;
+    try
+    {
+        _ = await store.GetAsync("rotate:key");
+    }
+    catch (System.Security.Cryptography.CryptographicException)
+    {
+        threw = true;
+    }
+
+    Assert(threw, "Old key should no longer decrypt rotated values.");
 }
 
 static async Task AclAllowlistReadAddressCanGetAsync()

@@ -18,7 +18,7 @@
 - [x] Integrate end-to-end encryption using user-provided keys. (100%)
 - [x] Implement access control lists for multi-user shared databases. (100%)
 - [x] Add data integrity verification with cryptographic hashes. (100%)
-- [ ] Support for secure key rotation and backup mechanisms.
+- [x] Support for secure key rotation and backup mechanisms. (100%)
 - [ ] Enable privacy-preserving queries without revealing data.
 
 ## Developer Experience

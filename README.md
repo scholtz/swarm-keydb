@@ -6,6 +6,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 
 - Redis-compatible commands for `PING`, `SET`, `SETEX`, `PSETEX`, `GET`, `MGET`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXISTS`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `KEYS`, `SCAN`, `TYPE`, and `QUIT`.
 - Connection-scoped Ethereum-address ACL enforcement via `AUTHADDR` for shared databases.
+- Secure key rotation plus immutable Swarm backup/restore workflows for encrypted databases.
 - String, JSON, and binary value helpers in the `SwarmKeyDbClient` library.
 - Default-on SHA-256 integrity verification for values stored in Swarm, with typed corruption errors.
 - CRDT-backed conflict resolution (LWW register by default, with OR-Set and PN-counter strategies available).
@@ -47,9 +48,9 @@ dotnet run --project tests/SwarmKeyDb.Tests/SwarmKeyDb.Tests.csproj
 
 ## Multi-language SDKs
 
-- `swarm-keydb-js/` - JavaScript/TypeScript SDK (`get`, `put`, `delete`, `list`, `batchGet`, `batchPut`, `setWithTTL`)
-- `swarm-keydb-py/` - Python SDK with sync and async clients
-- `swarm-keydb-go/` - Go SDK with context-aware API and JSON helpers
+- `swarm-keydb-js/` - JavaScript/TypeScript SDK (`get`, `put`, `delete`, `list`, `batchGet`, `batchPut`, `setWithTTL`, `backup`, `restore`, `rotateKey`)
+- `swarm-keydb-py/` - Python SDK with sync and async clients plus `backup`, `restore`, and `rotate_key`
+- `swarm-keydb-go/` - Go SDK with context-aware API, JSON helpers, and `Backup`/`Restore`/`RotateKey`
 
 SDK test commands:
 
@@ -77,6 +78,9 @@ skdb get user:alice
 skdb list --prefix user:
 skdb scan --from user:a --to user:z
 skdb delete user:alice
+skdb backup --out ./backup.ref
+skdb restore --ref "$(cat ./backup.ref)" --key ./eth.key
+skdb rotate-key --old-key ./old.key --new-key ./new.key
 skdb stats
 ```
 

@@ -39,7 +39,7 @@ public sealed class BackupService
             }
 
             var ttl = await _store.GetTtlAsync(key, cancellationToken).ConfigureAwait(false);
-            var expiresAt = ttl.Exists && ttl.Ttl is { } ttlValue && ttlValue > TimeSpan.Zero
+            DateTimeOffset? expiresAt = ttl.Exists && ttl.Ttl is { } ttlValue && ttlValue > TimeSpan.Zero
                 ? createdAt.Add(ttlValue)
                 : null;
             entries.Add(new BackupSnapshotEntry(key, Convert.ToBase64String(value), expiresAt));

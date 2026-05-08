@@ -37,6 +37,7 @@ public sealed record RuntimeSettings(
     OutputFormat Output,
     string ConfigPath,
     string IndexPath,
+    string? KeyPath,
     bool BeeUrlFromEnvironment,
     bool BatchIdFromEnvironment);
 
@@ -363,6 +364,15 @@ internal sealed class CliRuntime
             var swarm = _options.SwarmClientFactory(settings);
             var index = _options.KeyIndexFactory(settings.IndexPath);
             var keyProvider = new MutableEncryptionKeyProvider(new EncryptionOptions());
+            if (!string.IsNullOrWhiteSpace(settings.KeyPath))
+            {
+                keyProvider.Update(new EncryptionOptions
+                {
+                    Enabled = true,
+                    EthPrivateKeyHex = File.ReadAllText(settings.KeyPath).Trim()
+                });
+            }
+
             var store = new EncryptingKeyValueStore(
                 new SwarmKeyValueStore(swarm, index),
                 keyProvider,
@@ -400,6 +410,7 @@ internal sealed class CliRuntime
             Output: output,
             ConfigPath: configPath,
             IndexPath: indexPath,
+            KeyPath: parsed.TryGetOptionValue("--key"),
             BeeUrlFromEnvironment: env.BeeUrl is not null,
             BatchIdFromEnvironment: env.BatchId is not null);
     }
@@ -463,6 +474,7 @@ internal sealed class CliRuntime
                 Global options:
                   --bee-url <url>
                   --batch-id <id>
+                  --key <path>
                   --output plain|json|table
                   --help
 

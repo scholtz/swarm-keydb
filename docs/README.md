@@ -27,6 +27,7 @@ This folder is the entrypoint for project documentation.
 - `tutorials/shared-config-acl.md`
 - `tutorials/batch-operations.md`
 - `tutorials/encryption-user-keypair.md`
+- `tutorials/key-rotation-backup.md`
 - `sdk/js.md`
 - `sdk/python.md`
 - `sdk/go.md`

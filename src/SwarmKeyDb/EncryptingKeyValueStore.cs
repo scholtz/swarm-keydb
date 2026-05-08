@@ -24,7 +24,7 @@ public sealed class EncryptingKeyValueStore : IKeyValueStore, IAccessControlVeri
         IKeyValueStore inner,
         IOptions<EncryptionOptions> options,
         ILogger<EncryptingKeyValueStore> logger)
-        : this(inner, new MutableEncryptionKeyProvider(options.Value), logger)
+        : this(inner, CreateProvider(options), logger)
     {
     }
 
@@ -178,5 +178,16 @@ public sealed class EncryptingKeyValueStore : IKeyValueStore, IAccessControlVeri
         }
 
         return key;
+    }
+
+    private static IEncryptionKeyProvider CreateProvider(IOptions<EncryptionOptions> options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (options.Value.Enabled)
+        {
+            _ = ResolveKey(options.Value);
+        }
+
+        return new MutableEncryptionKeyProvider(options.Value);
     }
 }
