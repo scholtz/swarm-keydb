@@ -37,6 +37,7 @@ public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats
     {
         await _inner.PutAsync(key, value, cancellationToken).ConfigureAwait(false);
         _cache.Remove(key);
+        RemoveLru(key);
     }
 
     public async Task<byte[]?> GetAsync(string key, CancellationToken cancellationToken = default)
@@ -106,6 +107,7 @@ public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats
     {
         var deleted = await _inner.DeleteAsync(key, cancellationToken).ConfigureAwait(false);
         _cache.Remove(key);
+        RemoveLru(key);
         return deleted;
     }
 
@@ -116,6 +118,7 @@ public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats
     {
         var updated = await _inner.SetTtlAsync(key, ttl, cancellationToken).ConfigureAwait(false);
         _cache.Remove(key);
+        RemoveLru(key);
         return updated;
     }
 
@@ -126,6 +129,7 @@ public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats
     {
         var updated = await _inner.RemoveTtlAsync(key, cancellationToken).ConfigureAwait(false);
         _cache.Remove(key);
+        RemoveLru(key);
         return updated;
     }
 
@@ -153,7 +157,7 @@ public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats
             }
 
             string? evictedKey = null;
-            var limit = Math.Max(1, _options.MaxEntries);
+            var limit = Math.Max(CacheOptions.MinimumMaxEntries, _options.MaxEntries);
             if (_lruKeys.Count >= limit && _lruKeys.First is { } oldest)
             {
                 evictedKey = oldest.Value;

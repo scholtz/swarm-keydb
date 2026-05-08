@@ -294,11 +294,14 @@ static async Task CachingKeyValueStoreRespectsKeyTtlAsync()
     Assert(await store.SetTtlAsync("ttl:key", TimeSpan.FromSeconds(1)), "SetTtlAsync should succeed.");
     _ = await store.GetAsync("ttl:key");
 
-    await Task.Delay(1500);
-    var afterExpiry = await store.GetAsync("ttl:key");
+    var afterExpiry = await WaitUntilValueAsync(
+        action: () => store.GetAsync("ttl:key"),
+        predicate: value => value is null,
+        timeout: TimeSpan.FromSeconds(2),
+        pollInterval: TimeSpan.FromMilliseconds(50));
 
     AssertEqual(null, afterExpiry);
-    AssertEqual(2, inner.GetCallCount("ttl:key"));
+    Assert(inner.GetCallCount("ttl:key") >= 2, "Expected at least one re-read after TTL expiry.");
 }
 
 static async Task CachingKeyValueStoreMaxEntriesEvictsLruAsync()
@@ -382,6 +385,24 @@ static long ParseIntegerResponse(string response)
 {
     Assert(response.StartsWith(':') && response.EndsWith("\r\n", StringComparison.Ordinal), "Expected RESP integer response.");
     return long.Parse(response[1..^2]);
+}
+
+static async Task<T> WaitUntilValueAsync<T>(Func<Task<T>> action, Func<T, bool> predicate, TimeSpan timeout, TimeSpan pollInterval)
+{
+    var deadline = DateTimeOffset.UtcNow.Add(timeout);
+    T lastValue = await action();
+    while (DateTimeOffset.UtcNow < deadline)
+    {
+        if (predicate(lastValue))
+        {
+            return lastValue;
+        }
+
+        await Task.Delay(pollInterval);
+        lastValue = await action();
+    }
+
+    return lastValue;
 }
 
 internal sealed record Settings(bool Enabled, int Count);

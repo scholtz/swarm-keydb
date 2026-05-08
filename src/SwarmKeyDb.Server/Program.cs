@@ -17,13 +17,13 @@ ISwarmClient swarmClient = backend.Equals("bee", StringComparison.OrdinalIgnoreC
 var cacheOptions = new CacheOptions
 {
     Enabled = GetBool("SWARM_KEYDB_CACHE_ENABLED", true),
-    MaxEntries = Math.Max(1, GetInt("SWARM_KEYDB_CACHE_MAX_ENTRIES", 1_000)),
+    MaxEntries = Math.Max(CacheOptions.MinimumMaxEntries, GetInt("SWARM_KEYDB_CACHE_MAX_ENTRIES", 1_000)),
     DefaultEntryTtl = GetNullableInt("SWARM_KEYDB_CACHE_DEFAULT_TTL_SECONDS") is { } ttlSeconds
         ? TimeSpan.FromSeconds(ttlSeconds)
         : null
 };
 var services = new ServiceCollection();
-services.AddLogging(builder => builder.AddSimpleConsole().SetMinimumLevel(LogLevel.Information));
+services.AddLogging(builder => builder.AddSimpleConsole().SetMinimumLevel(GetLogLevel("SWARM_KEYDB_LOG_LEVEL", LogLevel.Information)));
 services.AddOptions();
 services.AddSingleton<IOptions<CacheOptions>>(Options.Create(cacheOptions));
 services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
@@ -55,6 +55,9 @@ static int? GetNullableInt(string name) =>
 
 static bool GetBool(string name, bool defaultValue) =>
     bool.TryParse(Environment.GetEnvironmentVariable(name), out var value) ? value : defaultValue;
+
+static LogLevel GetLogLevel(string name, LogLevel defaultValue) =>
+    Enum.TryParse<LogLevel>(Environment.GetEnvironmentVariable(name), ignoreCase: true, out var level) ? level : defaultValue;
 
 static string RequireEnvironment(string name) =>
     Environment.GetEnvironmentVariable(name) ?? throw new InvalidOperationException($"Environment variable {name} is required.");
