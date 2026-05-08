@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
 const SwarmKeyDbContext = createContext(null);
 
@@ -178,7 +178,7 @@ export function useSwarmValue(key, options = {}) {
   }));
   const pendingPromiseRef = useRef(null);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     setState((current) => ({ ...current, loading: true, error: null }));
     const pending = client.get(key)
       .then((raw) => {
@@ -199,7 +199,7 @@ export function useSwarmValue(key, options = {}) {
 
     pendingPromiseRef.current = pending;
     return pending;
-  };
+  }, [client, deserialize, key, store]);
 
   useEffect(() => {
     const unsubscribe = store.subscribeKey(key, (value, exists) => {
@@ -211,7 +211,7 @@ export function useSwarmValue(key, options = {}) {
     }
 
     return unsubscribe;
-  }, [client, deserialize, key, store]);
+  }, [key, refresh, store]);
 
   if (throwErrors && state.error) {
     throw state.error;
@@ -292,7 +292,7 @@ export function useSwarmKeys(prefix = '', options = {}) {
   const [state, setState] = useState({ keys: [], loading: true, error: null });
   const pendingPromiseRef = useRef(null);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     setState((current) => ({ ...current, loading: true, error: null }));
     const pattern = prefix.length > 0 ? `${prefix}*` : '*';
     const pending = client.list(pattern)
@@ -313,7 +313,7 @@ export function useSwarmKeys(prefix = '', options = {}) {
 
     pendingPromiseRef.current = pending;
     return pending;
-  };
+  }, [client, prefix]);
 
   useEffect(() => {
     const updateKeys = ({ key, exists }) => {
@@ -336,7 +336,7 @@ export function useSwarmKeys(prefix = '', options = {}) {
     const unsubscribe = store.subscribeChange(updateKeys);
     refresh().catch(() => {});
     return unsubscribe;
-  }, [client, prefix, store]);
+  }, [prefix, refresh, store]);
 
   if (throwErrors && state.error) {
     throw state.error;

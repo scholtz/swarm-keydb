@@ -107,7 +107,7 @@ export class SwarmKeyDbService {
           throw error;
         }
 
-        await sleep(this.retryDelayMs * (attempt + 1));
+        await sleep(this.retryDelayMs * (2 ** attempt));
         attempt += 1;
       }
     }

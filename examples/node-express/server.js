@@ -59,8 +59,9 @@ app.get('/profile', async (_req, res, next) => {
   }
 });
 
-const server = app.listen(3001, () => {
-  console.log('Node/Express SwarmKeyDb example listening on http://127.0.0.1:3001');
+const port = Number(process.env.PORT ?? 3001);
+const server = app.listen(port, () => {
+  console.log(`Node/Express SwarmKeyDb example listening on http://127.0.0.1:${port}`);
 });
 
 process.on('SIGINT', async () => {
