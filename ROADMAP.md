@@ -26,7 +26,7 @@
 - [ ] Provide detailed documentation with tutorials and examples. (35%: docs structure, development guide, deployment guide, and configuration reference added)
 - [x] Add CLI tools for database management and debugging. (100%)
 - [x] Implement monitoring dashboard with metrics and logs. (100%: `/metrics`, `/health`, `/ready`, `/dashboard`, structured command logging with correlation IDs)
-- [ ] Offer migration tools from traditional databases.
+- [x] Offer migration tools from traditional databases. (100%: `swarmkeydb-migrate` CLI supports SCAN-based import, prefix filters, dry-run, resumable checkpoints, TTL preservation, validation sampling, and Docker demo)
 
 ## Ecosystem Integration
 - [ ] Integrate with IPFS for hybrid storage options.
