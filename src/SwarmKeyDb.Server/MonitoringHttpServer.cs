@@ -15,6 +15,7 @@ public sealed class MonitoringHttpServer : IDisposable
     private readonly ILogger<MonitoringHttpServer> _logger;
     private readonly IShardHealthProvider? _shardHealthProvider;
     private readonly IBackendStatusProvider? _backendStatusProvider;
+    private readonly EthereumBridgeService? _ethereumBridge;
 
     public MonitoringHttpServer(
         IPAddress address,
@@ -25,7 +26,8 @@ public sealed class MonitoringHttpServer : IDisposable
         bool dashboardEnabled,
         ILogger<MonitoringHttpServer> logger,
         IShardHealthProvider? shardHealthProvider = null,
-        IBackendStatusProvider? backendStatusProvider = null)
+        IBackendStatusProvider? backendStatusProvider = null,
+        EthereumBridgeService? ethereumBridge = null)
     {
         _metrics = metrics;
         _readinessProbe = readinessProbe;
@@ -34,6 +36,7 @@ public sealed class MonitoringHttpServer : IDisposable
         _logger = logger;
         _shardHealthProvider = shardHealthProvider;
         _backendStatusProvider = backendStatusProvider;
+        _ethereumBridge = ethereumBridge;
         _listener.Prefixes.Add($"http://{(address.Equals(IPAddress.Any) ? "+" : address.ToString())}:{port}/");
     }
 
@@ -163,6 +166,33 @@ public sealed class MonitoringHttpServer : IDisposable
                         status = backend.Ready ? "healthy" : "unreachable",
                         message = backend.Message
                     })
+                },
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (path.Equals("/ethereum/bridge", StringComparison.OrdinalIgnoreCase))
+        {
+            var bridgeState = _ethereumBridge?.GetState() ?? new EthereumBridgeState();
+            // Return 200 when bridge is disabled (intentional) or connected.
+            // Return 503 only when the bridge is enabled but not currently operational
+            // (connecting / retrying / error) to signal a transient failure.
+            var statusCode = bridgeState.Status is EthereumBridgeStatus.Connected
+                                                 or EthereumBridgeStatus.Disabled
+                ? HttpStatusCode.OK
+                : HttpStatusCode.ServiceUnavailable;
+            await WriteJsonAsync(
+                context.Response,
+                statusCode,
+                new
+                {
+                    status = bridgeState.Status.ToString().ToLowerInvariant(),
+                    lastProcessedBlock = bridgeState.LastProcessedBlock,
+                    eventCount = bridgeState.EventCount,
+                    connectedSince = bridgeState.ConnectedSince,
+                    lastError = bridgeState.LastError,
+                    contractAddress = bridgeState.ContractAddress,
+                    rpcUrl = bridgeState.RpcUrl
                 },
                 cancellationToken).ConfigureAwait(false);
             return;

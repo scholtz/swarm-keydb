@@ -1,0 +1,72 @@
+# Docker Compose environment for local Ethereum development with SwarmKeyDb.
+#
+# This spins up:
+#   - A local Hardhat node (Ethereum JSON-RPC at :8545)
+#   - SwarmKeyDb with the Ethereum bridge enabled, pointing to the local node
+#
+# Prerequisites:
+#   1. Build the SwarmKeyDb image: docker build -t swarm-keydb:local .
+#   2. Deploy the contract:
+#        cd ethereum && npm ci
+#        npx hardhat run scripts/deploy.js --network localhost
+#   3. Update ETH_CONTRACT_ADDRESS below with the deployed address.
+#
+# Usage:
+#   docker compose -f docker-compose.ethereum.yml up
+#   # in another terminal:
+#   redis-cli -p 6379 SET hello world
+#   redis-cli -p 6379 GET hello
+#
+# After deploying the contract, you can trigger a write from Solidity:
+#   const oracle = await ethers.getContractAt("SwarmKeyDbOracle", "<address>");
+#   await oracle.requestWrite("nft:metadata:1", Buffer.from('{"name":"My NFT"}'));
+# ...and the bridge will automatically store it in SwarmKeyDb.
+
+services:
+  hardhat-node:
+    image: node:20-slim
+    working_dir: /app
+    command: >
+      sh -c "npm ci && npx hardhat node --hostname 0.0.0.0"
+    volumes:
+      - ./ethereum:/app
+    ports:
+      - "8545:8545"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8545', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  swarm-keydb:
+    image: ${SWARM_KEYDB_IMAGE:-swarm-keydb:local}
+    restart: unless-stopped
+    depends_on:
+      hardhat-node:
+        condition: service_healthy
+    environment:
+      # Use in-memory/file backend for local development (no real Bee node needed)
+      SWARM_KEYDB_BACKEND: ${SWARM_KEYDB_BACKEND:-file}
+      SWARM_KEYDB_BIND: 0.0.0.0
+      SWARM_KEYDB_PORT: 6379
+      SWARM_KEYDB_DATA_DIR: /data
+      SWARM_KEYDB_INTEGRITY_ENABLED: "false"
+
+      # Ethereum bridge configuration
+      ETH_BRIDGE_ENABLED: "true"
+      ETH_RPC_URL: ${ETH_RPC_URL:-http://hardhat-node:8545}
+      ETH_CONTRACT_ADDRESS: ${ETH_CONTRACT_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}
+      ETH_PRIVATE_KEY: ${ETH_PRIVATE_KEY:-}
+      ETH_POLL_INTERVAL_SECONDS: "2"
+
+      # Monitoring
+      DASHBOARD_ENABLED: "true"
+      DASHBOARD_PORT: "8080"
+    ports:
+      - "6379:6379"
+      - "8080:8080"
+    volumes:
+      - swarm-keydb-data:/data
+
+volumes:
+  swarm-keydb-data:

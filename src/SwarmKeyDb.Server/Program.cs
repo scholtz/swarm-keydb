@@ -68,6 +68,15 @@ var asyncProcessingOptions = new AsyncProcessingOptions
     WriteBatchSize = Math.Max(1, GetInt("SWARM_KEYDB_WRITE_BATCH_SIZE", 64)),
     BatchFlushIntervalMs = Math.Max(0, GetInt("SWARM_KEYDB_BATCH_FLUSH_INTERVAL_MS", 100))
 };
+var ethereumBridgeOptions = new EthereumBridgeOptions
+{
+    Enabled = GetBoolFromMany(defaultValue: false, "ETH_BRIDGE_ENABLED", "Ethereum:Enabled"),
+    RpcUrl = GetFirstSetting("ETH_RPC_URL", "Ethereum:RpcUrl"),
+    ContractAddress = GetFirstSetting("ETH_CONTRACT_ADDRESS", "Ethereum:ContractAddress"),
+    PrivateKeyHex = GetFirstSetting("ETH_PRIVATE_KEY", "Ethereum:PrivateKeyHex"),
+    PollIntervalSeconds = GetNullableIntFromMany("ETH_POLL_INTERVAL_SECONDS", "Ethereum:PollIntervalSeconds") ?? 5,
+    ReconnectDelaySeconds = GetNullableIntFromMany("ETH_RECONNECT_DELAY_SECONDS", "Ethereum:ReconnectDelaySeconds") ?? 5
+};
 var services = new ServiceCollection();
 services.AddLogging(builder =>
 {
@@ -281,12 +290,27 @@ var server = new RedisServer(
     monitoringMetrics.OnConnectionClosed,
     provider.GetRequiredService<ILogger<RedisServer>>());
 
+// Create the Ethereum bridge (opt-in: only active when ETH_BRIDGE_ENABLED=true)
+EthereumBridgeService? ethereumBridge = null;
+if (ethereumBridgeOptions.Enabled)
+{
+    ethereumBridge = new EthereumBridgeService(
+        provider.GetRequiredService<IKeyValueStore>(),
+        ethereumBridgeOptions,
+        provider.GetRequiredService<ILogger<EthereumBridgeService>>());
+}
+
 using var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, eventArgs) =>
 {
     eventArgs.Cancel = true;
     cts.Cancel();
 };
+
+if (ethereumBridge is not null)
+{
+    await ethereumBridge.StartAsync(cts.Token);
+}
 
 var monitoringServers = new List<MonitoringHttpServer>();
 var monitoringTasks = new List<Task>();
@@ -301,7 +325,8 @@ if (dashboardEnabled)
         dashboardEnabled: true,
         provider.GetRequiredService<ILogger<MonitoringHttpServer>>(),
         shardHealthProvider,
-        backendStatusProvider);
+        backendStatusProvider,
+        ethereumBridge);
     monitoringServers.Add(dashboardServer);
     monitoringTasks.Add(dashboardServer.RunAsync(cts.Token));
 }
@@ -317,13 +342,20 @@ if (metricsEnabled && (!dashboardEnabled || metricsPort != dashboardPort))
         dashboardEnabled: false,
         provider.GetRequiredService<ILogger<MonitoringHttpServer>>(),
         shardHealthProvider,
-        backendStatusProvider);
+        backendStatusProvider,
+        ethereumBridge);
     monitoringServers.Add(metricsServer);
     monitoringTasks.Add(metricsServer.RunAsync(cts.Token));
 }
 
 await server.RunAsync(cts.Token);
 await Task.WhenAll(monitoringTasks);
+
+if (ethereumBridge is not null)
+{
+    await ethereumBridge.DisposeAsync();
+}
+
 foreach (var monitoringServer in monitoringServers)
 {
     monitoringServer.Dispose();
