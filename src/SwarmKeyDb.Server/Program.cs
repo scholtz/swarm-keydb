@@ -132,8 +132,8 @@ if (shardingOptions.Enabled)
             shardClient = new FileSwarmClient(Path.Combine(shardDataDir, "objects"));
         }
 
-        var instrumentedClient = new InstrumentedSwarmClient(shardClient, monitoringMetrics);
-        var shardStore = new SwarmKeyValueStore(swarmClient: instrumentedClient, index: shardIndex, integrityOptions: integrityOptions);
+        var instrumentedShardClient = new InstrumentedSwarmClient(shardClient, monitoringMetrics);
+        var shardStore = new SwarmKeyValueStore(instrumentedShardClient, shardIndex, integrityOptions);
         shardStores.Add(new ShardStore(shardName, shardStore));
         shardReadiness.Add(new ShardReadinessRegistration(shardName, shardProbe, shardStore));
     }

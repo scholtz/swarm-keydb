@@ -193,7 +193,11 @@ public sealed class MonitoringHttpServer : IDisposable
     }
 
     private static string EscapeMetricLabel(string value) =>
-        value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
+        value
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\"", "\\\"", StringComparison.Ordinal)
+            .Replace("\n", "\\n", StringComparison.Ordinal)
+            .Replace("\r", "\\r", StringComparison.Ordinal);
 
     private const string DashboardHtml = """
                                          <!doctype html>

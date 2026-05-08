@@ -20,7 +20,7 @@ Inspect shard health and metrics:
 ```bash
 curl http://localhost:8080/health
 curl http://localhost:8080/ready
-curl http://localhost:9090/metrics | grep swarmkeydb_shard_
+curl http://localhost:9090/metrics | grep -E 'swarmkeydb_shard_(up|key_count)'
 ```
 
 Stop:

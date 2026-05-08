@@ -53,7 +53,7 @@ public sealed class CompositeShardReadinessProbe : IReadinessProbe, IShardHealth
         catch (Exception ex)
         {
             ready = false;
-            message = $"key listing failed: {ex.Message}";
+            message = $"key listing failed for shard '{registration.Shard}': {ex.Message}";
         }
 
         return new ShardHealthStatus(registration.Shard, ready, message, keyCount);

@@ -43,6 +43,7 @@ var tests = new (string Name, Func<Task> Test)[]
     ("batch operations resp format", BatchOperationsRespFormatAsync),
     ("consistent hash ring distributes keys with low imbalance", ConsistentHashRingDistributesKeysWithLowImbalanceAsync),
     ("sharding router routes deterministically and minimizes redistribution", ShardingRouterRoutesDeterministicallyAndMinimizesRedistributionAsync),
+    ("sharding router routes key operations to resolved shard", ShardingRouterRoutesKeyOperationsToResolvedShardAsync),
     ("sharding router scan aggregates keys from all shards", ShardingRouterScanAggregatesKeysFromAllShardsAsync),
     ("async batch get and put round trip", AsyncBatchGetAndPutRoundTripAsync),
     ("async flush waits for queued fire and forget writes", AsyncFlushWaitsForQueuedFireAndForgetWritesAsync),
@@ -690,6 +691,42 @@ static Task ShardingRouterRoutesDeterministicallyAndMinimizesRedistributionAsync
     return Task.CompletedTask;
 }
 
+static async Task ShardingRouterRoutesKeyOperationsToResolvedShardAsync()
+{
+    var storeA = new CountingKeyValueStore();
+    var storeB = new CountingKeyValueStore();
+    var storeC = new CountingKeyValueStore();
+    var stores = new Dictionary<string, CountingKeyValueStore>(StringComparer.Ordinal)
+    {
+        ["a"] = storeA,
+        ["b"] = storeB,
+        ["c"] = storeC
+    };
+
+    var router = new ShardingRouter(
+    [
+        new ShardStore("a", storeA),
+        new ShardStore("b", storeB),
+        new ShardStore("c", storeC)
+    ],
+        shardCount: 3,
+        virtualNodesPerNode: 128);
+
+    const string key = "route:key";
+    var expectedShard = router.ResolveShardName(key);
+    await router.PutAsync(key, Encoding.UTF8.GetBytes("value"));
+    AssertEqual("value", Encoding.UTF8.GetString((await router.GetAsync(key))!));
+
+    foreach (var entry in stores)
+    {
+        var hasKey = (await entry.Value.GetAsync(key)) is not null;
+        AssertEqual(entry.Key == expectedShard, hasKey);
+    }
+
+    Assert(await router.DeleteAsync(key), "Delete should route to the same shard and remove the key.");
+    Assert(await router.GetAsync(key) is null, "Deleted key should not be retrievable.");
+}
+
 static async Task ShardingRouterScanAggregatesKeysFromAllShardsAsync()
 {
     var router = new ShardingRouter(
@@ -707,9 +744,13 @@ static async Task ShardingRouterScanAggregatesKeysFromAllShardsAsync()
         .ToArray();
     await client.BatchPutAsync(values);
 
-    for (var i = 0; i < 1_000; i++)
+    var reads = Enumerable.Range(0, 1_000)
+        .Select(async i => (Index: i, Value: await client.GetStringAsync($"item:{i:D4}")))
+        .ToArray();
+    var readResults = await Task.WhenAll(reads);
+    foreach (var result in readResults)
     {
-        AssertEqual($"v-{i}", await client.GetStringAsync($"item:{i:D4}"));
+        AssertEqual($"v-{result.Index}", result.Value);
     }
 
     var keys = await client.KeysAsync();

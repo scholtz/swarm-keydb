@@ -37,8 +37,11 @@ public sealed class ShardingRouter : IKeyValueStore
     public string ResolveShardName(string key)
     {
         ArgumentNullException.ThrowIfNull(key);
-        var bucket = JumpConsistentHash(ConsistentHashRing.HashToUInt64(key), _shardCount);
-        return _ring.GetNode($"bucket:{bucket}:{key}");
+        // First map to a stable logical bucket (bounded by operator-configured shard count),
+        // then map to a physical node via consistent hashing so node set changes move only part of keys.
+        var keyHash = ConsistentHashRing.HashToUInt64(key);
+        var bucket = JumpConsistentHash(keyHash, _shardCount);
+        return _ring.GetNode(CombineHash(keyHash, bucket));
     }
 
     public Task PutAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default) =>
@@ -102,5 +105,14 @@ public sealed class ShardingRouter : IKeyValueStore
         }
 
         return (int)selected;
+    }
+
+    private static ulong CombineHash(ulong keyHash, int bucket)
+    {
+        var mixed = keyHash ^ (unchecked((ulong)bucket) * 0x9E3779B97F4A7C15UL);
+        mixed ^= mixed >> 33;
+        mixed *= 0xFF51AFD7ED558CCDUL;
+        mixed ^= mixed >> 33;
+        return mixed;
     }
 }

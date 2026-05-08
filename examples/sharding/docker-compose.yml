@@ -2,6 +2,7 @@ services:
   swarm-keydb-sharded:
     build:
       context: ../..
+      # Uses the repository root Dockerfile when invoked from examples/sharding.
       dockerfile: Dockerfile
     image: swarm-keydb:sharded
     container_name: swarm-keydb-sharded

@@ -40,8 +40,11 @@ public sealed class ConsistentHashRing
     public string GetNode(string key)
     {
         ArgumentNullException.ThrowIfNull(key);
+        return GetNode(HashToUInt64(key));
+    }
 
-        var position = HashToUInt64(key);
+    public string GetNode(ulong position)
+    {
         var index = Array.BinarySearch(_positions, position);
         if (index < 0)
         {

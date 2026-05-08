@@ -207,6 +207,8 @@ Environment variable equivalents:
 - `SWARM_KEYDB_SHARDING_VIRTUAL_NODES=128`
 - `SWARM_KEYDB_SHARDING_NODES='[{"name":"shard-a","beeUrl":"http://bee-a:1633/"},...]'`
 
+If `SWARM_KEYDB_SHARDING_SHARD_COUNT` is omitted, SwarmKeyDb defaults it to the number of configured shard nodes.
+
 Manual rebalancing in v1 is operator-driven: deploy the new topology, copy keys via `SCAN` + rewrite (`GET`/`SET`) through the new router, verify shard health, then retire old nodes.
 
 Copy-pasteable 3-shard Docker Compose example:

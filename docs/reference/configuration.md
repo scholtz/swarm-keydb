@@ -27,6 +27,8 @@
 | `SWARM_KEYDB_SHARDING_SHARD_COUNT` | derived from configured nodes (min `1`, max `64`) | Number of hash buckets used for key routing. |
 | `SWARM_KEYDB_SHARDING_VIRTUAL_NODES` | `128` | Virtual nodes per shard in the consistent hash ring. |
 | `SWARM_KEYDB_SHARDING_NODES` | unset | JSON array of shard nodes (`name`, optional `beeUrl`, optional `postageBatchId`, optional `dataDir`). |
+
+`SWARM_KEYDB_SHARDING_SHARD_COUNT` defaults to the configured shard node count when not explicitly set.
 | `SWARM_KEYDB_LOG_LEVEL` | `Information` | Minimum console log level. |
 | `LOG_LEVEL` | `Information` | Preferred log level override (`Debug`, `Information`, `Warning`, `Error`). |
 | `JSON_LOGS` | auto (`true` outside Development) | Forces JSON (`true`) or simple console (`false`) formatting. |
