@@ -265,7 +265,7 @@ public sealed class SwarmKeyValueStore : IKeyValueStore
     }
 
     private static string ComputeHashHex(ReadOnlySpan<byte> payload) =>
-        Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
+        Convert.ToHexStringLower(SHA256.HashData(payload));
 
     private static bool HasIntegrityEnvelope(byte[] data) =>
         data.Length >= IntegrityEnvelopeMagic.Length &&

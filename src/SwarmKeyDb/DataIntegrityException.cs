@@ -30,6 +30,6 @@ public sealed class DataIntegrityException : InvalidOperationException
             return $"Data integrity check failed for key '{key}'. {detail} The data may have been corrupted or tampered with.";
         }
 
-        return $"Data integrity check failed for key '{key}'. Expected hash: {expectedHash ?? "<unknown>"}, got: {actualHash ?? "<unknown>"}. The data may have been corrupted or tampered with.";
+        return $"Data integrity check failed for key '{key}'. Expected hash: {expectedHash ?? "(not provided)"}, got: {actualHash ?? "(not provided)"}. The data may have been corrupted or tampered with.";
     }
 }
