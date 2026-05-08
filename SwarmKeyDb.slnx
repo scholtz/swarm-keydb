@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj" />
+    <Project Path="src/SwarmKeyDb/SwarmKeyDb.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SwarmKeyDb.Tests/SwarmKeyDb.Tests.csproj" />
+  </Folder>
+</Solution>
