@@ -22,16 +22,28 @@ var cacheOptions = new CacheOptions
         ? TimeSpan.FromSeconds(ttlSeconds)
         : null
 };
+var compressionOptions = new CompressionOptions
+{
+    Enabled = GetBool("SWARM_KEYDB_COMPRESSION_ENABLED", false),
+    Algorithm = Enum.TryParse<CompressionAlgorithm>(
+        Environment.GetEnvironmentVariable("SWARM_KEYDB_COMPRESSION_ALGORITHM"), ignoreCase: true, out var algo)
+        ? algo
+        : CompressionAlgorithm.GZip,
+    MinSizeBytes = GetInt("SWARM_KEYDB_COMPRESSION_MIN_SIZE_BYTES", 64)
+};
 var services = new ServiceCollection();
 services.AddLogging(builder => builder.AddSimpleConsole().SetMinimumLevel(GetLogLevel("SWARM_KEYDB_LOG_LEVEL", LogLevel.Information)));
 services.AddOptions();
 services.AddSingleton<IOptions<CacheOptions>>(Options.Create(cacheOptions));
+services.AddSingleton<IOptions<CompressionOptions>>(Options.Create(compressionOptions));
 services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
-services.AddSingleton<IKeyValueStore>(sp => new CachingKeyValueStore(
-    new SwarmKeyValueStore(swarmClient, index),
-    sp.GetRequiredService<IMemoryCache>(),
-    sp.GetRequiredService<IOptions<CacheOptions>>(),
-    sp.GetRequiredService<ILogger<CachingKeyValueStore>>()));
+services.AddSingleton<IKeyValueStore>(sp =>
+{
+    IKeyValueStore store = new SwarmKeyValueStore(swarmClient, index);
+    store = new CompressingKeyValueStore(store, sp.GetRequiredService<IOptions<CompressionOptions>>(), sp.GetRequiredService<ILogger<CompressingKeyValueStore>>());
+    store = new CachingKeyValueStore(store, sp.GetRequiredService<IMemoryCache>(), sp.GetRequiredService<IOptions<CacheOptions>>(), sp.GetRequiredService<ILogger<CachingKeyValueStore>>());
+    return store;
+});
 services.AddSingleton<ICacheStats>(sp => (ICacheStats)sp.GetRequiredService<IKeyValueStore>());
 
 using var provider = services.BuildServiceProvider();

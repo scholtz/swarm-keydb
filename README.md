@@ -63,6 +63,34 @@ The server enables an in-memory read-through cache by default for hot keys. Conf
 
 Writes (`SET`, `SETEX`, `MSET`, etc.), deletes, and TTL changes invalidate cached entries so subsequent reads refresh from Swarm/index data.
 
+### Compression
+
+The server supports transparent value compression to reduce Swarm storage costs and improve transfer latency. Configure it with:
+
+- `SWARM_KEYDB_COMPRESSION_ENABLED` (`true`/`false`, default `false`)
+- `SWARM_KEYDB_COMPRESSION_ALGORITHM` (`GZip` or `Brotli`, default `GZip`)
+- `SWARM_KEYDB_COMPRESSION_MIN_SIZE_BYTES` (minimum value size to compress, default `64`)
+
+**Algorithm guidance:**
+
+| Algorithm | Use when |
+|-----------|----------|
+| `GZip`    | General-purpose; best compatibility; slightly faster compression/decompression |
+| `Brotli`  | Better compression ratio for text-heavy payloads (JSON, HTML, configs); slightly slower |
+
+**Backward compatibility:** Values stored before compression was enabled are returned unchanged. The store detects compressed values by their magic-byte header (`0x1F 0x8B` for GZip, `0xCE 0xB8` for Brotli) and decompresses automatically; raw legacy bytes pass through as-is.
+
+**Example (Docker):**
+
+```bash
+docker run --rm -p 6379:6379 \
+  -e SWARM_KEYDB_COMPRESSION_ENABLED=true \
+  -e SWARM_KEYDB_COMPRESSION_ALGORITHM=GZip \
+  -e SWARM_KEYDB_COMPRESSION_MIN_SIZE_BYTES=64 \
+  -v swarm-keydb-data:/data \
+  swarm-keydb
+```
+
 ## Docker
 
 ```bash
