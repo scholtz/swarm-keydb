@@ -29,6 +29,9 @@ var tests = new (string Name, Func<Task> Test)[]
     ("prefix scan returns matching keys", PrefixScanReturnsMatchingKeysAsync),
     ("range scan supports boundaries and reverse order", RangeScanSupportsBoundariesAndReverseOrderAsync),
     ("range scan rejects invalid bounds", RangeScanRejectsInvalidBoundsAsync),
+    ("privacy mode hashes index keys while keeping api behavior", PrivacyModeHashesIndexKeysWhileKeepingApiBehaviorAsync),
+    ("privacy mode requires local manifest for scans", PrivacyModeRequiresLocalManifestForScansAsync),
+    ("privacy key rotation migrates hmac tokens without rewriting payloads", PrivacyKeyRotationMigratesTokensAsync),
     ("scan async returns paginated opaque cursor", ScanAsyncReturnsPaginatedOpaqueCursorAsync),
     ("query async applies key and value predicates", QueryAsyncAppliesKeyAndValuePredicatesAsync),
     ("persistent file index supports restart querying", PersistentFileIndexSupportsRestartQueryingAsync),
@@ -128,6 +131,7 @@ var tests = new (string Name, Func<Task> Test)[]
     ("migrate checkpoint store saves and loads", MigrateCheckpointStoreSavesAndLoadsAsync),
     ("migrate dry run does not write to destination", MigrateDryRunDoesNotWriteToDestinationAsync),
     ("migrate preserves ttl on write", MigratePreservesTtlOnWriteAsync),
+    ("migrate can enable privacy by writing hmac-derived keys", MigrateCanEnablePrivacyByWritingHashedKeysAsync),
     ("keccak256 produces correct hash for known vectors", Keccak256ProducesCorrectHashForKnownVectorsAsync),
     ("ethereum bridge options disabled by default", EthereumBridgeOptionsDisabledByDefaultAsync),
     ("ethereum abi decodes data write requested event", EthereumAbiDecodesDataWriteRequestedEventAsync),
@@ -493,6 +497,69 @@ static async Task RangeScanRejectsInvalidBoundsAsync()
     }
 
     Assert(threw, "Expected a clear error when startKey is greater than endKey.");
+}
+
+static async Task PrivacyModeHashesIndexKeysWhileKeepingApiBehaviorAsync()
+{
+    const string privacyKeyHex = "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF";
+    var innerIndex = new InMemoryKeyIndex();
+    var store = new SwarmKeyValueStore(
+        new InMemorySwarmClient(),
+        innerIndex,
+        new SwarmKeyDbOptions
+        {
+            PrivacyMode = PrivacyMode.ObliviousHashing,
+            PrivacyKeyHex = privacyKeyHex
+        });
+
+    await store.PutAsync("profile:name", Encoding.UTF8.GetBytes("Ada"));
+    var tokenizedKeys = await innerIndex.ListKeysAsync();
+    AssertEqual(1, tokenizedKeys.Count);
+    Assert(tokenizedKeys[0] != "profile:name", "Underlying index key should be tokenized.");
+    Assert(!tokenizedKeys[0].Contains("profile:name", StringComparison.Ordinal), "Tokenized key must not contain plaintext key.");
+
+    AssertEqual("Ada", Encoding.UTF8.GetString((await store.GetAsync("profile:name"))!));
+    AssertSequenceEqual(new[] { "profile:name" }, await store.ListKeysAsync());
+}
+
+static async Task PrivacyModeRequiresLocalManifestForScansAsync()
+{
+    const string privacyKeyHex = "11223344556677889900AABBCCDDEEFF11223344556677889900AABBCCDDEEFF";
+    var strategy = HmacSha256KeyStrategy.FromHexKey(privacyKeyHex);
+    var innerIndex = new InMemoryKeyIndex();
+    await innerIndex.SetReferenceAsync(strategy.DeriveToken("hidden:key"), "ref:1");
+
+    var index = new PrivacyPreservingKeyIndex(innerIndex, strategy);
+    var threw = false;
+    try
+    {
+        _ = await index.ListKeysAsync();
+    }
+    catch (PrivacyModeException ex) when (ex.Message.Contains("local key manifest", StringComparison.Ordinal))
+    {
+        threw = true;
+    }
+
+    Assert(threw, "Expected privacy-preserving scans to require a local manifest when tokenized keys already exist.");
+}
+
+static async Task PrivacyKeyRotationMigratesTokensAsync()
+{
+    var oldStrategy = HmacSha256KeyStrategy.FromHexKey("A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1");
+    var inner = new InMemoryKeyIndex();
+    var index = new PrivacyPreservingKeyIndex(inner, oldStrategy);
+    await index.SetReferenceAsync("customer:42", "swarm-ref");
+    var oldToken = oldStrategy.DeriveToken("customer:42");
+    Assert(await inner.GetReferenceAsync(oldToken) is not null, "Expected old tokenized key to exist before rotation.");
+
+    var rotation = new PrivacyKeyRotationService(index);
+    var migrated = await rotation.RotateAsync("B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2");
+    AssertEqual(1, migrated);
+
+    var newToken = HmacSha256KeyStrategy.FromHexKey("B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2")
+        .DeriveToken("customer:42");
+    Assert(await inner.GetReferenceAsync(oldToken) is null, "Expected old token to be removed after rotation.");
+    AssertEqual("swarm-ref", await inner.GetReferenceAsync(newToken));
 }
 
 static async Task ScanAsyncReturnsPaginatedOpaqueCursorAsync()
@@ -1313,10 +1380,10 @@ static async Task MonitoringMetricsEndpointExposesCountersAsync()
 
     using var client = new HttpClient();
     var payload = await client.GetStringAsync($"http://127.0.0.1:{port}/metrics");
-    Assert(payload.Contains("swarmkeydb_operations_total{operation=\"get\",status=\"success\"}", StringComparison.Ordinal), "GET metrics should be exposed.");
-    Assert(payload.Contains("swarmkeydb_operations_total{operation=\"put\",status=\"success\"}", StringComparison.Ordinal), "PUT metrics should be exposed.");
-    Assert(payload.Contains("swarmkeydb_operations_total{operation=\"delete\",status=\"success\"}", StringComparison.Ordinal), "DELETE metrics should be exposed.");
-    Assert(payload.Contains("swarmkeydb_cache_hit_ratio 0.75", StringComparison.Ordinal), "Cache hit ratio should be computed from cache stats.");
+    Assert(payload.Contains("swarmkeydb_operations_total{operation=\"get\",status=\"success\",privacy_mode=\"none\"}", StringComparison.Ordinal), "GET metrics should be exposed.");
+    Assert(payload.Contains("swarmkeydb_operations_total{operation=\"put\",status=\"success\",privacy_mode=\"none\"}", StringComparison.Ordinal), "PUT metrics should be exposed.");
+    Assert(payload.Contains("swarmkeydb_operations_total{operation=\"delete\",status=\"success\",privacy_mode=\"none\"}", StringComparison.Ordinal), "DELETE metrics should be exposed.");
+    Assert(payload.Contains("swarmkeydb_cache_hit_ratio{privacy_mode=\"none\"} 0.75", StringComparison.Ordinal), "Cache hit ratio should be computed from cache stats.");
 
     cts.Cancel();
     await runTask;
@@ -1378,8 +1445,8 @@ static async Task MonitoringHealthEndpointReportsDegradedForUnhealthyShardAsync(
     Assert(payload.Contains("\"shard\":\"shard-b\"", StringComparison.Ordinal), "Expected unhealthy shard details.");
 
     var metricsPayload = await client.GetStringAsync($"http://127.0.0.1:{port}/metrics");
-    Assert(metricsPayload.Contains("swarmkeydb_shard_up{shard=\"shard-a\"} 1", StringComparison.Ordinal), "Expected shard-up metric for healthy shard.");
-    Assert(metricsPayload.Contains("swarmkeydb_shard_up{shard=\"shard-b\"} 0", StringComparison.Ordinal), "Expected shard-up metric for unhealthy shard.");
+    Assert(metricsPayload.Contains("swarmkeydb_shard_up{shard=\"shard-a\",privacy_mode=\"none\"} 1", StringComparison.Ordinal), "Expected shard-up metric for healthy shard.");
+    Assert(metricsPayload.Contains("swarmkeydb_shard_up{shard=\"shard-b\",privacy_mode=\"none\"} 0", StringComparison.Ordinal), "Expected shard-up metric for unhealthy shard.");
 
     cts.Cancel();
     await runTask;
@@ -2366,6 +2433,45 @@ static async Task MigratePreservesTtlOnWriteAsync()
     var destinationValue = await destination.ReadValueAsync("session:1", CancellationToken.None);
     Assert(destinationValue is not null, "Expected destination to contain migrated key.");
     Assert(Math.Abs((destinationValue!.Ttl!.Value - TimeSpan.FromSeconds(30)).TotalSeconds) <= 1, "Expected TTL to be preserved.");
+}
+
+static async Task MigrateCanEnablePrivacyByWritingHashedKeysAsync()
+{
+    var source = new FakeMigrationSource(
+    [
+        new MigrationEntry
+        {
+            Key = "account:alice",
+            Type = RedisDataType.String,
+            Payload = Encoding.UTF8.GetBytes("1"),
+            Ttl = null
+        }
+    ]);
+    var destination = new FakeMigrationDestination();
+    var checkpoint = new InMemoryMigrationCheckpointStore();
+    var reporter = new SilentMigrationReporter();
+    var engine = new MigrationEngine(source, destination, checkpoint, reporter, new Random(1));
+
+    const string privacyKeyHex = "0102030405060708090A0B0C0D0E0F100102030405060708090A0B0C0D0E0F10";
+    await engine.RunAsync(new MigrationOptions
+    {
+        SourceUri = new Uri("redis://source:6379"),
+        DestinationUri = new Uri("redis://destination:6380"),
+        DryRun = false,
+        Prefix = "account:",
+        CheckpointPath = "memory",
+        Validate = true,
+        ValidateSamplePercent = 100,
+        ScanCount = 10,
+        EnablePrivacy = true,
+        PrivacyKeyHex = privacyKeyHex
+    }, CancellationToken.None);
+
+    var strategy = HmacSha256KeyStrategy.FromHexKey(privacyKeyHex);
+    var token = strategy.DeriveToken("account:alice");
+    var value = await destination.ReadValueAsync(token, CancellationToken.None);
+    Assert(value is not null, "Expected destination to contain tokenized key.");
+    Assert(await destination.ReadValueAsync("account:alice", CancellationToken.None) is null, "Destination should not store plaintext key when privacy migration is enabled.");
 }
 
 static CliExecutionOptions CreateCliTestOptions()

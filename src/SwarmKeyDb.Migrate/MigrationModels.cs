@@ -12,6 +12,8 @@ public sealed class MigrationOptions
     public bool Validate { get; init; }
     public int ValidateSamplePercent { get; init; } = 5;
     public int ScanCount { get; init; } = 500;
+    public bool EnablePrivacy { get; init; }
+    public string? PrivacyKeyHex { get; init; }
 }
 
 public enum RedisDataType

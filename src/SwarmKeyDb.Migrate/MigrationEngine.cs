@@ -29,7 +29,7 @@ public sealed class MigrationEngine
 
         var startedAt = DateTimeOffset.UtcNow;
         var counters = new MigrationCounters();
-        var sampleKeys = new List<string>();
+        var sampleKeys = new List<(string SourceKey, string DestinationKey)>();
         var matchPattern = BuildScanPattern(options.Prefix);
 
         if (checkpoint.PendingBatchKeys.Count > 0 && checkpoint.PendingBatchNextCursor is not null)
@@ -101,7 +101,7 @@ public sealed class MigrationEngine
         ulong nextCursor,
         MigrationOptions options,
         MigrationCounters counters,
-        List<string> sampleKeys,
+        List<(string SourceKey, string DestinationKey)> sampleKeys,
         long? estimatedTotal,
         DateTimeOffset startedAt,
         CancellationToken cancellationToken)
@@ -124,15 +124,25 @@ public sealed class MigrationEngine
                 var entry = await _source.ReadEntryAsync(key, cancellationToken).ConfigureAwait(false);
                 if (entry is not null)
                 {
+                    var destinationKey = GetDestinationKey(entry.Key, options);
+                    var destinationEntry = destinationKey == entry.Key
+                        ? entry
+                        : new MigrationEntry
+                        {
+                            Key = destinationKey,
+                            Type = entry.Type,
+                            Payload = entry.Payload,
+                            Ttl = entry.Ttl
+                        };
                     if (!options.DryRun)
                     {
-                        await _destination.WriteEntryAsync(entry, cancellationToken).ConfigureAwait(false);
+                        await _destination.WriteEntryAsync(destinationEntry, cancellationToken).ConfigureAwait(false);
                     }
 
                     counters.Migrated++;
                     if (_random.Next(0, 100) < options.ValidateSamplePercent)
                     {
-                        sampleKeys.Add(key);
+                        sampleKeys.Add((entry.Key, destinationKey));
                     }
                 }
             }
@@ -166,7 +176,7 @@ public sealed class MigrationEngine
     }
 
     private async Task<IReadOnlyList<ValidationMismatch>> ValidateSampleAsync(
-        IReadOnlyList<string> sampledKeys,
+        IReadOnlyList<(string SourceKey, string DestinationKey)> sampledKeys,
         int samplePercent,
         CancellationToken cancellationToken)
     {
@@ -179,25 +189,25 @@ public sealed class MigrationEngine
         var keys = sampledKeys
             .OrderBy(_ => _random.Next())
             .Take(targetCount)
-            .Distinct(StringComparer.Ordinal)
+            .Distinct()
             .ToArray();
 
         var mismatches = new List<ValidationMismatch>();
-        foreach (var key in keys)
+        foreach (var keyPair in keys)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var sourceEntry = await _source.ReadEntryAsync(key, cancellationToken).ConfigureAwait(false);
-            var destinationValue = await _destination.ReadValueAsync(key, cancellationToken).ConfigureAwait(false);
+            var sourceEntry = await _source.ReadEntryAsync(keyPair.SourceKey, cancellationToken).ConfigureAwait(false);
+            var destinationValue = await _destination.ReadValueAsync(keyPair.DestinationKey, cancellationToken).ConfigureAwait(false);
 
             if (sourceEntry is null || destinationValue is null)
             {
-                mismatches.Add(new ValidationMismatch { Key = key, Reason = "missing source or destination value" });
+                mismatches.Add(new ValidationMismatch { Key = keyPair.SourceKey, Reason = "missing source or destination value" });
                 continue;
             }
 
             if (!sourceEntry.Payload.AsSpan().SequenceEqual(destinationValue.Payload))
             {
-                mismatches.Add(new ValidationMismatch { Key = key, Reason = "payload mismatch" });
+                mismatches.Add(new ValidationMismatch { Key = keyPair.SourceKey, Reason = "payload mismatch" });
                 continue;
             }
 
@@ -205,7 +215,7 @@ public sealed class MigrationEngine
             {
                 mismatches.Add(new ValidationMismatch
                 {
-                    Key = key,
+                    Key = keyPair.SourceKey,
                     Reason = $"ttl mismatch source={sourceEntry.Ttl?.TotalSeconds:F0}s destination={destinationValue.Ttl?.TotalSeconds:F0}s"
                 });
             }
@@ -227,6 +237,35 @@ public sealed class MigrationEngine
         }
 
         return Math.Abs((sourceTtl.Value - destinationTtl.Value).TotalSeconds) <= 1;
+    }
+
+    private static string GetDestinationKey(string sourceKey, MigrationOptions options)
+    {
+        if (!options.EnablePrivacy)
+        {
+            return sourceKey;
+        }
+
+        if (string.IsNullOrWhiteSpace(options.PrivacyKeyHex))
+        {
+            throw new InvalidOperationException("EnablePrivacy requires PrivacyKeyHex.");
+        }
+
+        return DeriveHmacToken(sourceKey, options.PrivacyKeyHex);
+    }
+
+    private static string DeriveHmacToken(string sourceKey, string keyHex)
+    {
+        var secret = Convert.FromHexString(keyHex);
+        try
+        {
+            using var hmac = new System.Security.Cryptography.HMACSHA256(secret);
+            return Convert.ToHexStringLower(hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(sourceKey)));
+        }
+        finally
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret);
+        }
     }
 
     private static MigrationProgress BuildProgress(

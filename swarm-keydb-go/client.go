@@ -2,9 +2,13 @@ package swarmkeydb
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -22,14 +26,28 @@ type RedisClient interface {
 }
 
 type Options struct {
-	Host     string
-	Port     int
-	Password string
+	Host          string
+	Port          int
+	Password      string
+	PrivacyMode   PrivacyMode
+	PrivacyKeyHex string
 }
 
 type Client struct {
-	redis RedisClient
+	redis            RedisClient
+	privacyMode      PrivacyMode
+	privacyKey       []byte
+	tokenToPlain     map[string]string
+	privacyConfigErr error
 }
+
+type PrivacyMode string
+
+const (
+	PrivacyModeNone             PrivacyMode = "none"
+	PrivacyModeObliviousHashing PrivacyMode = "oblivious_hashing"
+	PrivacyModeFullPSI          PrivacyMode = "full_psi"
+)
 
 func New(opts Options) *Client {
 	rdb := redis.NewClient(&redis.Options{
@@ -37,19 +55,46 @@ func New(opts Options) *Client {
 		Password: opts.Password,
 	})
 
-	return &Client{redis: &redisAdapter{inner: rdb}}
+	return newClientWithOptions(&redisAdapter{inner: rdb}, opts)
 }
 
 func NewWithRedisClient(r RedisClient) *Client {
-	return &Client{redis: r}
+	return newClientWithOptions(r, Options{})
+}
+
+func NewWithRedisClientAndOptions(r RedisClient, opts Options) *Client {
+	return newClientWithOptions(r, opts)
+}
+
+func newClientWithOptions(r RedisClient, opts Options) *Client {
+	mode := opts.PrivacyMode
+	if mode == "" {
+		mode = PrivacyModeNone
+	}
+	var privacyKey []byte
+	var privacyConfigErr error
+	if mode != PrivacyModeNone {
+		privacyKey, privacyConfigErr = hex.DecodeString(opts.PrivacyKeyHex)
+	}
+	return &Client{
+		redis:            r,
+		privacyMode:      mode,
+		privacyKey:       privacyKey,
+		tokenToPlain:     map[string]string{},
+		privacyConfigErr: privacyConfigErr,
+	}
 }
 
 func (c *Client) Get(ctx context.Context, key string) (string, error) {
 	if key == "" {
 		return "", fmt.Errorf("key must be non-empty")
 	}
+	token, err := c.tokenizeKey(key)
+	if err != nil {
+		return "", err
+	}
 
-	v, err := c.redis.Get(ctx, key).Result()
+	v, err := c.redis.Get(ctx, token).Result()
 	if errors.Is(err, redis.Nil) {
 		return "", ErrKeyNotFound
 	}
@@ -64,10 +109,15 @@ func (c *Client) Put(ctx context.Context, key string, value string) error {
 	if key == "" {
 		return fmt.Errorf("key must be non-empty")
 	}
+	token, err := c.tokenizeKey(key)
+	if err != nil {
+		return err
+	}
 
-	if err := c.redis.Set(ctx, key, value, 0).Err(); err != nil {
+	if err := c.redis.Set(ctx, token, value, 0).Err(); err != nil {
 		return fmt.Errorf("put %q: %w", key, err)
 	}
+	c.rememberKey(token, key)
 	return nil
 }
 
@@ -75,10 +125,17 @@ func (c *Client) Delete(ctx context.Context, key string) (bool, error) {
 	if key == "" {
 		return false, fmt.Errorf("key must be non-empty")
 	}
+	token, err := c.tokenizeKey(key)
+	if err != nil {
+		return false, err
+	}
 
-	n, err := c.redis.Del(ctx, key).Result()
+	n, err := c.redis.Del(ctx, token).Result()
 	if err != nil {
 		return false, fmt.Errorf("delete %q: %w", key, err)
+	}
+	if n > 0 {
+		delete(c.tokenToPlain, token)
 	}
 	return n > 0, nil
 }
@@ -86,6 +143,15 @@ func (c *Client) Delete(ctx context.Context, key string) (bool, error) {
 func (c *Client) List(ctx context.Context, pattern string) ([]string, error) {
 	if pattern == "" {
 		pattern = "*"
+	}
+	if c.privacyMode != PrivacyModeNone {
+		keys := make([]string, 0, len(c.tokenToPlain))
+		for _, key := range c.tokenToPlain {
+			if matchesPattern(key, pattern) {
+				keys = append(keys, key)
+			}
+		}
+		return keys, nil
 	}
 
 	v, err := c.redis.Keys(ctx, pattern).Result()
@@ -101,7 +167,13 @@ func (c *Client) BatchGet(ctx context.Context, keys []string) ([]*string, error)
 	}
 
 	args := make([]string, len(keys))
-	copy(args, keys)
+	for i, key := range keys {
+		token, tokenErr := c.tokenizeKey(key)
+		if tokenErr != nil {
+			return nil, tokenErr
+		}
+		args[i] = token
+	}
 	v, err := c.redis.MGet(ctx, args...).Result()
 	if err != nil {
 		return nil, fmt.Errorf("batchGet: %w", err)
@@ -128,7 +200,12 @@ func (c *Client) BatchPut(ctx context.Context, entries map[string]string) error 
 		if k == "" {
 			return fmt.Errorf("key must be non-empty")
 		}
-		args = append(args, k, v)
+		token, err := c.tokenizeKey(k)
+		if err != nil {
+			return err
+		}
+		args = append(args, token, v)
+		c.rememberKey(token, k)
 	}
 
 	if err := c.redis.MSet(ctx, args...).Err(); err != nil {
@@ -144,10 +221,15 @@ func (c *Client) SetWithTTL(ctx context.Context, key string, value string, ttlSe
 	if ttlSeconds <= 0 {
 		return fmt.Errorf("ttlSeconds must be greater than zero")
 	}
+	token, err := c.tokenizeKey(key)
+	if err != nil {
+		return err
+	}
 
-	if err := c.redis.SetEx(ctx, key, value, time.Duration(ttlSeconds)*time.Second).Err(); err != nil {
+	if err := c.redis.SetEx(ctx, token, value, time.Duration(ttlSeconds)*time.Second).Err(); err != nil {
 		return fmt.Errorf("setWithTTL %q: %w", key, err)
 	}
+	c.rememberKey(token, key)
 	return nil
 }
 
@@ -245,4 +327,36 @@ func (r *redisAdapter) MSet(ctx context.Context, values ...interface{}) *redis.S
 
 func (r *redisAdapter) Do(ctx context.Context, args ...interface{}) *redis.Cmd {
 	return r.inner.Do(ctx, args...)
+}
+
+func (c *Client) tokenizeKey(key string) (string, error) {
+	if c.privacyMode == PrivacyModeNone {
+		return key, nil
+	}
+	if c.privacyConfigErr != nil {
+		return "", fmt.Errorf("privacy configuration error: %w", c.privacyConfigErr)
+	}
+	if len(c.privacyKey) == 0 {
+		return "", fmt.Errorf("privacy key must be set when privacy mode is enabled")
+	}
+	mac := hmac.New(sha256.New, c.privacyKey)
+	_, _ = mac.Write([]byte(key))
+	return hex.EncodeToString(mac.Sum(nil)), nil
+}
+
+func (c *Client) rememberKey(token string, key string) {
+	if c.privacyMode != PrivacyModeNone {
+		c.tokenToPlain[token] = key
+	}
+}
+
+func matchesPattern(key string, pattern string) bool {
+	if pattern == "" || pattern == "*" {
+		return true
+	}
+	if !strings.Contains(pattern, "*") {
+		return key == pattern
+	}
+	prefix := strings.SplitN(pattern, "*", 2)[0]
+	return strings.HasPrefix(key, prefix)
 }

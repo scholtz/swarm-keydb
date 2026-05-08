@@ -17,6 +17,7 @@ public sealed class MonitoringHttpServer : IDisposable
     private readonly IBackendStatusProvider? _backendStatusProvider;
     private readonly EthereumBridgeService? _ethereumBridge;
     private readonly CrossChainSyncService? _crossChainSyncService;
+    private readonly string _privacyMode;
 
     public MonitoringHttpServer(
         IPAddress address,
@@ -29,7 +30,8 @@ public sealed class MonitoringHttpServer : IDisposable
         IShardHealthProvider? shardHealthProvider = null,
         IBackendStatusProvider? backendStatusProvider = null,
         EthereumBridgeService? ethereumBridge = null,
-        CrossChainSyncService? crossChainSyncService = null)
+        CrossChainSyncService? crossChainSyncService = null,
+        PrivacyMode privacyMode = PrivacyMode.None)
     {
         _metrics = metrics;
         _readinessProbe = readinessProbe;
@@ -40,6 +42,7 @@ public sealed class MonitoringHttpServer : IDisposable
         _backendStatusProvider = backendStatusProvider;
         _ethereumBridge = ethereumBridge;
         _crossChainSyncService = crossChainSyncService;
+        _privacyMode = privacyMode.ToString().ToLowerInvariant();
         _listener.Prefixes.Add($"http://{(address.Equals(IPAddress.Any) ? "+" : address.ToString())}:{port}/");
     }
 
@@ -137,7 +140,7 @@ public sealed class MonitoringHttpServer : IDisposable
             if (_shardHealthProvider is not null)
             {
                 var shardHealth = await _shardHealthProvider.GetShardHealthAsync(cancellationToken).ConfigureAwait(false);
-                payload = $"{payload}{BuildShardPrometheusMetrics(shardHealth)}";
+                payload = $"{payload}{BuildShardPrometheusMetrics(shardHealth, _privacyMode)}";
             }
 
             await WriteTextAsync(context.Response, HttpStatusCode.OK, payload, "text/plain; version=0.0.4", cancellationToken).ConfigureAwait(false);
@@ -233,7 +236,7 @@ public sealed class MonitoringHttpServer : IDisposable
 
         if (_dashboardEnabled && (path.Equals("/dashboard", StringComparison.OrdinalIgnoreCase) || path.Equals("/", StringComparison.OrdinalIgnoreCase)))
         {
-            await WriteTextAsync(context.Response, HttpStatusCode.OK, DashboardHtml, "text/html; charset=utf-8", cancellationToken).ConfigureAwait(false);
+            await WriteTextAsync(context.Response, HttpStatusCode.OK, BuildDashboardHtml(_privacyMode), "text/html; charset=utf-8", cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -262,7 +265,7 @@ public sealed class MonitoringHttpServer : IDisposable
         response.Close();
     }
 
-    private static string BuildShardPrometheusMetrics(IReadOnlyList<ShardHealthStatus> shardHealth)
+    private static string BuildShardPrometheusMetrics(IReadOnlyList<ShardHealthStatus> shardHealth, string privacyMode)
     {
         var builder = new StringBuilder();
         builder.AppendLine("# HELP swarmkeydb_shard_up Shard health status (1=healthy, 0=unreachable).");
@@ -271,10 +274,10 @@ public sealed class MonitoringHttpServer : IDisposable
         builder.AppendLine("# TYPE swarmkeydb_shard_key_count gauge");
         foreach (var shard in shardHealth)
         {
-            builder.AppendLine($"swarmkeydb_shard_up{{shard=\"{EscapeMetricLabel(shard.Shard)}\"}} {(shard.Ready ? 1 : 0)}");
+            builder.AppendLine($"swarmkeydb_shard_up{{shard=\"{EscapeMetricLabel(shard.Shard)}\",privacy_mode=\"{EscapeMetricLabel(privacyMode)}\"}} {(shard.Ready ? 1 : 0)}");
             if (shard.KeyCount is { } keyCount)
             {
-                builder.AppendLine($"swarmkeydb_shard_key_count{{shard=\"{EscapeMetricLabel(shard.Shard)}\"}} {keyCount}");
+                builder.AppendLine($"swarmkeydb_shard_key_count{{shard=\"{EscapeMetricLabel(shard.Shard)}\",privacy_mode=\"{EscapeMetricLabel(privacyMode)}\"}} {keyCount}");
             }
         }
 
@@ -288,7 +291,10 @@ public sealed class MonitoringHttpServer : IDisposable
             .Replace("\n", "\\n", StringComparison.Ordinal)
             .Replace("\r", "\\r", StringComparison.Ordinal);
 
-    private const string DashboardHtml = """
+    private static string BuildDashboardHtml(string privacyMode) =>
+        DashboardHtmlTemplate.Replace("__PRIVACY_MODE__", WebUtility.HtmlEncode(privacyMode), StringComparison.Ordinal);
+
+    private const string DashboardHtmlTemplate = """
                                          <!doctype html>
                                          <html lang="en">
                                          <head>
@@ -306,6 +312,7 @@ public sealed class MonitoringHttpServer : IDisposable
                                           </head>
                                           <body>
                                             <h1>SwarmKeyDb Dashboard</h1>
+                                            <p>Privacy Mode: <strong>__PRIVACY_MODE__</strong></p>
                                             <p>Readiness: <span id="ready-status">loading...</span></p>
                                             <h2>Cross-chain replication health</h2>
                                             <table>

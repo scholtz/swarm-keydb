@@ -19,7 +19,7 @@
 - [x] Implement access control lists for multi-user shared databases. (100%)
 - [x] Add data integrity verification with cryptographic hashes. (100%)
 - [x] Support for secure key rotation and backup mechanisms. (100%)
-- [ ] Enable privacy-preserving queries without revealing data.
+- [x] Enable privacy-preserving queries without revealing data. (100%: added HMAC key-token privacy mode, local private key manifest-backed scans, migration `--enable-privacy`, key-token rotation helper, PSI helper primitives, SDK privacy mode flags, and docs/tutorial coverage)
 
 ## Developer Experience
 - [x] Create comprehensive SDKs for JavaScript, Python, and Go. (100%: `swarm-keydb-js`, `swarm-keydb-py`, and `swarm-keydb-go` added with core API, examples, and unit tests)

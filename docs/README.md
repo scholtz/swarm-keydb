@@ -15,6 +15,7 @@ This folder is the entrypoint for project documentation.
 - `deployment/` covers Docker Compose and Kubernetes deployment assets.
 - `reference/` documents configuration and environment variables.
 - `development/migration.md` documents Redis-to-SwarmKeyDb migration workflows.
+- `privacy-preserving-queries.md` documents oblivious key-token query mode and migration.
 - `../examples/` contains runnable C# examples.
 - `../swarm-keydb-js/`, `../swarm-keydb-react/`, `../swarm-keydb-node/`, `../swarm-keydb-py/`, and `../swarm-keydb-go/` contain SDK/connectors with examples and tests.
 
@@ -28,6 +29,7 @@ This folder is the entrypoint for project documentation.
 - `tutorials/batch-operations.md`
 - `tutorials/encryption-user-keypair.md`
 - `tutorials/key-rotation-backup.md`
+- `privacy-preserving-queries.md`
 - `sdk/js.md`
 - `sdk/react.md`
 - `sdk/node.md`

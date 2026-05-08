@@ -22,6 +22,8 @@
 | `SWARM_KEYDB_ENCRYPTION_ALGORITHM` | `AesGcm256` | Encryption algorithm. |
 | `SWARM_KEYDB_ENCRYPTION_KEY` | unset | 32-byte hex key for encryption. |
 | `SWARM_KEYDB_ENCRYPTION_ETH_KEY` | unset | Ethereum private key used to derive the encryption key. |
+| `SWARM_KEYDB_PRIVACY_MODE` | `None` | Key query privacy mode (`None`, `ObliviousHashing`, `FullPSI`). |
+| `SWARM_KEYDB_PRIVACY_KEY` | unset | 32-byte hex key used to derive HMAC key tokens in privacy modes. |
 | `SWARM_KEYDB_ASYNC_ENABLED` | `true` | Enables queued async write processing for high-throughput workloads. |
 | `SWARM_KEYDB_MAX_CONCURRENT_WRITES` | `4` | Maximum number of queued write operations processed in parallel. |
 | `SWARM_KEYDB_WRITE_BATCH_SIZE` | `64` | Maximum number of queued writes drained per batch. |

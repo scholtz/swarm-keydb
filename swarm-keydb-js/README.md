@@ -27,6 +27,19 @@ await db.disconnect();
 - `restore(ref, key?)`
 - `rotateKey(oldKey, newKey)`
 
+## Privacy-preserving mode
+
+```ts
+import { PrivacyMode, SwarmKeyDb } from 'swarm-keydb-js';
+
+const db = new SwarmKeyDb({
+  host: '127.0.0.1',
+  port: 6379,
+  privacyMode: PrivacyMode.ObliviousHashing,
+  privacyKey: '<64-char-hex-key>'
+});
+```
+
 ## Data integrity
 
 The SwarmKeyDb server verifies a SHA-256 integrity envelope on every read by default. If stored Swarm data has been corrupted or tampered with, `get()`/`batchGet()` reject with the wrapped Redis/server error; handle that error path the same way you would handle any failed Redis read.

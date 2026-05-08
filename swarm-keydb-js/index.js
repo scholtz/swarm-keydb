@@ -1,13 +1,22 @@
 import { createClient } from 'redis';
+import { createHmac } from 'node:crypto';
 import { KeyNotFoundError, wrapRedisError } from './errors.js';
 
 export { ConnectionError, KeyNotFoundError, SwarmKeyDbError } from './errors.js';
+export const PrivacyMode = Object.freeze({
+  None: 'none',
+  ObliviousHashing: 'oblivious_hashing',
+  FullPSI: 'full_psi'
+});
 
 export class SwarmKeyDb {
   constructor(options, clientFactory) {
     this.options = options;
     this.clientFactory = clientFactory ?? ((url) => createClient({ url }));
     this.client = null;
+    this.privacyMode = (options.privacyMode ?? PrivacyMode.None).toLowerCase();
+    this.privacyKey = options.privacyKey;
+    this.tokenToPlain = new Map();
   }
 
   async connect() {
@@ -43,9 +52,10 @@ export class SwarmKeyDb {
 
   async get(key) {
     this.#validateKey(key);
+    const token = this.#tokenizeKey(key);
 
     try {
-      return await this.client.get(key);
+      return await this.client.get(token);
     } catch (error) {
       throw wrapRedisError(`get(${key})`, error);
     }
@@ -62,8 +72,10 @@ export class SwarmKeyDb {
 
   async put(key, value) {
     this.#validateKey(key);
+    const token = this.#tokenizeKey(key);
     try {
-      await this.client.set(key, value);
+      await this.client.set(token, value);
+      this.#rememberKey(key, token);
     } catch (error) {
       throw wrapRedisError(`put(${key})`, error);
     }
@@ -71,8 +83,13 @@ export class SwarmKeyDb {
 
   async delete(key) {
     this.#validateKey(key);
+    const token = this.#tokenizeKey(key);
     try {
-      return (await this.client.del(key)) > 0;
+      const deleted = (await this.client.del(token)) > 0;
+      if (deleted) {
+        this.tokenToPlain.delete(token);
+      }
+      return deleted;
     } catch (error) {
       throw wrapRedisError(`delete(${key})`, error);
     }
@@ -80,7 +97,10 @@ export class SwarmKeyDb {
 
   async list(pattern = '*') {
     try {
-      return await this.client.keys(pattern);
+      if (this.privacyMode === PrivacyMode.None) {
+        return await this.client.keys(pattern);
+      }
+      return [...this.tokenToPlain.values()].filter((key) => this.#matchesPattern(key, pattern));
     } catch (error) {
       throw wrapRedisError(`list(${pattern})`, error);
     }
@@ -92,9 +112,10 @@ export class SwarmKeyDb {
     }
 
     keys.forEach((key) => this.#validateKey(key));
+    const tokens = keys.map((key) => this.#tokenizeKey(key));
 
     try {
-      return await this.client.mGet(keys);
+      return await this.client.mGet(tokens);
     } catch (error) {
       throw wrapRedisError('batchGet', error);
     }
@@ -111,9 +132,11 @@ export class SwarmKeyDb {
     }
 
     keys.forEach((key) => this.#validateKey(key));
+    const tokenizedPairs = Object.fromEntries(keys.map((key) => [this.#tokenizeKey(key), pairs[key]]));
 
     try {
-      await this.client.mSet(pairs);
+      await this.client.mSet(tokenizedPairs);
+      keys.forEach((key) => this.#rememberKey(key, this.#tokenizeKey(key)));
     } catch (error) {
       throw wrapRedisError('batchPut', error);
     }
@@ -124,9 +147,11 @@ export class SwarmKeyDb {
     if (!Number.isInteger(ttlSeconds) || ttlSeconds <= 0) {
       throw new Error('ttlSeconds must be a positive integer');
     }
+    const token = this.#tokenizeKey(key);
 
     try {
-      await this.client.setEx(key, ttlSeconds, value);
+      await this.client.setEx(token, ttlSeconds, value);
+      this.#rememberKey(key, token);
     } catch (error) {
       throw wrapRedisError(`setWithTTL(${key})`, error);
     }
@@ -176,5 +201,32 @@ export class SwarmKeyDb {
     if (typeof key !== 'string' || key.length === 0) {
       throw new Error('key must be a non-empty string');
     }
+  }
+
+  #tokenizeKey(key) {
+    if (this.privacyMode === PrivacyMode.None) {
+      return key;
+    }
+    if (typeof this.privacyKey !== 'string' || this.privacyKey.length === 0) {
+      throw new Error('privacyKey must be set when privacyMode is enabled');
+    }
+    return createHmac('sha256', Buffer.from(this.privacyKey, 'hex')).update(key, 'utf8').digest('hex');
+  }
+
+  #rememberKey(key, token) {
+    if (this.privacyMode !== PrivacyMode.None) {
+      this.tokenToPlain.set(token, key);
+    }
+  }
+
+  #matchesPattern(key, pattern) {
+    if (!pattern || pattern === '*') {
+      return true;
+    }
+    if (!pattern.includes('*')) {
+      return key === pattern;
+    }
+    const prefix = pattern.slice(0, pattern.indexOf('*'));
+    return key.startsWith(prefix);
   }
 }

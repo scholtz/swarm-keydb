@@ -21,5 +21,6 @@ Core API:
 - `batchPut(entries)`, `batchGet(keys)`
 - `setWithTTL(key, value, ttlSeconds)`
 - `backup()`, `restore(ref, key?)`, `rotateKey(oldKey, newKey)`
+- privacy options: `privacyMode` + `privacyKey` (`none`, `oblivious_hashing`, `full_psi`)
 
 Error handling note: when the server rejects a command (invalid TTL, ACL denied, integrity/read failure), SDK methods reject with the Redis/server error.

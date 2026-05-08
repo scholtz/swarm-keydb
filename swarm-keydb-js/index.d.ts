@@ -1,8 +1,12 @@
+export type PrivacyMode = 'none' | 'oblivious_hashing' | 'full_psi';
+
 export type SwarmKeyDbOptions = {
   host: string;
   port: number;
   password?: string;
   tls?: boolean;
+  privacyMode?: PrivacyMode;
+  privacyKey?: string;
 };
 
 export type BatchEntry = { key: string; value: string };
@@ -13,6 +17,11 @@ export declare class SwarmKeyDbError extends Error {
 
 export declare class ConnectionError extends SwarmKeyDbError {}
 export declare class KeyNotFoundError extends SwarmKeyDbError {}
+export declare const PrivacyMode: {
+  readonly None: 'none';
+  readonly ObliviousHashing: 'oblivious_hashing';
+  readonly FullPSI: 'full_psi';
+};
 
 export declare class SwarmKeyDb {
   constructor(options: SwarmKeyDbOptions, clientFactory?: (url: string) => any);

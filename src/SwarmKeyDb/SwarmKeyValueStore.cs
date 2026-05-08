@@ -16,13 +16,40 @@ public sealed class SwarmKeyValueStore : IKeyValueStore, IBackendMetadataProvide
     private readonly ISwarmClient _swarmClient;
     private readonly IKeyIndex _index;
     private readonly IntegrityOptions _integrityOptions;
+    private readonly IKeyPrivacyStrategy _keyPrivacyStrategy;
 
     public SwarmKeyValueStore(ISwarmClient swarmClient, IKeyIndex index, IntegrityOptions? integrityOptions = null)
+        : this(swarmClient, index, integrityOptions, new PlaintextKeyStrategy())
     {
+    }
+
+    public SwarmKeyValueStore(
+        ISwarmClient swarmClient,
+        IKeyIndex index,
+        IntegrityOptions? integrityOptions,
+        IKeyPrivacyStrategy keyPrivacyStrategy)
+    {
+        ArgumentNullException.ThrowIfNull(swarmClient);
+        ArgumentNullException.ThrowIfNull(index);
+        ArgumentNullException.ThrowIfNull(keyPrivacyStrategy);
         _swarmClient = swarmClient;
-        _index = index;
+        _keyPrivacyStrategy = keyPrivacyStrategy;
+        _index = keyPrivacyStrategy.Mode == PrivacyMode.None
+            ? index
+            : new PrivacyPreservingKeyIndex(index, keyPrivacyStrategy);
         _integrityOptions = integrityOptions ?? new IntegrityOptions();
     }
+
+    public SwarmKeyValueStore(
+        ISwarmClient swarmClient,
+        IKeyIndex index,
+        SwarmKeyDbOptions options,
+        IntegrityOptions? integrityOptions = null)
+        : this(swarmClient, index, integrityOptions, KeyPrivacyStrategyFactory.Create(options))
+    {
+    }
+
+    public PrivacyMode PrivacyMode => _keyPrivacyStrategy.Mode;
 
     public async Task PutAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default)
     {

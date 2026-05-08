@@ -39,6 +39,14 @@ var scanCountOption = new Option<int>("--scan-count")
     Description = "SCAN COUNT hint used when iterating source keys.",
     DefaultValueFactory = static _ => 500
 };
+var enablePrivacyOption = new Option<bool>("--enable-privacy")
+{
+    Description = "Write migrated keys using HMAC-derived key tokens instead of plaintext names."
+};
+var privacyKeyOption = new Option<string?>("--privacy-key")
+{
+    Description = "Hex key used for HMAC token derivation when --enable-privacy is set. Defaults to SWARM_KEYDB_PRIVACY_KEY."
+};
 
 var root = new RootCommand("Migrate Redis data into SwarmKeyDb over the Redis protocol.");
 root.Add(fromOption);
@@ -49,6 +57,8 @@ root.Add(checkpointOption);
 root.Add(validateOption);
 root.Add(validateSamplePercentOption);
 root.Add(scanCountOption);
+root.Add(enablePrivacyOption);
+root.Add(privacyKeyOption);
 
 root.SetAction(async (parseResult, cancellationToken) =>
 {
@@ -60,6 +70,8 @@ root.SetAction(async (parseResult, cancellationToken) =>
     var validate = parseResult.GetValue(validateOption);
     var validateSamplePercent = parseResult.GetValue(validateSamplePercentOption);
     var scanCount = parseResult.GetValue(scanCountOption);
+    var enablePrivacy = parseResult.GetValue(enablePrivacyOption);
+    var privacyKeyHex = parseResult.GetValue(privacyKeyOption) ?? Environment.GetEnvironmentVariable("SWARM_KEYDB_PRIVACY_KEY");
 
     if (validateSamplePercent is < 1 or > 100)
     {
@@ -70,6 +82,12 @@ root.SetAction(async (parseResult, cancellationToken) =>
     if (scanCount <= 0)
     {
         Console.Error.WriteLine("--scan-count must be greater than 0.");
+        return 1;
+    }
+
+    if (enablePrivacy && string.IsNullOrWhiteSpace(privacyKeyHex))
+    {
+        Console.Error.WriteLine("--enable-privacy requires --privacy-key (or SWARM_KEYDB_PRIVACY_KEY).");
         return 1;
     }
 
@@ -91,7 +109,9 @@ root.SetAction(async (parseResult, cancellationToken) =>
         CheckpointPath = checkpoint.FullName,
         Validate = validate,
         ValidateSamplePercent = validateSamplePercent,
-        ScanCount = scanCount
+        ScanCount = scanCount,
+        EnablePrivacy = enablePrivacy,
+        PrivacyKeyHex = privacyKeyHex
     };
 
     using var cts = new CancellationTokenSource();

@@ -25,6 +25,19 @@ print(db.get("hello"))
 - `restore(ref, key=None)`
 - `rotate_key(old_key, new_key)`
 
+## Privacy-preserving mode
+
+```python
+from swarm_keydb import PrivacyMode, SwarmKeyDb
+
+db = SwarmKeyDb(
+    host="127.0.0.1",
+    port=6379,
+    privacy_mode=PrivacyMode.OBLIVIOUS_HASHING,
+    privacy_key="<64-char-hex-key>",
+)
+```
+
 Async equivalents are available in `AsyncSwarmKeyDb`.
 
 ## Data integrity

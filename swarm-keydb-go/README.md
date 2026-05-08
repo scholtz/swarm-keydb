@@ -26,6 +26,17 @@ fmt.Println(v)
 - `RotateKey(ctx, oldKey, newKey)`
 - `PutJSON` / `GetJSON` helpers
 
+## Privacy-preserving mode
+
+```go
+client := swarmkeydb.New(swarmkeydb.Options{
+  Host:          "127.0.0.1",
+  Port:          6379,
+  PrivacyMode:   swarmkeydb.PrivacyModeObliviousHashing,
+  PrivacyKeyHex: "<64-char-hex-key>",
+})
+```
+
 ## Data integrity
 
 The SwarmKeyDb server verifies a SHA-256 integrity envelope on every read by default. If stored Swarm data has been corrupted or tampered with, `Get`/`BatchGet` return an error from Redis; callers should handle that error path explicitly.

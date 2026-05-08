@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ConnectionError, KeyNotFoundError, SwarmKeyDb } from '../index.js';
+import { ConnectionError, KeyNotFoundError, PrivacyMode, SwarmKeyDb } from '../index.js';
 
 function createMockClient(overrides = {}) {
   return {
@@ -104,4 +104,26 @@ test('backup restore and rotateKey use management commands', async () => {
     ['RESTOREDB', 'swarm://backup-ref', 'old-key'],
     ['ROTATEKEY', 'old-key', 'new-key']
   ]);
+});
+
+test('privacy mode tokenizes outbound keys while list stays plaintext', async () => {
+  let lastSetKey = null;
+  let lastGetKey = null;
+  const mock = createMockClient({
+    set: async (key) => { lastSetKey = key; },
+    get: async (key) => {
+      lastGetKey = key;
+      return 'value';
+    }
+  });
+  const db = new SwarmKeyDb(
+    { host: 'localhost', port: 6379, privacyMode: PrivacyMode.ObliviousHashing, privacyKey: '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff' },
+    () => mock
+  );
+  await db.connect();
+  await db.put('secret:key', 'v');
+  await db.get('secret:key');
+  assert.notEqual(lastSetKey, 'secret:key');
+  assert.notEqual(lastGetKey, 'secret:key');
+  assert.deepEqual(await db.list('secret:*'), ['secret:key']);
 });
