@@ -18,6 +18,10 @@
 | `SWARM_KEYDB_ENCRYPTION_ALGORITHM` | `AesGcm256` | Encryption algorithm. |
 | `SWARM_KEYDB_ENCRYPTION_KEY` | unset | 32-byte hex key for encryption. |
 | `SWARM_KEYDB_ENCRYPTION_ETH_KEY` | unset | Ethereum private key used to derive the encryption key. |
+| `SWARM_KEYDB_ASYNC_ENABLED` | `true` | Enables queued async write processing for high-throughput workloads. |
+| `SWARM_KEYDB_MAX_CONCURRENT_WRITES` | `4` | Maximum number of queued write operations processed in parallel. |
+| `SWARM_KEYDB_WRITE_BATCH_SIZE` | `64` | Maximum number of queued writes drained per batch. |
+| `SWARM_KEYDB_BATCH_FLUSH_INTERVAL_MS` | `100` | Time window used to coalesce queued writes into a batch. |
 | `SWARM_KEYDB_LOG_LEVEL` | `Information` | Minimum console log level. |
 
 ## Bee client integration

@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -39,6 +40,16 @@ public static class ServiceCollectionExtensions
                 sp.GetRequiredService<IMemoryCache>(),
                 sp.GetRequiredService<IOptions<CacheOptions>>(),
                 sp.GetRequiredService<ILogger<CachingKeyValueStore>>());
+
+            var asyncOptions = sp.GetService<IOptions<AsyncProcessingOptions>>()?.Value ?? new AsyncProcessingOptions();
+            if (asyncOptions.Enabled)
+            {
+                store = new AsyncQueuedKeyValueStore(
+                    store,
+                    asyncOptions,
+                    sp.GetService<ILogger<AsyncQueuedKeyValueStore>>() ?? NullLogger<AsyncQueuedKeyValueStore>.Instance);
+            }
+
             return store;
         });
 

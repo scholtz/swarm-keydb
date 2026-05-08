@@ -43,6 +43,13 @@ var encryptionOptions = new EncryptionOptions
     EthPrivateKeyHex = Environment.GetEnvironmentVariable("SWARM_KEYDB_ENCRYPTION_ETH_KEY")
 };
 var aclOptions = GetAclOptions();
+var asyncProcessingOptions = new AsyncProcessingOptions
+{
+    Enabled = GetBool("SWARM_KEYDB_ASYNC_ENABLED", true),
+    MaxConcurrentWrites = Math.Max(1, GetInt("SWARM_KEYDB_MAX_CONCURRENT_WRITES", 4)),
+    WriteBatchSize = Math.Max(1, GetInt("SWARM_KEYDB_WRITE_BATCH_SIZE", 64)),
+    BatchFlushIntervalMs = Math.Max(0, GetInt("SWARM_KEYDB_BATCH_FLUSH_INTERVAL_MS", 100))
+};
 var services = new ServiceCollection();
 services.AddLogging(builder => builder.AddSimpleConsole().SetMinimumLevel(GetLogLevel("SWARM_KEYDB_LOG_LEVEL", LogLevel.Information)));
 services.AddOptions();
@@ -50,6 +57,7 @@ services.AddSingleton<IOptions<CacheOptions>>(Options.Create(cacheOptions));
 services.AddSingleton<IOptions<CompressionOptions>>(Options.Create(compressionOptions));
 services.AddSingleton<IOptions<EncryptionOptions>>(Options.Create(encryptionOptions));
 services.AddSingleton<IOptions<AclOptions>>(Options.Create(aclOptions));
+services.AddSingleton<IOptions<AsyncProcessingOptions>>(Options.Create(asyncProcessingOptions));
 services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
 services.AddSingleton<IEthAddressAccessor, AsyncLocalEthAddressAccessor>();
 services.AddSwarmKeyDbStore(swarmClient, index);

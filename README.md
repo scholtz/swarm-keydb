@@ -135,6 +135,15 @@ The server enables an in-memory read-through cache by default for hot keys. Conf
 
 Writes (`SET`, `SETEX`, `MSET`, etc.), deletes, and TTL changes invalidate cached entries so subsequent reads refresh from Swarm/index data.
 
+### Async high-throughput write queue
+
+The server can process write operations asynchronously through an internal queue with configurable batching and concurrency:
+
+- `SWARM_KEYDB_ASYNC_ENABLED` (`true`/`false`, default `true`)
+- `SWARM_KEYDB_MAX_CONCURRENT_WRITES` (default `4`)
+- `SWARM_KEYDB_WRITE_BATCH_SIZE` (default `64`)
+- `SWARM_KEYDB_BATCH_FLUSH_INTERVAL_MS` (default `100`)
+
 ### Compression
 
 The server supports transparent value compression to reduce Swarm storage costs and improve transfer latency. Configure it with:
