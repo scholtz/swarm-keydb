@@ -225,7 +225,7 @@ public sealed class FileKeyIndex : IKeyIndex
                 continue;
             }
 
-            var reference = TryGetString(property.Value, "Reference") ?? TryGetString(property.Value, "reference");
+            var reference = TryGetString(property.Value, "reference");
             if (string.IsNullOrEmpty(reference))
             {
                 continue;
@@ -233,7 +233,7 @@ public sealed class FileKeyIndex : IKeyIndex
 
             index[property.Name] = new KeyIndexEntry(
                 reference,
-                TryGetDateTimeOffset(property.Value, "ExpiresAt") ?? TryGetDateTimeOffset(property.Value, "expiresAt"));
+                TryGetDateTimeOffset(property.Value, "expiresAt"));
         }
 
         return index;
@@ -241,19 +241,34 @@ public sealed class FileKeyIndex : IKeyIndex
 
     private static string? TryGetString(JsonElement value, string propertyName)
     {
-        return value.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String
+        return TryGetPropertyCaseInsensitive(value, propertyName, out var property) && property.ValueKind == JsonValueKind.String
             ? property.GetString()
             : null;
     }
 
     private static DateTimeOffset? TryGetDateTimeOffset(JsonElement value, string propertyName)
     {
-        if (!value.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.String)
+        if (!TryGetPropertyCaseInsensitive(value, propertyName, out var property) || property.ValueKind != JsonValueKind.String)
         {
             return null;
         }
 
         return DateTimeOffset.TryParse(property.GetString(), out var expiresAt) ? expiresAt : null;
+    }
+
+    private static bool TryGetPropertyCaseInsensitive(JsonElement value, string propertyName, out JsonElement property)
+    {
+        foreach (var candidate in value.EnumerateObject())
+        {
+            if (candidate.Name.Equals(propertyName, StringComparison.OrdinalIgnoreCase))
+            {
+                property = candidate.Value;
+                return true;
+            }
+        }
+
+        property = default;
+        return false;
     }
 
     private static bool RemoveExpiredEntries(Dictionary<string, KeyIndexEntry> index, DateTimeOffset now)

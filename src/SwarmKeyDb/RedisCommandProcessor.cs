@@ -2,7 +2,7 @@ using System.Text.RegularExpressions;
 
 namespace SwarmKeyDb;
 
-public sealed class RedisCommandProcessor
+public sealed class RedisCommandProcessor : IDisposable
 {
     private readonly IKeyValueStore _store;
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
@@ -99,7 +99,7 @@ public sealed class RedisCommandProcessor
     {
         if (args.Count != 3 && args.Count != 5)
         {
-            return RespValue.Error("ERR syntax error");
+            return RespValue.Error("ERR wrong number of arguments for 'SET'");
         }
 
         var ttl = TryParseSetExpiryOption(args, out var setError);
@@ -472,5 +472,10 @@ public sealed class RedisCommandProcessor
     {
         var escaped = Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".");
         return new Regex("^" + escaped + "$", RegexOptions.CultureInvariant);
+    }
+
+    public void Dispose()
+    {
+        _mutationGate.Dispose();
     }
 }
