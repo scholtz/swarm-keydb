@@ -10,7 +10,17 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 - Key listing and cursor-based iteration.
 - Bee HTTP API storage with postage batch configuration handled by environment variables.
 - Local file storage backend for development and tests.
-- Docker build for running the Redis-compatible server.
+- .NET 10 build, Docker packaging, and Kubernetes deployment manifests.
+
+## Documentation
+
+Project documentation lives under `docs/`:
+
+- `docs/README.md`
+- `docs/architecture/README.md`
+- `docs/development/README.md`
+- `docs/deployment/README.md`
+- `docs/reference/configuration.md`
 
 ## Build and test
 
@@ -51,6 +61,8 @@ export BEE_URL=http://localhost:1633/
 export BEE_POSTAGE_BATCH_ID=<your-postage-batch-id>
 dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
 ```
+
+The checked-in Docker Compose and Kubernetes manifests default to a Bee Sepolia testnet setup. Replace the RPC endpoint, Bee password, and postage batch id placeholders before use.
 
 The key index is persisted in `SWARM_KEYDB_DATA_DIR/index.json` and values are fetched from the Swarm references stored there.
 
@@ -209,6 +221,12 @@ dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
 ```bash
 docker build -t swarm-keydb .
 docker run --rm -p 6379:6379 -v swarm-keydb-data:/data swarm-keydb
+```
+
+To run SwarmKeyDb with a colocated Bee node, copy `.env.example` to `.env` and start the Compose stack:
+
+```bash
+docker compose up --build
 ```
 
 For Bee-backed storage:

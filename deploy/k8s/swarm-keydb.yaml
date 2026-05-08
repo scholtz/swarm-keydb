@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: swarm-keydb
+  namespace: swarm-keydb
+spec:
+  selector:
+    app: swarm-keydb
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      protocol: TCP
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: swarm-keydb-data
+  namespace: swarm-keydb
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: swarm-keydb
+  namespace: swarm-keydb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: swarm-keydb
+  template:
+    metadata:
+      labels:
+        app: swarm-keydb
+    spec:
+      containers:
+        - name: swarm-keydb
+          image: swarm-keydb:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SWARM_KEYDB_BACKEND
+              valueFrom:
+                configMapKeyRef:
+                  name: swarm-keydb-config
+                  key: SWARM_KEYDB_BACKEND
+            - name: SWARM_KEYDB_BIND
+              valueFrom:
+                configMapKeyRef:
+                  name: swarm-keydb-config
+                  key: SWARM_KEYDB_BIND
+            - name: SWARM_KEYDB_DATA_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: swarm-keydb-config
+                  key: SWARM_KEYDB_DATA_DIR
+            - name: SWARM_KEYDB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: swarm-keydb-config
+                  key: SWARM_KEYDB_PORT
+            - name: BEE_POSTAGE_BATCH_ID
+              valueFrom:
+                secretKeyRef:
+                  name: swarm-keydb-secrets
+                  key: BEE_POSTAGE_BATCH_ID
+            - name: BEE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: swarm-keydb-config
+                  key: BEE_URL
+          ports:
+            - containerPort: 6379
+              name: redis
+          volumeMounts:
+            - name: swarm-keydb-data
+              mountPath: /data
+      volumes:
+        - name: swarm-keydb-data
+          persistentVolumeClaim:
+            claimName: swarm-keydb-data

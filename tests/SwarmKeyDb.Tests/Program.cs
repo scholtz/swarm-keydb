@@ -379,9 +379,9 @@ static async Task CompressingKeyValueStorePutStoresCompressedValueAsync()
 
     await store.PutAsync("compressed:key", original);
 
-    var stored = await inner.GetAsync("compressed:key");
-    Assert(stored is not null, "Inner store should have data.");
-    Assert(!stored!.SequenceEqual(original), "Stored bytes should be compressed (different from original).");
+    var stored = await inner.GetAsync("compressed:key")
+        ?? throw new InvalidOperationException("Inner store should have data.");
+    Assert(!stored.SequenceEqual(original), "Stored bytes should be compressed (different from original).");
     // GZip magic
     Assert(stored[0] == 0x1F && stored[1] == 0x8B, "Stored data should start with GZip magic bytes.");
 }
@@ -433,10 +433,10 @@ static async Task CompressingKeyValueStoreBrotliCompressAndDecompressAsync()
     var original = Encoding.UTF8.GetBytes(new string('z', 200));
 
     await store.PutAsync("brotli:key", original);
-    var stored = await inner.GetAsync("brotli:key");
+    var stored = await inner.GetAsync("brotli:key")
+        ?? throw new InvalidOperationException("Inner store should have data.");
 
-    Assert(stored is not null, "Inner store should have data.");
-    Assert(!stored!.SequenceEqual(original), "Stored bytes should be compressed.");
+    Assert(!stored.SequenceEqual(original), "Stored bytes should be compressed.");
     // Custom magic prefix 0xCE 0xB8 (SwarmKeyDb-specific Brotli wrapper)
     Assert(stored[0] == 0xCE && stored[1] == 0xB8, "Stored data should start with custom Brotli magic bytes.");
 
@@ -502,9 +502,9 @@ static async Task EncryptingKeyValueStorePutStoresEncryptedValueAsync()
 
     await store.PutAsync("enc:key", original);
 
-    var stored = await inner.GetAsync("enc:key");
-    Assert(stored is not null, "Inner store should have data.");
-    Assert(!stored!.SequenceEqual(original), "Stored bytes should be encrypted (different from original).");
+    var stored = await inner.GetAsync("enc:key")
+        ?? throw new InvalidOperationException("Inner store should have data.");
+    Assert(!stored.SequenceEqual(original), "Stored bytes should be encrypted (different from original).");
     // Magic bytes 0xAE 0x73
     Assert(stored[0] == 0xAE && stored[1] == 0x73, "Stored data should start with encryption magic bytes 0xAE 0x73.");
 }

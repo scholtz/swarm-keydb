@@ -1,0 +1,43 @@
+services:
+  swarm-bee:
+    image: ethersphere/bee:2.6.0
+    restart: unless-stopped
+    environment:
+      BEE_API_ADDR: ${BEE_API_ADDR:-0.0.0.0:1633}
+      BEE_BLOCKCHAIN_RPC_ENDPOINT: ${BEE_BLOCKCHAIN_RPC_ENDPOINT:-https://sepolia.infura.io/v3/replace-with-project-id}
+      BEE_DATA_DIR: /var/lib/bee
+      BEE_FULL_NODE: ${BEE_FULL_NODE:-true}
+      BEE_MAINNET: ${BEE_MAINNET:-false}
+      BEE_NAT_ADDR: ${BEE_NAT_ADDR:-}
+      BEE_PASSWORD: ${BEE_PASSWORD:-change-me}
+      BEE_P2P_ADDR: ${BEE_P2P_ADDR:-:1634}
+      BEE_SWAP_ENABLE: ${BEE_SWAP_ENABLE:-true}
+    ports:
+      - "1633:1633"
+      - "1634:1634"
+    volumes:
+      - bee-data:/var/lib/bee
+
+  swarm-keydb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${SWARM_KEYDB_IMAGE:-swarm-keydb:local}
+    restart: unless-stopped
+    depends_on:
+      - swarm-bee
+    environment:
+      SWARM_KEYDB_BACKEND: ${SWARM_KEYDB_BACKEND:-bee}
+      SWARM_KEYDB_BIND: ${SWARM_KEYDB_BIND:-0.0.0.0}
+      SWARM_KEYDB_DATA_DIR: ${SWARM_KEYDB_DATA_DIR:-/data}
+      SWARM_KEYDB_PORT: ${SWARM_KEYDB_PORT:-6379}
+      BEE_POSTAGE_BATCH_ID: ${BEE_POSTAGE_BATCH_ID:-replace-with-postage-batch-id}
+      BEE_URL: ${BEE_URL:-http://swarm-bee:1633}
+    ports:
+      - "6379:6379"
+    volumes:
+      - swarm-keydb-data:/data
+
+volumes:
+  bee-data:
+  swarm-keydb-data:

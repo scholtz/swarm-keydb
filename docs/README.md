@@ -1,0 +1,17 @@
+# Documentation
+
+This folder is the entrypoint for project documentation.
+
+## Sections
+
+- `architecture/` explains the storage model and runtime components.
+- `development/` covers local setup, build, and test commands.
+- `deployment/` covers Docker Compose and Kubernetes deployment assets.
+- `reference/` documents configuration and environment variables.
+
+## Quick links
+
+- `architecture/README.md`
+- `development/README.md`
+- `deployment/README.md`
+- `reference/configuration.md`

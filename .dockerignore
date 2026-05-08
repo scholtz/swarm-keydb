@@ -1,4 +1,11 @@
-.git
+**/bin/
+**/obj/
+.git/
+.github/
+data/
+*.user
+*.suo
+*.cache.git
 .github
 bin
 obj

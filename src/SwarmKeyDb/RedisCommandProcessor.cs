@@ -120,9 +120,9 @@ public sealed class RedisCommandProcessor : IDisposable
         {
             return RespValue.Error("ERR " + ex.Message);
         }
-        catch (OverflowException ex)
+        catch (OverflowException)
         {
-            return RespValue.Error("ERR " + ex.Message);
+            return RespValue.Error("ERR value is not an integer or out of range");
         }
     }
 
@@ -159,7 +159,11 @@ public sealed class RedisCommandProcessor : IDisposable
         await _store.PutAsync(args[1].AsString(), args[2].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
         if (ttl is { } expiry)
         {
-            await _store.SetTtlAsync(args[1].AsString(), expiry, cancellationToken).ConfigureAwait(false);
+            var (updated, ttlError) = await TrySetTtlAsync(args[1].AsString(), expiry, cancellationToken).ConfigureAwait(false);
+            if (ttlError is not null)
+            {
+                return ttlError;
+            }
         }
 
         return RespValue.SimpleString("OK");
@@ -184,7 +188,12 @@ public sealed class RedisCommandProcessor : IDisposable
         }
 
         await _store.PutAsync(args[1].AsString(), args[3].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
-        await _store.SetTtlAsync(args[1].AsString(), ttl, cancellationToken).ConfigureAwait(false);
+        var (_, ttlError) = await TrySetTtlAsync(args[1].AsString(), ttl, cancellationToken).ConfigureAwait(false);
+        if (ttlError is not null)
+        {
+            return ttlError;
+        }
+
         return RespValue.SimpleString("OK");
     }
 
@@ -348,7 +357,13 @@ public sealed class RedisCommandProcessor : IDisposable
                 return RespValue.IntegerValue(await _store.DeleteAsync(args[1].AsString(), cancellationToken).ConfigureAwait(false) ? 1 : 0);
             }
 
-            return RespValue.IntegerValue(await _store.SetTtlAsync(args[1].AsString(), ttl, cancellationToken).ConfigureAwait(false) ? 1 : 0);
+            var (absoluteUpdated, ttlError) = await TrySetTtlAsync(args[1].AsString(), ttl, cancellationToken).ConfigureAwait(false);
+            if (ttlError is not null)
+            {
+                return ttlError;
+            }
+
+            return RespValue.IntegerValue(absoluteUpdated ? 1 : 0);
         }
 
         if (ttlValue <= 0)
@@ -361,7 +376,13 @@ public sealed class RedisCommandProcessor : IDisposable
             return RespValue.Error("ERR value is not an integer or out of range");
         }
 
-        return RespValue.IntegerValue(await _store.SetTtlAsync(args[1].AsString(), relativeTtl, cancellationToken).ConfigureAwait(false) ? 1 : 0);
+        var (updated, relativeTtlError) = await TrySetTtlAsync(args[1].AsString(), relativeTtl, cancellationToken).ConfigureAwait(false);
+        if (relativeTtlError is not null)
+        {
+            return relativeTtlError;
+        }
+
+        return RespValue.IntegerValue(updated ? 1 : 0);
     }
 
     private async Task<RespValue> TtlAsync(IReadOnlyList<RespValue> args, bool milliseconds, CancellationToken cancellationToken)
@@ -552,12 +573,39 @@ public sealed class RedisCommandProcessor : IDisposable
         try
         {
             ttl = milliseconds ? TimeSpan.FromMilliseconds(value) : TimeSpan.FromSeconds(value);
+            if (ttl > DateTimeOffset.MaxValue - DateTimeOffset.UtcNow)
+            {
+                ttl = default;
+                return false;
+            }
+
             return true;
         }
         catch (OverflowException)
         {
             ttl = default;
             return false;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            ttl = default;
+            return false;
+        }
+    }
+
+    private async Task<(bool Updated, RespValue? Error)> TrySetTtlAsync(string key, TimeSpan ttl, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return (await _store.SetTtlAsync(key, ttl, cancellationToken).ConfigureAwait(false), null);
+        }
+        catch (ArgumentException)
+        {
+            return (false, RespValue.Error("ERR value is not an integer or out of range"));
+        }
+        catch (OverflowException)
+        {
+            return (false, RespValue.Error("ERR value is not an integer or out of range"));
         }
     }
 

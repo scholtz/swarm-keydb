@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 COPY SwarmKeyDb.slnx ./
 COPY src/SwarmKeyDb/SwarmKeyDb.csproj src/SwarmKeyDb/
@@ -7,7 +7,7 @@ RUN dotnet restore src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
 COPY src ./src
 RUN dotnet publish src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj -c Release -o /app/publish --no-restore
 
-FROM mcr.microsoft.com/dotnet/runtime:8.0
+FROM mcr.microsoft.com/dotnet/runtime:10.0
 WORKDIR /app
 COPY --from=build /app/publish .
 ENV SWARM_KEYDB_BIND=0.0.0.0 \
