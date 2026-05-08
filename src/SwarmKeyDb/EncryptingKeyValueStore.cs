@@ -16,27 +16,38 @@ public sealed class EncryptingKeyValueStore : IKeyValueStore, IAccessControlVeri
     // Magic bytes that identify an encrypted blob stored by this class.
     private static readonly byte[] Magic = [0xAE, 0x73];
 
-    private const int NonceSize = 12;  // 96-bit nonce for AES-GCM
-    private const int TagSize = 16;    // 128-bit authentication tag for AES-GCM
-    private const int HeaderSize = 2 + NonceSize + TagSize; // Magic + Nonce + Tag
-
     private readonly IKeyValueStore _inner;
-    private readonly byte[] _key;
+    private readonly IEncryptionKeyProvider _keyProvider;
     private readonly ILogger<EncryptingKeyValueStore> _logger;
 
     public EncryptingKeyValueStore(
         IKeyValueStore inner,
         IOptions<EncryptionOptions> options,
         ILogger<EncryptingKeyValueStore> logger)
+        : this(inner, new MutableEncryptionKeyProvider(options.Value), logger)
+    {
+    }
+
+    public EncryptingKeyValueStore(
+        IKeyValueStore inner,
+        IEncryptionKeyProvider keyProvider,
+        ILogger<EncryptingKeyValueStore> logger)
     {
         _inner = inner;
         _logger = logger;
-        _key = ResolveKey(options.Value);
+        _keyProvider = keyProvider;
     }
 
     public async Task PutAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default)
     {
-        var encrypted = Encrypt(value.Span, _key);
+        var keyBytes = _keyProvider.GetCurrentKey();
+        if (keyBytes is null)
+        {
+            await _inner.PutAsync(key, value, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var encrypted = Encrypt(value.Span, keyBytes);
 
         _logger.LogDebug(
             "Encrypted key '{Key}': {OriginalSize} → {EncryptedSize} bytes",
@@ -50,10 +61,10 @@ public sealed class EncryptingKeyValueStore : IKeyValueStore, IAccessControlVeri
         ReadOnlyMemory<byte> value,
         IMergeStrategy mergeStrategy,
         CancellationToken cancellationToken = default) =>
-        _inner.PutWithStrategyAsync(key, Encrypt(value.Span, _key), mergeStrategy, cancellationToken);
+        _inner.PutWithStrategyAsync(key, EncryptIfEnabled(value.Span), mergeStrategy, cancellationToken);
 
     public Task MergeAsync(string key, ReadOnlyMemory<byte> incomingValue, CancellationToken cancellationToken = default) =>
-        _inner.MergeAsync(key, Encrypt(incomingValue.Span, _key), cancellationToken);
+        _inner.MergeAsync(key, EncryptIfEnabled(incomingValue.Span), cancellationToken);
 
     public Task SetKeyOptionsAsync(string key, KeyOptions options, CancellationToken cancellationToken = default) =>
         _inner.SetKeyOptionsAsync(key, options, cancellationToken);
@@ -67,13 +78,19 @@ public sealed class EncryptingKeyValueStore : IKeyValueStore, IAccessControlVeri
         }
 
         // If magic bytes are absent this is legacy unencrypted data — return as-is.
-        if (data.Length < HeaderSize || data[0] != Magic[0] || data[1] != Magic[1])
+        if (!AesGcmEnvelope.HasMagic(data, Magic))
         {
             return data;
         }
 
+        var keyBytes = _keyProvider.GetCurrentKey();
+        if (keyBytes is null)
+        {
+            throw new InvalidOperationException($"Encrypted value for key '{key}' cannot be read because no encryption key is configured.");
+        }
+
         // AesGcm.Decrypt throws CryptographicException if the authentication tag does not match.
-        return Decrypt(data, _key);
+        return Decrypt(data, keyBytes);
     }
 
     public Task<bool> DeleteAsync(string key, CancellationToken cancellationToken = default) =>
@@ -108,37 +125,10 @@ public sealed class EncryptingKeyValueStore : IKeyValueStore, IAccessControlVeri
     }
 
     private static byte[] Encrypt(ReadOnlySpan<byte> plaintext, byte[] key)
-    {
-        // Generate a fresh random nonce for every write (non-deterministic).
-        var nonce = new byte[NonceSize];
-        RandomNumberGenerator.Fill(nonce);
-
-        var ciphertext = new byte[plaintext.Length];
-        var tag = new byte[TagSize];
-
-        using var aes = new AesGcm(key, TagSize);
-        aes.Encrypt(nonce, plaintext, ciphertext, tag);
-
-        // Layout: [Magic(2)] [Nonce(12)] [Tag(16)] [Ciphertext(n)]
-        var result = new byte[HeaderSize + ciphertext.Length];
-        Magic.CopyTo(result, 0);
-        nonce.CopyTo(result, Magic.Length);
-        tag.CopyTo(result, Magic.Length + NonceSize);
-        ciphertext.CopyTo(result, HeaderSize);
-        return result;
-    }
+        => AesGcmEnvelope.Encrypt(plaintext, key, Magic);
 
     private static byte[] Decrypt(byte[] data, byte[] key)
-    {
-        var nonce = data.AsSpan(Magic.Length, NonceSize);
-        var tag = data.AsSpan(Magic.Length + NonceSize, TagSize);
-        var ciphertext = data.AsSpan(HeaderSize);
-
-        var plaintext = new byte[ciphertext.Length];
-        using var aes = new AesGcm(key, TagSize);
-        aes.Decrypt(nonce, ciphertext, tag, plaintext);
-        return plaintext;
-    }
+        => AesGcmEnvelope.Decrypt(data, key, Magic);
 
     /// <summary>
     /// Derives a 32-byte AES-256 key from the Ethereum private key using HKDF-SHA256
@@ -170,33 +160,23 @@ public sealed class EncryptingKeyValueStore : IKeyValueStore, IAccessControlVeri
         return HKDF.DeriveKey(HashAlgorithmName.SHA256, keyMaterial, 32, salt: salt, info: info);
     }
 
+    private ReadOnlyMemory<byte> EncryptIfEnabled(ReadOnlySpan<byte> plaintext)
+    {
+        var keyBytes = _keyProvider.GetCurrentKey();
+        return keyBytes is null
+            ? plaintext.ToArray()
+            : Encrypt(plaintext, keyBytes);
+    }
+
     private static byte[] ResolveKey(EncryptionOptions options)
     {
-        if (!options.Enabled)
+        var key = EncryptionKeyMaterial.TryResolveKey(options);
+        if (key is null)
         {
             // Return a dummy key; the store won't be registered unless encryption is enabled.
             return new byte[32];
         }
 
-        if (!string.IsNullOrWhiteSpace(options.KeyHex))
-        {
-            var keyBytes = Convert.FromHexString(options.KeyHex.Trim());
-            if (keyBytes.Length != 32)
-            {
-                throw new InvalidOperationException(
-                    "SWARM_KEYDB_ENCRYPTION_KEY must be a 64-character hex string representing a 32-byte AES-256 key.");
-            }
-
-            return keyBytes;
-        }
-
-        if (!string.IsNullOrWhiteSpace(options.EthPrivateKeyHex))
-        {
-            return DeriveKeyFromEthPrivateKey(options.EthPrivateKeyHex.Trim());
-        }
-
-        throw new InvalidOperationException(
-            "Encryption is enabled (SWARM_KEYDB_ENCRYPTION_ENABLED=true) but no key is configured. " +
-            "Set SWARM_KEYDB_ENCRYPTION_KEY (64-char hex) or SWARM_KEYDB_ENCRYPTION_ETH_KEY (Ethereum private key hex).");
+        return key;
     }
 }

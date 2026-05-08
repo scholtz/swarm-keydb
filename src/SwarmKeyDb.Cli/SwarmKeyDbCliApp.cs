@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging.Abstractions;
 using SwarmKeyDb;
 
 namespace SwarmKeyDb.Cli;
@@ -296,9 +297,58 @@ internal sealed class CliRuntime
                     $"keys={keys.Count}\nstorage-bytes={totalBytes}\nbee-url={context.Settings.BeeUrl}\nbatch-id={context.Settings.BatchId}\nindex={context.Settings.IndexPath}").ConfigureAwait(false);
                 return 0;
             }
+            case "backup":
+            {
+                var service = new BackupService(context.Store, context.SwarmClient, context.KeyProvider);
+                var result = await service.BackupAsync(CreateProgress("Backing up"), cancellationToken).ConfigureAwait(false);
+                var outPath = parsed.TryGetOptionValue("--out");
+                if (!string.IsNullOrWhiteSpace(outPath))
+                {
+                    await File.WriteAllTextAsync(outPath, result.Reference, cancellationToken).ConfigureAwait(false);
+                }
+
+                await WriteOutputAsync(context.Settings.Output,
+                    new { reference = result.Reference, keyCount = result.KeyCount, outPath },
+                    result.Reference).ConfigureAwait(false);
+                return 0;
+            }
+            case "restore":
+            {
+                var reference = parsed.TryGetOptionValue("--ref") ?? throw new CliUsageException("restore requires --ref <swarm://reference>.");
+                var keyPath = parsed.TryGetOptionValue("--key");
+                var service = new RestoreService(new BackupService(context.Store, context.SwarmClient, context.KeyProvider), context.Store, context.KeyProvider);
+                var key = keyPath is null ? null : await ReadKeyFileAsync(keyPath, cancellationToken).ConfigureAwait(false);
+                var result = await service.RestoreAsync(reference, key, CreateProgress("Restoring"), cancellationToken).ConfigureAwait(false);
+                await WriteOutputAsync(context.Settings.Output,
+                    new { reference, restoredKeyCount = result.RestoredKeyCount },
+                    $"Restored {result.RestoredKeyCount} keys").ConfigureAwait(false);
+                return 0;
+            }
+            case "rotate-key":
+            {
+                var oldKeyPath = parsed.TryGetOptionValue("--old-key") ?? throw new CliUsageException("rotate-key requires --old-key <path>.");
+                var newKeyPath = parsed.TryGetOptionValue("--new-key") ?? throw new CliUsageException("rotate-key requires --new-key <path>.");
+                var service = new KeyRotationService(
+                    context.Store,
+                    context.SwarmClient,
+                    context.KeyProvider,
+                    new BackupService(context.Store, context.SwarmClient, context.KeyProvider));
+                var oldKey = await ReadKeyFileAsync(oldKeyPath, cancellationToken).ConfigureAwait(false);
+                var newKey = await ReadKeyFileAsync(newKeyPath, cancellationToken).ConfigureAwait(false);
+                var result = await service.RotateAsync(oldKey, newKey, CreateProgress("Rotating key"), cancellationToken).ConfigureAwait(false);
+                await WriteOutputAsync(context.Settings.Output,
+                    new { manifestReference = result.ManifestReference, backupReference = result.BackupReference, rotatedKeyCount = result.RotatedKeyCount },
+                    result.ManifestReference).ConfigureAwait(false);
+                return 0;
+            }
             default:
                 throw new CliUsageException($"Unknown command '{parsed.Command}'. Use --help.");
         }
+
+        Progress<OperationProgress> CreateProgress(string label) => new(progress =>
+        {
+            _stderr.WriteLine($"{label}: {progress.Processed}/{progress.Total} keys{(string.IsNullOrWhiteSpace(progress.Key) ? string.Empty : $" ({progress.Key})")}...");
+        });
     }
 
     private DataContext CreateContext(RuntimeSettings settings)
@@ -312,8 +362,12 @@ internal sealed class CliRuntime
         {
             var swarm = _options.SwarmClientFactory(settings);
             var index = _options.KeyIndexFactory(settings.IndexPath);
-            var store = new SwarmKeyValueStore(swarm, index);
-            return new DataContext(new SwarmKeyDbClient(store), settings, swarm as IDisposable);
+            var keyProvider = new MutableEncryptionKeyProvider(new EncryptionOptions());
+            var store = new EncryptingKeyValueStore(
+                new SwarmKeyValueStore(swarm, index),
+                keyProvider,
+                NullLogger<EncryptingKeyValueStore>.Instance);
+            return new DataContext(new SwarmKeyDbClient(store), store, swarm, keyProvider, settings, swarm as IDisposable);
         }
         catch (UriFormatException)
         {
@@ -400,6 +454,9 @@ internal sealed class CliRuntime
                   list [--prefix <prefix>]
                   scan --from <start> --to <end>
                   stats
+                  backup [--out <path>]
+                  restore --ref <swarm://reference> [--key <path>]
+                  rotate-key --old-key <path> --new-key <path>
                   config set [--bee-url <url>] [--batch-id <id>] [--output plain|json|table]
                   config get [bee-url|batch-id|output]
 
@@ -421,6 +478,9 @@ internal sealed class CliRuntime
             "list" => "Usage: skdb list [--prefix <prefix>]",
             "scan" => "Usage: skdb scan --from <start> --to <end>",
             "stats" => "Usage: skdb stats",
+            "backup" => "Usage: skdb backup [--out <path>]",
+            "restore" => "Usage: skdb restore --ref <swarm://reference> [--key <path>]",
+            "rotate-key" => "Usage: skdb rotate-key --old-key <path> --new-key <path>",
             "config" => "Usage: skdb config set|get ...",
             _ => "Usage: skdb --help"
         };
@@ -501,6 +561,22 @@ internal sealed class CliRuntime
             throw new CliUsageException($"Invalid Bee URL '{value}'.");
         }
     }
+
+    private static async Task<string> ReadKeyFileAsync(string path, CancellationToken cancellationToken)
+    {
+        if (!File.Exists(path))
+        {
+            throw new CliUsageException($"Key file '{path}' was not found.");
+        }
+
+        var key = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            throw new CliUsageException($"Key file '{path}' is empty.");
+        }
+
+        return key.Trim();
+    }
 }
 
 public sealed class CliConfig
@@ -573,14 +649,26 @@ internal sealed class DataContext : IAsyncDisposable
 {
     private readonly IDisposable? _disposable;
 
-    public DataContext(SwarmKeyDbClient client, RuntimeSettings settings, IDisposable? disposable)
+    public DataContext(
+        SwarmKeyDbClient client,
+        IKeyValueStore store,
+        ISwarmClient swarmClient,
+        IEncryptionKeyProvider keyProvider,
+        RuntimeSettings settings,
+        IDisposable? disposable)
     {
         Client = client;
+        Store = store;
+        SwarmClient = swarmClient;
+        KeyProvider = keyProvider;
         Settings = settings;
         _disposable = disposable;
     }
 
     public SwarmKeyDbClient Client { get; }
+    public IKeyValueStore Store { get; }
+    public ISwarmClient SwarmClient { get; }
+    public IEncryptionKeyProvider KeyProvider { get; }
     public RuntimeSettings Settings { get; }
 
     public ValueTask DisposeAsync()

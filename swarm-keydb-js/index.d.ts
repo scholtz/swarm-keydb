@@ -26,4 +26,7 @@ export declare class SwarmKeyDb {
   batchGet(keys: string[]): Promise<Array<string | null>>;
   batchPut(entries: Record<string, string> | BatchEntry[]): Promise<void>;
   setWithTTL(key: string, value: string, ttlSeconds: number): Promise<void>;
+  backup(): Promise<string>;
+  restore(ref: string, key?: string): Promise<number>;
+  rotateKey(oldKey: string, newKey: string): Promise<string>;
 }

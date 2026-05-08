@@ -14,6 +14,18 @@ function createMockClient(overrides = {}) {
     mGet: async (keys) => keys.map((k) => `v:${k}`),
     mSet: async () => 'OK',
     setEx: async () => 'OK',
+    sendCommand: async (args) => {
+      if (args[0] === 'BACKUP') {
+        return 'swarm://backup-ref';
+      }
+      if (args[0] === 'RESTOREDB') {
+        return 2;
+      }
+      if (args[0] === 'ROTATEKEY') {
+        return 'swarm://rotation-ref';
+      }
+      throw new Error(`unexpected command ${args[0]}`);
+    },
     ...overrides
   };
 }
@@ -61,4 +73,35 @@ test('connection failures are descriptive', async () => {
   );
 
   await assert.rejects(() => db.connect(), ConnectionError);
+});
+
+test('backup restore and rotateKey use management commands', async () => {
+  const commands = [];
+  const mock = createMockClient({
+    sendCommand: async (args) => {
+      commands.push(args);
+      if (args[0] === 'BACKUP') {
+        return 'swarm://backup-ref';
+      }
+      if (args[0] === 'RESTOREDB') {
+        return 2;
+      }
+      if (args[0] === 'ROTATEKEY') {
+        return 'swarm://rotation-ref';
+      }
+
+      throw new Error('unexpected command');
+    }
+  });
+  const db = new SwarmKeyDb({ host: 'localhost', port: 6379 }, () => mock);
+  await db.connect();
+
+  assert.equal(await db.backup(), 'swarm://backup-ref');
+  assert.equal(await db.restore('swarm://backup-ref', 'old-key'), 2);
+  assert.equal(await db.rotateKey('old-key', 'new-key'), 'swarm://rotation-ref');
+  assert.deepEqual(commands, [
+    ['BACKUP'],
+    ['RESTOREDB', 'swarm://backup-ref', 'old-key'],
+    ['ROTATEKEY', 'old-key', 'new-key']
+  ]);
 });

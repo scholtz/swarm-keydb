@@ -62,6 +62,21 @@ class SwarmKeyDb:
             raise ValueError("ttl_seconds must be greater than zero")
         self._client.setex(key, ttl_seconds, value)
 
+    def backup(self) -> str:
+        return self._client.execute_command("BACKUP")
+
+    def restore(self, ref: str, key: Optional[str] = None) -> int:
+        _validate_ref(ref)
+        args = ["RESTOREDB", ref]
+        if key:
+            args.append(key)
+        return int(self._client.execute_command(*args))
+
+    def rotate_key(self, old_key: str, new_key: str) -> str:
+        _validate_ref(old_key, name="old_key")
+        _validate_ref(new_key, name="new_key")
+        return self._client.execute_command("ROTATEKEY", old_key, new_key)
+
     def batchGet(self, keys: Sequence[str]) -> List[Optional[str]]:
         """Compatibility alias for `batch_get`; prefer snake_case in Python code."""
         return self.batch_get(keys)
@@ -121,6 +136,21 @@ class AsyncSwarmKeyDb:
             raise ValueError("ttl_seconds must be greater than zero")
         await self._client.setex(key, ttl_seconds, value)
 
+    async def backup(self) -> str:
+        return await self._client.execute_command("BACKUP")
+
+    async def restore(self, ref: str, key: Optional[str] = None) -> int:
+        _validate_ref(ref)
+        args = ["RESTOREDB", ref]
+        if key:
+            args.append(key)
+        return int(await self._client.execute_command(*args))
+
+    async def rotate_key(self, old_key: str, new_key: str) -> str:
+        _validate_ref(old_key, name="old_key")
+        _validate_ref(new_key, name="new_key")
+        return await self._client.execute_command("ROTATEKEY", old_key, new_key)
+
     async def batchGet(self, keys: Sequence[str]) -> List[Optional[str]]:
         """Compatibility alias for `batch_get`; prefer snake_case in Python code."""
         return await self.batch_get(keys)
@@ -140,3 +170,8 @@ class AsyncSwarmKeyDb:
 def _validate_key(key: str) -> None:
     if not isinstance(key, str) or len(key) == 0:
         raise ValueError("key must be a non-empty string")
+
+
+def _validate_ref(value: str, name: str = "ref") -> None:
+    if not isinstance(value, str) or len(value) == 0:
+        raise ValueError(f"{name} must be a non-empty string")

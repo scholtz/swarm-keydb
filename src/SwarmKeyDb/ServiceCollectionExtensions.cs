@@ -27,6 +27,8 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IKeyValueStore>(sp =>
         {
             IKeyValueStore store = baseStoreFactory(sp);
+            var keyProvider = sp.GetService<IEncryptionKeyProvider>()
+                ?? new MutableEncryptionKeyProvider(sp.GetRequiredService<IOptions<EncryptionOptions>>().Value);
 
             if (sp.GetRequiredService<IOptions<AclOptions>>().Value.Enabled)
             {
@@ -36,13 +38,10 @@ public static class ServiceCollectionExtensions
                     sp.GetRequiredService<IEthAddressAccessor>());
             }
 
-            if (sp.GetRequiredService<IOptions<EncryptionOptions>>().Value.Enabled)
-            {
-                store = new EncryptingKeyValueStore(
-                    store,
-                    sp.GetRequiredService<IOptions<EncryptionOptions>>(),
-                    sp.GetRequiredService<ILogger<EncryptingKeyValueStore>>());
-            }
+            store = new EncryptingKeyValueStore(
+                store,
+                keyProvider,
+                sp.GetRequiredService<ILogger<EncryptingKeyValueStore>>());
 
             store = new CompressingKeyValueStore(
                 store,
