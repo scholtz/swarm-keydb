@@ -147,6 +147,7 @@ static async Task SwarmStoreWritesIntegrityEnvelopeAsync()
     var store = new SwarmKeyValueStore(swarm, index);
 
     var value = Encoding.UTF8.GetBytes("{\"name\":\"Alice\"}");
+    var expectedHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(value));
     await store.PutAsync("user:alice", value);
 
     var reference = await index.GetReferenceAsync("user:alice");
@@ -158,7 +159,7 @@ static async Task SwarmStoreWritesIntegrityEnvelopeAsync()
     using var envelope = JsonDocument.Parse(raw.AsMemory(4));
     AssertEqual(1, envelope.RootElement.GetProperty("version").GetInt32());
     AssertEqual("SHA-256", envelope.RootElement.GetProperty("hashAlgorithm").GetString());
-    AssertEqual(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(value)).ToLowerInvariant(), envelope.RootElement.GetProperty("hash").GetString());
+    AssertEqual(expectedHash, envelope.RootElement.GetProperty("hash").GetString());
     AssertSequenceEqual(value, envelope.RootElement.GetProperty("payload").GetBytesFromBase64());
 }
 
@@ -261,13 +262,14 @@ static async Task BatchGetDetectsTamperedKeyAsync()
 
 static async Task SwarmStoreIntegritySupportsEmptyAndLargeValuesAsync()
 {
+    const int BytePatternModulus = 251;
     var swarm = new MutableSwarmClient();
     var store = new SwarmKeyValueStore(swarm, new InMemoryKeyIndex());
 
     await store.PutAsync("empty", Array.Empty<byte>());
     AssertSequenceEqual(Array.Empty<byte>(), (await store.GetAsync("empty"))!);
 
-    var large = Enumerable.Range(0, 1_100_000).Select(static i => (byte)(i % 251)).ToArray();
+    var large = Enumerable.Range(0, 1_100_000).Select(i => (byte)(i % BytePatternModulus)).ToArray();
     await store.PutAsync("large", large);
     AssertSequenceEqual(large, (await store.GetAsync("large"))!);
 }
