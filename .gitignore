@@ -8,3 +8,5 @@ TestResults/
 data/
 node_modules/
 __pycache__/
+*.egg-info/
+build/
