@@ -63,12 +63,15 @@ class SwarmKeyDb:
         self._client.setex(key, ttl_seconds, value)
 
     def batchGet(self, keys: Sequence[str]) -> List[Optional[str]]:
+        """Compatibility alias for `batch_get`; prefer snake_case in Python code."""
         return self.batch_get(keys)
 
     def batchPut(self, entries: Mapping[str, str]) -> None:
+        """Compatibility alias for `batch_put`; prefer snake_case in Python code."""
         self.batch_put(entries)
 
     def setWithTTL(self, key: str, value: str, ttl_seconds: int) -> None:
+        """Compatibility alias for `set_with_ttl`; prefer snake_case in Python code."""
         self.set_with_ttl(key, value, ttl_seconds)
 
 
@@ -119,12 +122,15 @@ class AsyncSwarmKeyDb:
         await self._client.setex(key, ttl_seconds, value)
 
     async def batchGet(self, keys: Sequence[str]) -> List[Optional[str]]:
+        """Compatibility alias for `batch_get`; prefer snake_case in Python code."""
         return await self.batch_get(keys)
 
     async def batchPut(self, entries: Mapping[str, str]) -> None:
+        """Compatibility alias for `batch_put`; prefer snake_case in Python code."""
         await self.batch_put(entries)
 
     async def setWithTTL(self, key: str, value: str, ttl_seconds: int) -> None:
+        """Compatibility alias for `set_with_ttl`; prefer snake_case in Python code."""
         await self.set_with_ttl(key, value, ttl_seconds)
 
     async def close(self) -> None:

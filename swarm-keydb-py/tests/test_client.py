@@ -73,9 +73,9 @@ class SwarmKeyDbTests(unittest.TestCase):
         self.assertEqual(db.batch_get(["k1", "k2", "k3"]), ["v1", "v2", None])
         db.set_with_ttl("temp", "x", 10)
         self.assertEqual(db.get("temp"), "x")
-        db.batchPut({"k3": "v3"})
-        self.assertEqual(db.batchGet(["k3"]), ["v3"])
-        db.setWithTTL("temp2", "y", 1)
+        db.batch_put({"k3": "v3"})
+        self.assertEqual(db.batch_get(["k3"]), ["v3"])
+        db.set_with_ttl("temp2", "y", 1)
         self.assertEqual(db.get("temp2"), "y")
 
     def test_sync_errors(self):
@@ -100,9 +100,9 @@ class AsyncSwarmKeyDbTests(unittest.IsolatedAsyncioTestCase):
         await db.batch_put({"k1": "v1", "k2": "v2"})
         self.assertEqual(await db.batch_get(["k1", "k2", "k3"]), ["v1", "v2", None])
         await db.set_with_ttl("temp", "x", 3)
-        await db.batchPut({"k3": "v3"})
-        self.assertEqual(await db.batchGet(["k3"]), ["v3"])
-        await db.setWithTTL("temp2", "y", 3)
+        await db.batch_put({"k3": "v3"})
+        self.assertEqual(await db.batch_get(["k3"]), ["v3"])
+        await db.set_with_ttl("temp2", "y", 3)
         self.assertEqual(await db.list("k*"), ["k1", "k2", "k3"])
         await db.close()
 
