@@ -3411,7 +3411,7 @@ internal sealed class FlakyChainAdapter : IChainAdapter
     {
         if (_failuresRemaining-- > 0)
         {
-            throw new InvalidOperationException("RPC timeout. Retrying in 1s.");
+            throw new InvalidOperationException("Simulated RPC timeout.");
         }
 
         await _inner.PutAsync(key, value, cancellationToken).ConfigureAwait(false);

@@ -657,12 +657,27 @@ IReadOnlyList<ChainAdapterOptions> ParseCrossChainAdapters(string? json)
 
             if (element.ValueKind == JsonValueKind.Object)
             {
+                static string? GetString(JsonElement element, string primary, string alternate) =>
+                    element.TryGetProperty(primary, out var property) ? property.GetString()
+                    : element.TryGetProperty(alternate, out property) ? property.GetString()
+                    : null;
+
+                static int GetInt(JsonElement element, string primary, string alternate)
+                {
+                    if (element.TryGetProperty(primary, out var property) || element.TryGetProperty(alternate, out property))
+                    {
+                        return property.GetInt32();
+                    }
+
+                    throw new KeyNotFoundException(primary);
+                }
+
                 adapters.Add(new ChainAdapterOptions
                 {
-                    ChainId = element.GetProperty("chainId").GetInt32(),
-                    Name = element.TryGetProperty("name", out var nameProperty) ? nameProperty.GetString() ?? string.Empty : string.Empty,
-                    RpcUrl = element.TryGetProperty("rpcUrl", out var rpcUrlProperty) ? rpcUrlProperty.GetString() : null,
-                    BridgeContractAddress = element.TryGetProperty("bridgeContractAddress", out var bridgeProperty) ? bridgeProperty.GetString() : null
+                    ChainId = GetInt(element, "chainId", "ChainId"),
+                    Name = GetString(element, "name", "Name") ?? string.Empty,
+                    RpcUrl = GetString(element, "rpcUrl", "RpcUrl"),
+                    BridgeContractAddress = GetString(element, "bridgeContractAddress", "BridgeContractAddress")
                 });
             }
         }

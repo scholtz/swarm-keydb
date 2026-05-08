@@ -98,16 +98,16 @@ The server also reads `src/SwarmKeyDb.Server/appsettings.json`. Cross-chain entr
     "ReconcileIntervalSeconds": 5,
     "Chains": [
       {
-        "chainId": 1,
-        "name": "Ethereum",
-        "rpcUrl": "https://ethereum.example.invalid",
-        "bridgeContractAddress": "0x0000000000000000000000000000000000000000"
+        "ChainId": 1,
+        "Name": "Ethereum",
+        "RpcUrl": "https://ethereum.example.invalid",
+        "BridgeContractAddress": "0x0000000000000000000000000000000000000000"
       },
       {
-        "chainId": 137,
-        "name": "Polygon",
-        "rpcUrl": "https://polygon.example.invalid",
-        "bridgeContractAddress": "0x0000000000000000000000000000000000000000"
+        "ChainId": 137,
+        "Name": "Polygon",
+        "RpcUrl": "https://polygon.example.invalid",
+        "BridgeContractAddress": "0x0000000000000000000000000000000000000000"
       }
     ]
   }
