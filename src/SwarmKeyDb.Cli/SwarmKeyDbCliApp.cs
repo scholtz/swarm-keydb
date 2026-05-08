@@ -39,6 +39,7 @@ public sealed record RuntimeSettings(
     OutputFormat Output,
     string ConfigPath,
     string IndexPath,
+    string CrossChainStatePath,
     string? KeyPath,
     bool BeeUrlFromEnvironment,
     bool BatchIdFromEnvironment);
@@ -246,8 +247,15 @@ internal sealed class CliRuntime
                 var bytes = filePath is not null
                     ? await File.ReadAllBytesAsync(filePath, cancellationToken).ConfigureAwait(false)
                     : Encoding.UTF8.GetBytes(inlineValue!);
-
-                await context.Client.PutBytesAsync(key, bytes, cancellationToken).ConfigureAwait(false);
+                var chainIds = ParseChainIds(parsed.TryGetOptionValue("--chains"));
+                if (chainIds.Count == 0)
+                {
+                    await context.Client.PutBytesAsync(key, bytes, cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    await context.Client.PutAsync(key, bytes, chainIds, cancellationToken).ConfigureAwait(false);
+                }
                 await WriteOutputAsync(context.Settings.Output, new { key, size = bytes.Length, stored = true }, $"OK {key}").ConfigureAwait(false);
                 return 0;
             }
@@ -270,9 +278,51 @@ internal sealed class CliRuntime
             case "delete":
             {
                 var key = parsed.Positionals.FirstOrDefault() ?? throw new CliUsageException("delete requires <key>.");
-                var deleted = await context.Client.DeleteAsync(key, cancellationToken).ConfigureAwait(false);
+                var chainIds = ParseChainIds(parsed.TryGetOptionValue("--chains"));
+                var deleted = chainIds.Count == 0
+                    ? await context.Client.DeleteAsync(key, cancellationToken).ConfigureAwait(false)
+                    : await context.Client.DeleteAsync(key, chainIds, cancellationToken).ConfigureAwait(false);
                 await WriteOutputAsync(context.Settings.Output, new { key, deleted }, deleted ? "1" : "0").ConfigureAwait(false);
                 return 0;
+            }
+            case "sync":
+            {
+                var subcommand = parsed.Positionals.FirstOrDefault() ?? throw new CliUsageException("sync requires status|force.");
+                var key = parsed.TryGetOptionValue("--key") ?? throw new CliUsageException("sync requires --key <key>.");
+                if (subcommand.Equals("status", StringComparison.OrdinalIgnoreCase))
+                {
+                    var status = await context.Client.GetSyncStatusAsync(key, cancellationToken).ConfigureAwait(false);
+                    if (status is null)
+                    {
+                        await _stderr.WriteLineAsync($"No sync state found for key: {key}").ConfigureAwait(false);
+                        return 1;
+                    }
+
+                    await WriteOutputAsync(
+                        context.Settings.Output,
+                        status,
+                        string.Join(Environment.NewLine, status.Chains.Select(static chain => $"{chain.ChainId}:{chain.ChainName}={chain.Status}"))).ConfigureAwait(false);
+                    return 0;
+                }
+
+                if (subcommand.Equals("force", StringComparison.OrdinalIgnoreCase))
+                {
+                    var forced = await context.Client.ForceSyncAsync(key, cancellationToken).ConfigureAwait(false);
+                    if (!forced)
+                    {
+                        await _stderr.WriteLineAsync($"No sync state found for key: {key}").ConfigureAwait(false);
+                        return 1;
+                    }
+
+                    var status = await context.Client.GetSyncStatusAsync(key, cancellationToken).ConfigureAwait(false);
+                    await WriteOutputAsync(
+                        context.Settings.Output,
+                        new { key, forced = true, status },
+                        $"Forced sync for {key}").ConfigureAwait(false);
+                    return 0;
+                }
+
+                throw new CliUsageException("Unknown sync subcommand. Use: skdb sync status|force --key <key>");
             }
             case "delete-namespace":
             {
@@ -441,7 +491,25 @@ internal sealed class CliRuntime
                 baseStore,
                 keyProvider,
                 NullLogger<EncryptingKeyValueStore>.Instance);
-            return new DataContext(new SwarmKeyDbClient(store), store, swarm, keyProvider, settings, disposable);
+            var crossChainOptions = new CrossChainOptions
+            {
+                Enabled = true,
+                Chains =
+                [
+                    new ChainAdapterOptions { ChainId = (int)ChainId.Ethereum, Name = "Ethereum" },
+                    new ChainAdapterOptions { ChainId = (int)ChainId.Polygon, Name = "Polygon" },
+                    new ChainAdapterOptions { ChainId = (int)ChainId.Arbitrum, Name = "Arbitrum" },
+                    new ChainAdapterOptions { ChainId = (int)ChainId.Base, Name = "Base" },
+                    new ChainAdapterOptions { ChainId = (int)ChainId.Optimism, Name = "Optimism" },
+                    new ChainAdapterOptions { ChainId = (int)ChainId.Bsc, Name = "BSC" }
+                ]
+            };
+            var crossChainSyncService = new CrossChainSyncService(
+                crossChainOptions.Chains.Select(chain => (IChainAdapter)new NamespacedChainAdapter(store, chain)),
+                new FileCrossChainStateStore(settings.CrossChainStatePath),
+                crossChainOptions,
+                NullLogger<CrossChainSyncService>.Instance);
+            return new DataContext(new SwarmKeyDbClient(store, crossChainSyncService), store, swarm, keyProvider, settings, disposable, crossChainSyncService);
         }
         catch (UriFormatException)
         {
@@ -471,6 +539,10 @@ internal sealed class CliRuntime
             ?? throw new InvalidOperationException("Could not determine configuration directory.");
         var indexPath = Path.Combine(configDir, "index.json");
 
+        var keyPath = parsed.Command is not null && parsed.Command.Equals("sync", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : parsed.TryGetOptionValue("--key");
+
         return new RuntimeSettings(
             Backend: backend,
             BeeUrl: beeUrl,
@@ -479,7 +551,8 @@ internal sealed class CliRuntime
             Output: output,
             ConfigPath: configPath,
             IndexPath: indexPath,
-            KeyPath: parsed.TryGetOptionValue("--key"),
+            CrossChainStatePath: Path.Combine(configDir, "crosschain-sync.json"),
+            KeyPath: keyPath,
             BeeUrlFromEnvironment: env.BeeUrl is not null,
             BatchIdFromEnvironment: env.BatchId is not null);
     }
@@ -530,6 +603,8 @@ internal sealed class CliRuntime
                   get <key>
                   put <key> <value> [--file <path>]
                   delete <key>
+                  sync status --key <key>
+                  sync force --key <key>
                   delete-namespace <prefix>
                   list [--prefix <prefix>]
                   scan --from <start> --to <end>
@@ -559,6 +634,7 @@ internal sealed class CliRuntime
             "put" => "Usage: skdb put <key> <value> | skdb put <key> --file <path>",
             "get" => "Usage: skdb get <key>",
             "delete" => "Usage: skdb delete <key>",
+            "sync" => "Usage: skdb sync status|force --key <key>",
             "delete-namespace" => "Usage: skdb delete-namespace <prefix>",
             "list" => "Usage: skdb list [--prefix <prefix>]",
             "scan" => "Usage: skdb scan --from <start> --to <end>",
@@ -677,6 +753,18 @@ internal sealed class CliRuntime
 
         return key.Trim();
     }
+
+    private static IReadOnlyList<int> ParseChainIds(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return [];
+        }
+
+        return value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(static chainId => int.Parse(chainId, System.Globalization.CultureInfo.InvariantCulture))
+            .ToArray();
+    }
 }
 
 public sealed class CliConfig
@@ -768,6 +856,7 @@ internal sealed class ParsedArgs
 internal sealed class DataContext : IAsyncDisposable
 {
     private readonly IDisposable? _disposable;
+    private readonly CrossChainSyncService? _crossChainSyncService;
 
     public DataContext(
         SwarmKeyDbClient client,
@@ -775,7 +864,8 @@ internal sealed class DataContext : IAsyncDisposable
         ISwarmClient swarmClient,
         IEncryptionKeyProvider keyProvider,
         RuntimeSettings settings,
-        IDisposable? disposable)
+        IDisposable? disposable,
+        CrossChainSyncService? crossChainSyncService)
     {
         Client = client;
         Store = store;
@@ -783,6 +873,7 @@ internal sealed class DataContext : IAsyncDisposable
         KeyProvider = keyProvider;
         Settings = settings;
         _disposable = disposable;
+        _crossChainSyncService = crossChainSyncService;
     }
 
     public SwarmKeyDbClient Client { get; }
@@ -794,7 +885,7 @@ internal sealed class DataContext : IAsyncDisposable
     public ValueTask DisposeAsync()
     {
         _disposable?.Dispose();
-        return ValueTask.CompletedTask;
+        return _crossChainSyncService?.DisposeAsync() ?? ValueTask.CompletedTask;
     }
 }
 

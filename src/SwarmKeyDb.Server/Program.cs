@@ -77,6 +77,7 @@ var ethereumBridgeOptions = new EthereumBridgeOptions
     PollIntervalSeconds = GetNullableIntFromMany("ETH_POLL_INTERVAL_SECONDS", "Ethereum:PollIntervalSeconds") ?? 5,
     ReconnectDelaySeconds = GetNullableIntFromMany("ETH_RECONNECT_DELAY_SECONDS", "Ethereum:ReconnectDelaySeconds") ?? 5
 };
+var crossChainOptions = GetCrossChainOptions();
 var services = new ServiceCollection();
 services.AddLogging(builder =>
 {
@@ -274,8 +275,22 @@ services.AddSingleton<KeyRotationService>(sp => new KeyRotationService(
 
 using var provider = services.BuildServiceProvider();
 cacheStats = provider.GetRequiredService<ICacheStats>();
+var baseStore = provider.GetRequiredService<IKeyValueStore>();
+CrossChainSyncService? crossChainSyncService = null;
+IKeyValueStore commandStore = baseStore;
+if (crossChainOptions.Enabled && crossChainOptions.Chains.Count > 0)
+{
+    var adapters = crossChainOptions.Chains.Select(chain => (IChainAdapter)new NamespacedChainAdapter(baseStore, chain)).ToArray();
+    crossChainSyncService = new CrossChainSyncService(
+        adapters,
+        new FileCrossChainStateStore(Path.Combine(dataDir, "crosschain-sync.json")),
+        crossChainOptions,
+        provider.GetRequiredService<ILogger<CrossChainSyncService>>());
+    commandStore = new CrossChainReplicatingKeyValueStore(baseStore, crossChainSyncService, crossChainOptions.DefaultChainIds);
+}
+
 var processor = new RedisCommandProcessor(
-    provider.GetRequiredService<IKeyValueStore>(),
+    commandStore,
     provider.GetRequiredService<IEthAddressAccessor>(),
     provider.GetRequiredService<BackupService>(),
     provider.GetRequiredService<RestoreService>(),
@@ -312,6 +327,11 @@ if (ethereumBridge is not null)
     await ethereumBridge.StartAsync(cts.Token);
 }
 
+if (crossChainSyncService is not null)
+{
+    await crossChainSyncService.StartAsync(cts.Token);
+}
+
 var monitoringServers = new List<MonitoringHttpServer>();
 var monitoringTasks = new List<Task>();
 if (dashboardEnabled)
@@ -326,7 +346,8 @@ if (dashboardEnabled)
         provider.GetRequiredService<ILogger<MonitoringHttpServer>>(),
         shardHealthProvider,
         backendStatusProvider,
-        ethereumBridge);
+        ethereumBridge,
+        crossChainSyncService);
     monitoringServers.Add(dashboardServer);
     monitoringTasks.Add(dashboardServer.RunAsync(cts.Token));
 }
@@ -343,7 +364,8 @@ if (metricsEnabled && (!dashboardEnabled || metricsPort != dashboardPort))
         provider.GetRequiredService<ILogger<MonitoringHttpServer>>(),
         shardHealthProvider,
         backendStatusProvider,
-        ethereumBridge);
+        ethereumBridge,
+        crossChainSyncService);
     monitoringServers.Add(metricsServer);
     monitoringTasks.Add(metricsServer.RunAsync(cts.Token));
 }
@@ -354,6 +376,11 @@ await Task.WhenAll(monitoringTasks);
 if (ethereumBridge is not null)
 {
     await ethereumBridge.DisposeAsync();
+}
+
+if (crossChainSyncService is not null)
+{
+    await crossChainSyncService.DisposeAsync();
 }
 
 foreach (var monitoringServer in monitoringServers)
@@ -555,6 +582,97 @@ AclOptions GetAclOptions()
         throw new InvalidOperationException(
             "ACL is enabled (SWARM_KEYDB_ACL_ENABLED=true) but SWARM_KEYDB_ACL_ENTRIES is not valid JSON. " +
             "Configure a JSON array of {\"address\":\"0x...\",\"permission\":\"read|write|admin\"} entries.",
+            ex);
+    }
+}
+
+CrossChainOptions GetCrossChainOptions()
+{
+    var options = new CrossChainOptions
+    {
+        Enabled = GetBoolFromMany(defaultValue: false, "SWARM_KEYDB_CROSS_CHAIN_ENABLED", "CrossChain:Enabled"),
+        MaxRetryAttempts = GetNullableIntFromMany("SWARM_KEYDB_CROSS_CHAIN_MAX_RETRIES", "CrossChain:MaxRetryAttempts") ?? 5,
+        RetryBaseDelaySeconds = GetNullableIntFromMany("SWARM_KEYDB_CROSS_CHAIN_RETRY_BASE_SECONDS", "CrossChain:RetryBaseDelaySeconds") ?? 5,
+        ReconcileIntervalSeconds = GetNullableIntFromMany("SWARM_KEYDB_CROSS_CHAIN_RECONCILE_SECONDS", "CrossChain:ReconcileIntervalSeconds") ?? 5,
+        DefaultChainIds = ParseIntArray(GetFirstSetting("SWARM_KEYDB_CROSS_CHAIN_DEFAULT_CHAIN_IDS", "CrossChain:DefaultChainIds")).ToList(),
+        Chains = ParseCrossChainAdapters(GetFirstSetting("SWARM_KEYDB_CROSS_CHAIN_CHAINS", "CrossChain:Chains")).ToList()
+    };
+
+    return options;
+}
+
+IReadOnlyList<int> ParseIntArray(string? json)
+{
+    if (string.IsNullOrWhiteSpace(json))
+    {
+        return [];
+    }
+
+    try
+    {
+        using var document = JsonDocument.Parse(json);
+        if (document.RootElement.ValueKind == JsonValueKind.Array)
+        {
+            return document.RootElement.EnumerateArray()
+                .Select(static element => element.ValueKind == JsonValueKind.Number ? element.GetInt32() : int.Parse(element.GetString()!, System.Globalization.CultureInfo.InvariantCulture))
+                .ToArray();
+        }
+    }
+    catch (JsonException)
+    {
+    }
+
+    return json.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(static value => int.Parse(value, System.Globalization.CultureInfo.InvariantCulture))
+        .ToArray();
+}
+
+IReadOnlyList<ChainAdapterOptions> ParseCrossChainAdapters(string? json)
+{
+    if (string.IsNullOrWhiteSpace(json))
+    {
+        return [];
+    }
+
+    try
+    {
+        using var document = JsonDocument.Parse(json);
+        if (document.RootElement.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var adapters = new List<ChainAdapterOptions>();
+        foreach (var element in document.RootElement.EnumerateArray())
+        {
+            if (element.ValueKind == JsonValueKind.Number)
+            {
+                adapters.Add(new ChainAdapterOptions
+                {
+                    ChainId = element.GetInt32(),
+                    Name = $"chain-{element.GetInt32()}"
+                });
+                continue;
+            }
+
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                adapters.Add(new ChainAdapterOptions
+                {
+                    ChainId = element.GetProperty("chainId").GetInt32(),
+                    Name = element.TryGetProperty("name", out var nameProperty) ? nameProperty.GetString() ?? string.Empty : string.Empty,
+                    RpcUrl = element.TryGetProperty("rpcUrl", out var rpcUrlProperty) ? rpcUrlProperty.GetString() : null,
+                    BridgeContractAddress = element.TryGetProperty("bridgeContractAddress", out var bridgeProperty) ? bridgeProperty.GetString() : null
+                });
+            }
+        }
+
+        return adapters;
+    }
+    catch (JsonException ex)
+    {
+        throw new InvalidOperationException(
+            "Cross-chain configuration is invalid. Configure CrossChain:Chains as a JSON array of chain ids or objects with chainId, name, rpcUrl, and bridgeContractAddress.",
             ex);
     }
 }

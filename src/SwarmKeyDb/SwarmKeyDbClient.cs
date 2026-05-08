@@ -8,19 +8,44 @@ namespace SwarmKeyDb;
 public sealed class SwarmKeyDbClient
 {
     private readonly IKeyValueStore _store;
+    private readonly CrossChainSyncService? _crossChainSyncService;
     private readonly ILogger<SwarmKeyDbClient> _logger;
 
-    public SwarmKeyDbClient(IKeyValueStore store, ILogger<SwarmKeyDbClient>? logger = null)
+    public SwarmKeyDbClient(
+        IKeyValueStore store,
+        CrossChainSyncService? crossChainSyncService = null,
+        ILogger<SwarmKeyDbClient>? logger = null)
     {
         _store = store;
+        _crossChainSyncService = crossChainSyncService;
         _logger = logger ?? NullLogger<SwarmKeyDbClient>.Instance;
     }
 
     public Task PutBytesAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default) =>
         _store.PutAsync(key, value, cancellationToken);
 
+    public async Task PutBytesAsync(
+        string key,
+        ReadOnlyMemory<byte> value,
+        IEnumerable<int> chainIds,
+        CancellationToken cancellationToken = default)
+    {
+        await _store.PutAsync(key, value, cancellationToken).ConfigureAwait(false);
+        if (_crossChainSyncService is not null)
+        {
+            await _crossChainSyncService.PutAsync(key, value, chainIds, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     public Task PutAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default) =>
         PutBytesAsync(key, value, cancellationToken);
+
+    public Task PutAsync(
+        string key,
+        ReadOnlyMemory<byte> value,
+        IEnumerable<int> chainIds,
+        CancellationToken cancellationToken = default) =>
+        PutBytesAsync(key, value, chainIds, cancellationToken);
 
     /// <summary>
     /// Stores a value using an explicit merge strategy for this write.
@@ -53,6 +78,29 @@ public sealed class SwarmKeyDbClient
     public Task PutStringAsync(string key, string value, CancellationToken cancellationToken = default) =>
         _store.PutAsync(key, Encoding.UTF8.GetBytes(value), cancellationToken);
 
+    public async Task PutStringAsync(
+        string key,
+        string value,
+        IEnumerable<ChainId> chains,
+        CancellationToken cancellationToken = default)
+    {
+        await PutStringAsync(key, value, chains.Select(static chain => (int)chain), cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task PutStringAsync(
+        string key,
+        string value,
+        IEnumerable<int> chainIds,
+        CancellationToken cancellationToken = default)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        await _store.PutAsync(key, bytes, cancellationToken).ConfigureAwait(false);
+        if (_crossChainSyncService is not null)
+        {
+            await _crossChainSyncService.PutAsync(key, bytes, chainIds, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     public Task MergeStringAsync(string key, string incomingValue, CancellationToken cancellationToken = default) =>
         _store.MergeAsync(key, Encoding.UTF8.GetBytes(incomingValue), cancellationToken);
 
@@ -65,6 +113,20 @@ public sealed class SwarmKeyDbClient
     public Task PutJsonAsync<T>(string key, T value, CancellationToken cancellationToken = default) =>
         _store.PutAsync(key, JsonSerializer.SerializeToUtf8Bytes(value), cancellationToken);
 
+    public async Task PutJsonAsync<T>(
+        string key,
+        T value,
+        IEnumerable<int> chainIds,
+        CancellationToken cancellationToken = default)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
+        await _store.PutAsync(key, bytes, cancellationToken).ConfigureAwait(false);
+        if (_crossChainSyncService is not null)
+        {
+            await _crossChainSyncService.PutAsync(key, bytes, chainIds, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     public async Task<T?> GetJsonAsync<T>(string key, CancellationToken cancellationToken = default)
     {
         var bytes = await _store.GetAsync(key, cancellationToken).ConfigureAwait(false);
@@ -73,6 +135,23 @@ public sealed class SwarmKeyDbClient
 
     public Task<bool> DeleteAsync(string key, CancellationToken cancellationToken = default) =>
         _store.DeleteAsync(key, cancellationToken);
+
+    public async Task<bool> DeleteAsync(string key, IEnumerable<int> chainIds, CancellationToken cancellationToken = default)
+    {
+        var deleted = await _store.DeleteAsync(key, cancellationToken).ConfigureAwait(false);
+        if (deleted && _crossChainSyncService is not null)
+        {
+            await _crossChainSyncService.DeleteAsync(key, chainIds, cancellationToken).ConfigureAwait(false);
+        }
+
+        return deleted;
+    }
+
+    public Task<CrossChainSyncStatus?> GetSyncStatusAsync(string key, CancellationToken cancellationToken = default) =>
+        _crossChainSyncService?.GetStatusAsync(key, cancellationToken) ?? Task.FromResult<CrossChainSyncStatus?>(null);
+
+    public Task<bool> ForceSyncAsync(string key, CancellationToken cancellationToken = default) =>
+        _crossChainSyncService?.ForceSyncAsync(key, cancellationToken) ?? Task.FromResult(false);
 
     public async Task<IReadOnlyList<byte[]?>> BatchGetAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default)
     {
@@ -124,7 +203,7 @@ public sealed class SwarmKeyDbClient
     /// </code>
     /// </example>
     public SwarmKeyDbClient WithNamespace(string prefix) =>
-        new SwarmKeyDbClient(new NamespacedKeyValueStore(_store, prefix));
+        new SwarmKeyDbClient(new NamespacedKeyValueStore(_store, prefix), _crossChainSyncService);
 
     /// <summary>
     /// Deletes all keys that start with <paramref name="prefix"/>.
