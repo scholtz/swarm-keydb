@@ -81,10 +81,12 @@ class SwarmKeyDb:
             return
         for key in entries:
             _validate_key(key)
-        tokenized = {self._tokenize_key(key): value for key, value in entries.items()}
+        tokenized = {}
+        for key, value in entries.items():
+            tokenized[self._tokenize_key(key)] = value
         self._client.mset(tokenized)
-        for key, token in zip(entries.keys(), tokenized.keys()):
-            self._remember_key(token, key)
+        for key in entries:
+            self._remember_key(self._tokenize_key(key), key)
 
     def set_with_ttl(self, key: str, value: str, ttl_seconds: int) -> None:
         _validate_key(key)
@@ -190,10 +192,12 @@ class AsyncSwarmKeyDb:
             return
         for key in entries:
             _validate_key(key)
-        tokenized = {self._tokenize_key(key): value for key, value in entries.items()}
+        tokenized = {}
+        for key, value in entries.items():
+            tokenized[self._tokenize_key(key)] = value
         await self._client.mset(tokenized)
-        for key, token in zip(entries.keys(), tokenized.keys()):
-            self._remember_key(token, key)
+        for key in entries:
+            self._remember_key(self._tokenize_key(key), key)
 
     async def set_with_ttl(self, key: str, value: str, ttl_seconds: int) -> None:
         _validate_key(key)

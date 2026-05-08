@@ -34,10 +34,11 @@ type Options struct {
 }
 
 type Client struct {
-	redis        RedisClient
-	privacyMode  PrivacyMode
-	privacyKey   []byte
-	tokenToPlain map[string]string
+	redis            RedisClient
+	privacyMode      PrivacyMode
+	privacyKey       []byte
+	tokenToPlain     map[string]string
+	privacyConfigErr error
 }
 
 type PrivacyMode string
@@ -71,14 +72,16 @@ func newClientWithOptions(r RedisClient, opts Options) *Client {
 		mode = PrivacyModeNone
 	}
 	var privacyKey []byte
+	var privacyConfigErr error
 	if mode != PrivacyModeNone {
-		privacyKey, _ = hex.DecodeString(opts.PrivacyKeyHex)
+		privacyKey, privacyConfigErr = hex.DecodeString(opts.PrivacyKeyHex)
 	}
 	return &Client{
-		redis:        r,
-		privacyMode:  mode,
-		privacyKey:   privacyKey,
-		tokenToPlain: map[string]string{},
+		redis:            r,
+		privacyMode:      mode,
+		privacyKey:       privacyKey,
+		tokenToPlain:     map[string]string{},
+		privacyConfigErr: privacyConfigErr,
 	}
 }
 
@@ -329,6 +332,9 @@ func (r *redisAdapter) Do(ctx context.Context, args ...interface{}) *redis.Cmd {
 func (c *Client) tokenizeKey(key string) (string, error) {
 	if c.privacyMode == PrivacyModeNone {
 		return key, nil
+	}
+	if c.privacyConfigErr != nil {
+		return "", fmt.Errorf("privacy configuration error: %w", c.privacyConfigErr)
 	}
 	if len(c.privacyKey) == 0 {
 		return "", fmt.Errorf("privacy key must be set when privacy mode is enabled")

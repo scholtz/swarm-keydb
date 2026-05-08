@@ -257,8 +257,15 @@ public sealed class MigrationEngine
     private static string DeriveHmacToken(string sourceKey, string keyHex)
     {
         var secret = Convert.FromHexString(keyHex);
-        using var hmac = new System.Security.Cryptography.HMACSHA256(secret);
-        return Convert.ToHexStringLower(hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(sourceKey)));
+        try
+        {
+            using var hmac = new System.Security.Cryptography.HMACSHA256(secret);
+            return Convert.ToHexStringLower(hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(sourceKey)));
+        }
+        finally
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret);
+        }
     }
 
     private static MigrationProgress BuildProgress(

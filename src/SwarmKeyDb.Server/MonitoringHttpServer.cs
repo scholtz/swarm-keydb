@@ -294,18 +294,137 @@ public sealed class MonitoringHttpServer : IDisposable
     private static string BuildDashboardHtml(string privacyMode) =>
         DashboardHtmlTemplate.Replace("__PRIVACY_MODE__", WebUtility.HtmlEncode(privacyMode), StringComparison.Ordinal);
 
-    private const string DashboardHtmlTemplate = @"<!doctype html>
-<html lang=""en"">
-<head>
-  <meta charset=""utf-8"">
-  <title>SwarmKeyDb Dashboard</title>
-</head>
-<body>
-  <h1>SwarmKeyDb Dashboard</h1>
-  <p>Privacy Mode: <strong>__PRIVACY_MODE__</strong></p>
-  <p>Readiness: <span id=""ready-status"">loading...</span></p>
-  <p>Metrics endpoint: <code>/metrics</code></p>
-  <p>Logs endpoint: <code>/logs</code></p>
-</body>
-</html>";
+    private const string DashboardHtmlTemplate = """
+                                         <!doctype html>
+                                         <html lang="en">
+                                         <head>
+                                           <meta charset="utf-8">
+                                           <title>SwarmKeyDb Dashboard</title>
+                                            <style>
+                                              body { font-family: sans-serif; margin: 1.5rem; }
+                                              .ok { color: #1c7c1c; }
+                                              .warn { color: #a76a00; }
+                                              .bad { color: #b22; }
+                                              table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+                                              th, td { border: 1px solid #ddd; padding: 0.5rem; text-align: left; }
+                                              code { background: #f5f5f5; padding: 0.1rem 0.25rem; }
+                                            </style>
+                                          </head>
+                                          <body>
+                                            <h1>SwarmKeyDb Dashboard</h1>
+                                            <p>Privacy Mode: <strong>__PRIVACY_MODE__</strong></p>
+                                            <p>Readiness: <span id="ready-status">loading...</span></p>
+                                            <h2>Cross-chain replication health</h2>
+                                            <table>
+                                              <thead>
+                                                <tr><th>Chain</th><th>Pending</th><th>Synced</th><th>Failed</th><th>Health</th></tr>
+                                              </thead>
+                                              <tbody id="sync-summary"></tbody>
+                                            </table>
+                                            <label for="sync-key">Sync status key</label>
+                                            <input id="sync-key" value="profile:name" />
+                                            <button id="sync-refresh" type="button">Refresh sync status</button>
+                                            <pre id="sync-status">loading...</pre>
+                                            <h2>Operation counters</h2>
+                                            <pre id="metrics">loading...</pre>
+                                            <h2>Recent logs</h2>
+                                           <table>
+                                             <thead>
+                                               <tr><th>Time</th><th>Level</th><th>Correlation ID</th><th>Command</th><th>Message</th></tr>
+                                             </thead>
+                                             <tbody id="logs"></tbody>
+                                            </table>
+                                            <script>
+                                              const readyStatus = document.getElementById('ready-status');
+                                              const syncSummaryEl = document.getElementById('sync-summary');
+                                              const syncStatusEl = document.getElementById('sync-status');
+                                              const syncKeyInput = document.getElementById('sync-key');
+                                              const syncRefreshButton = document.getElementById('sync-refresh');
+                                              const metricsEl = document.getElementById('metrics');
+                                              const logsEl = document.getElementById('logs');
+                                              function parseCounters(metricsText) {
+                                               const wanted = [
+                                                 'swarmkeydb_operations_total{operation="get",status="success"}',
+                                                 'swarmkeydb_operations_total{operation="put",status="success"}',
+                                                 'swarmkeydb_operations_total{operation="delete",status="success"}',
+                                                 'swarmkeydb_operations_total{operation="list",status="success"}',
+                                                 'swarmkeydb_operations_total{operation="batch",status="success"}',
+                                                 'swarmkeydb_cache_hit_ratio',
+                                                 'swarmkeydb_active_connections',
+                                                 'swarmkeydb_swarm_reads_total',
+                                                 'swarmkeydb_swarm_writes_total'
+                                               ];
+                                               return metricsText.split('\n').filter(line => wanted.some(prefix => line.startsWith(prefix))).join('\n');
+                                             }
+                                             async function refreshReady() {
+                                               const response = await fetch('/ready');
+                                               const data = await response.json();
+                                               readyStatus.textContent = data.status + ' (' + data.message + ')';
+                                               readyStatus.className = response.ok ? 'ok' : 'bad';
+                                             }
+                                              async function refreshMetrics() {
+                                                const response = await fetch('/metrics');
+                                                const text = await response.text();
+                                                metricsEl.textContent = parseCounters(text);
+                                              }
+                                              async function refreshSyncSummary() {
+                                                const response = await fetch('/sync');
+                                                const payload = await response.json();
+                                                syncSummaryEl.innerHTML = '';
+                                                payload.chains.forEach(chain => {
+                                                  const row = document.createElement('tr');
+                                                  const healthClass = chain.health === 'green' ? 'ok' : chain.health === 'yellow' ? 'warn' : 'bad';
+                                                  const cells = [
+                                                    `${chain.chainName} (${chain.chainId})`,
+                                                    String(chain.pendingCount),
+                                                    String(chain.syncedCount),
+                                                    String(chain.failedCount)
+                                                  ];
+                                                  cells.forEach(value => {
+                                                    const cell = document.createElement('td');
+                                                    cell.textContent = value;
+                                                    row.appendChild(cell);
+                                                  });
+                                                  const healthCell = document.createElement('td');
+                                                  const badge = document.createElement('span');
+                                                  badge.className = healthClass;
+                                                  badge.textContent = chain.health;
+                                                  healthCell.appendChild(badge);
+                                                  row.appendChild(healthCell);
+                                                  syncSummaryEl.appendChild(row);
+                                                });
+                                                if (!payload.chains.length) {
+                                                  syncSummaryEl.innerHTML = '<tr><td colspan="5">Cross-chain sync disabled or no tracked keys yet.</td></tr>';
+                                                }
+                                              }
+                                              async function refreshSyncStatus() {
+                                                const key = syncKeyInput.value.trim();
+                                                if (!key) {
+                                                  syncStatusEl.textContent = 'Enter a key to inspect sync state.';
+                                                  return;
+                                                }
+                                                const response = await fetch('/sync/' + encodeURIComponent(key));
+                                                const payload = await response.json();
+                                                syncStatusEl.textContent = JSON.stringify(payload, null, 2);
+                                              }
+                                              async function refreshLogs() {
+                                                const response = await fetch('/logs?count=15');
+                                                const logs = await response.json();
+                                               logsEl.innerHTML = '';
+                                               logs.forEach(log => {
+                                                 const row = document.createElement('tr');
+                                                 row.innerHTML = `<td>${new Date(log.timestamp).toLocaleTimeString()}</td><td>${log.level}</td><td><code>${log.correlationId}</code></td><td>${log.command}</td><td>${log.message}</td>`;
+                                                 logsEl.appendChild(row);
+                                                });
+                                              }
+                                              async function refreshAll() {
+                                                await Promise.all([refreshReady(), refreshMetrics(), refreshLogs(), refreshSyncSummary(), refreshSyncStatus()]);
+                                              }
+                                              syncRefreshButton.addEventListener('click', refreshSyncStatus);
+                                              refreshAll();
+                                              setInterval(refreshAll, 3000);
+                                            </script>
+                                         </body>
+                                         </html>
+                                         """;
 }
