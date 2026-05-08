@@ -40,6 +40,27 @@ public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats
         RemoveLru(key);
     }
 
+    public async Task PutWithStrategyAsync(
+        string key,
+        ReadOnlyMemory<byte> value,
+        IMergeStrategy mergeStrategy,
+        CancellationToken cancellationToken = default)
+    {
+        await _inner.PutWithStrategyAsync(key, value, mergeStrategy, cancellationToken).ConfigureAwait(false);
+        _cache.Remove(key);
+        RemoveLru(key);
+    }
+
+    public async Task MergeAsync(string key, ReadOnlyMemory<byte> incomingValue, CancellationToken cancellationToken = default)
+    {
+        await _inner.MergeAsync(key, incomingValue, cancellationToken).ConfigureAwait(false);
+        _cache.Remove(key);
+        RemoveLru(key);
+    }
+
+    public Task SetKeyOptionsAsync(string key, KeyOptions options, CancellationToken cancellationToken = default) =>
+        _inner.SetKeyOptionsAsync(key, options, cancellationToken);
+
     public async Task<byte[]?> GetAsync(string key, CancellationToken cancellationToken = default)
     {
         if (!_options.Enabled)

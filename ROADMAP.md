@@ -1,7 +1,7 @@
 # Roadmap for SwarmKeyDb
 
 ## Core Functionality Enhancements
-- [ ] Implement CRDTs for conflict-free concurrent writes and merges.
+- [x] Implement CRDTs for conflict-free concurrent writes and merges. (100%)
 - [x] Add support for TTL and expiration of keys. (100%)
 - [x] Enable batch operations for multiple get/put/delete in one call. (100%)
 - [ ] Introduce advanced querying capabilities like range scans and filters.

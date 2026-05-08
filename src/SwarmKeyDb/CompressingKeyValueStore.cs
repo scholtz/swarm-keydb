@@ -44,6 +44,37 @@ public sealed class CompressingKeyValueStore : IKeyValueStore, IAccessControlVer
         await _inner.PutAsync(key, compressed, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task PutWithStrategyAsync(
+        string key,
+        ReadOnlyMemory<byte> value,
+        IMergeStrategy mergeStrategy,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_options.Enabled || value.Length < _options.MinSizeBytes)
+        {
+            await _inner.PutWithStrategyAsync(key, value, mergeStrategy, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var compressed = Compress(value.Span, _options.Algorithm);
+        await _inner.PutWithStrategyAsync(key, compressed, mergeStrategy, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task MergeAsync(string key, ReadOnlyMemory<byte> incomingValue, CancellationToken cancellationToken = default)
+    {
+        if (!_options.Enabled || incomingValue.Length < _options.MinSizeBytes)
+        {
+            await _inner.MergeAsync(key, incomingValue, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var compressed = Compress(incomingValue.Span, _options.Algorithm);
+        await _inner.MergeAsync(key, compressed, cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task SetKeyOptionsAsync(string key, KeyOptions options, CancellationToken cancellationToken = default) =>
+        _inner.SetKeyOptionsAsync(key, options, cancellationToken);
+
     public async Task<byte[]?> GetAsync(string key, CancellationToken cancellationToken = default)
     {
         var data = await _inner.GetAsync(key, cancellationToken).ConfigureAwait(false);

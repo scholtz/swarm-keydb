@@ -15,11 +15,36 @@ public sealed class SwarmKeyDbClient
     public Task PutBytesAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default) =>
         _store.PutAsync(key, value, cancellationToken);
 
+    /// <summary>
+    /// Stores a value using an explicit merge strategy for this write.
+    /// </summary>
+    public Task PutBytesWithStrategyAsync(
+        string key,
+        ReadOnlyMemory<byte> value,
+        IMergeStrategy mergeStrategy,
+        CancellationToken cancellationToken = default) =>
+        _store.PutWithStrategyAsync(key, value, mergeStrategy, cancellationToken);
+
+    /// <summary>
+    /// Merges an incoming value into an existing key using the configured strategy.
+    /// </summary>
+    public Task MergeBytesAsync(string key, ReadOnlyMemory<byte> incomingValue, CancellationToken cancellationToken = default) =>
+        _store.MergeAsync(key, incomingValue, cancellationToken);
+
+    /// <summary>
+    /// Configures per-key CRDT options such as merge strategy.
+    /// </summary>
+    public Task SetKeyOptionsAsync(string key, KeyOptions options, CancellationToken cancellationToken = default) =>
+        _store.SetKeyOptionsAsync(key, options, cancellationToken);
+
     public Task<byte[]?> GetBytesAsync(string key, CancellationToken cancellationToken = default) =>
         _store.GetAsync(key, cancellationToken);
 
     public Task PutStringAsync(string key, string value, CancellationToken cancellationToken = default) =>
         _store.PutAsync(key, Encoding.UTF8.GetBytes(value), cancellationToken);
+
+    public Task MergeStringAsync(string key, string incomingValue, CancellationToken cancellationToken = default) =>
+        _store.MergeAsync(key, Encoding.UTF8.GetBytes(incomingValue), cancellationToken);
 
     public async Task<string?> GetStringAsync(string key, CancellationToken cancellationToken = default)
     {
