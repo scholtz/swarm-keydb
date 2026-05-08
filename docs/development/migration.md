@@ -28,6 +28,10 @@ dotnet run --project src/SwarmKeyDb.Migrate/SwarmKeyDb.Migrate.csproj -- \
   ```bash
   dotnet run --project src/SwarmKeyDb.Migrate/SwarmKeyDb.Migrate.csproj -- --from redis://source:6379 --to redis://swarmkeydb:6380 --validate --validate-sample-percent 5
   ```
+- Enable privacy-preserving key migration (HMAC token keys):
+  ```bash
+  dotnet run --project src/SwarmKeyDb.Migrate/SwarmKeyDb.Migrate.csproj -- --from redis://source:6379 --to redis://swarmkeydb:6380 --enable-privacy --privacy-key <64-char-hex-key> --dry-run
+  ```
 
 ## TTL handling
 

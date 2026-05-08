@@ -21,5 +21,6 @@ Core API:
 - `set_with_ttl(key, value, ttl_seconds)`
 - `backup()`, `restore(ref, key=None)`, `rotate_key(old_key, new_key)`
 - async client equivalents in `AsyncSwarmKeyDb`
+- privacy options: `privacy_mode` + `privacy_key` (`PrivacyMode.NONE`, `PrivacyMode.OBLIVIOUS_HASHING`, `PrivacyMode.FULL_PSI`)
 
 Error handling note: invalid TTL, ACL-denied operations, and failed reads are surfaced as Redis errors.

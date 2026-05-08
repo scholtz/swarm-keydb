@@ -26,6 +26,7 @@ Project documentation lives under `docs/`:
 - `docs/getting-started.md`
 - `docs/api-reference.md`
 - `docs/tutorials/`
+- `docs/privacy-preserving-queries.md`
 - `docs/sdk/`
 - `docs/deployment.md`
 - `docs/faq.md`
@@ -585,3 +586,4 @@ if (mergedBytes is not null)
     Console.WriteLine(string.Join(",", merged.Elements)); // alice,bob
 }
 ```
+All SDKs expose privacy query options (`PrivacyMode.None`, `PrivacyMode.ObliviousHashing`, `PrivacyMode.FullPSI`) so callers can keep plaintext keys local while sending HMAC-derived key tokens over the wire.

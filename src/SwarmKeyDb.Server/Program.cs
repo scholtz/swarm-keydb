@@ -19,13 +19,20 @@ var metricsEnabled = GetBool("METRICS_ENABLED", true);
 var metricsPort = GetInt("METRICS_PORT", 9090);
 var dashboardEnabled = GetBool("DASHBOARD_ENABLED", true);
 var dashboardPort = GetInt("DASHBOARD_PORT", 8080);
+var privacyMode = GetPrivacyModeFromSettings();
+var privacyKeyHex = GetFirstSetting("SWARM_KEYDB_PRIVACY_KEY", "SWARM_KEYDB_ENCRYPTION_ETH_KEY", "Privacy:KeyHex");
+var privacyOptions = new SwarmKeyDbOptions
+{
+    PrivacyMode = privacyMode,
+    PrivacyKeyHex = privacyKeyHex
+};
 
 var logLevel = GetLogLevel("LOG_LEVEL", GetLogLevel("SWARM_KEYDB_LOG_LEVEL", LogLevel.Information));
 var environment = GetString("DOTNET_ENVIRONMENT", GetString("ASPNETCORE_ENVIRONMENT", "Production"));
 var useJsonLogging = GetBool("JSON_LOGS", !environment.Equals("Development", StringComparison.OrdinalIgnoreCase));
 
 ICacheStats? cacheStats = null;
-var monitoringMetrics = new MonitoringMetrics(() => cacheStats ?? NoOpCacheStats.Instance);
+var monitoringMetrics = new MonitoringMetrics(() => cacheStats ?? NoOpCacheStats.Instance, privacyMode: privacyOptions.PrivacyMode);
 
 var cacheOptions = new CacheOptions
 {
@@ -131,7 +138,7 @@ if (shardingOptions.Enabled)
         var shardDataDir = string.IsNullOrWhiteSpace(node.DataDir)
             ? Path.Combine(dataDir, "shards", shardName)
             : node.DataDir;
-        var shardIndex = new FileKeyIndex(Path.Combine(shardDataDir, "index.json"));
+        var shardIndex = BuildKeyIndex(Path.Combine(shardDataDir, "index.json"));
         ISwarmClient shardClient;
         IReadinessProbe shardProbe;
         if (backend.Equals("bee", StringComparison.OrdinalIgnoreCase) ||
@@ -175,7 +182,7 @@ if (shardingOptions.Enabled)
 }
 else
 {
-    var index = new FileKeyIndex(Path.Combine(dataDir, "index.json"));
+    var index = BuildKeyIndex(Path.Combine(dataDir, "index.json"));
     var backendProbes = new List<(string Name, IReadinessProbe Probe)>();
     switch (backend)
     {
@@ -347,7 +354,8 @@ if (dashboardEnabled)
         shardHealthProvider,
         backendStatusProvider,
         ethereumBridge,
-        crossChainSyncService);
+        crossChainSyncService,
+        privacyMode: privacyOptions.PrivacyMode);
     monitoringServers.Add(dashboardServer);
     monitoringTasks.Add(dashboardServer.RunAsync(cts.Token));
 }
@@ -365,7 +373,8 @@ if (metricsEnabled && (!dashboardEnabled || metricsPort != dashboardPort))
         shardHealthProvider,
         backendStatusProvider,
         ethereumBridge,
-        crossChainSyncService);
+        crossChainSyncService,
+        privacyMode: privacyOptions.PrivacyMode);
     monitoringServers.Add(metricsServer);
     monitoringTasks.Add(metricsServer.RunAsync(cts.Token));
 }
@@ -411,6 +420,29 @@ string RequireSetting(string name) =>
 
 string? GetSetting(string name) =>
     Environment.GetEnvironmentVariable(name) ?? (appSettings.TryGetValue(name, out var value) ? value : null);
+
+PrivacyMode GetPrivacyModeFromSettings()
+{
+    var configured = GetFirstSetting("SWARM_KEYDB_PRIVACY_MODE", "Privacy:Mode");
+    if (Enum.TryParse<PrivacyMode>(configured, ignoreCase: true, out var explicitMode))
+    {
+        return explicitMode;
+    }
+
+    return PrivacyMode.None;
+}
+
+IKeyIndex BuildKeyIndex(string path)
+{
+    var baseIndex = new FileKeyIndex(path);
+    if (privacyOptions.PrivacyMode == PrivacyMode.None)
+    {
+        return baseIndex;
+    }
+
+    var strategy = KeyPrivacyStrategyFactory.Create(privacyOptions);
+    return new PrivacyPreservingKeyIndex(baseIndex, strategy);
+}
 
 ShardingOptions GetShardingOptions()
 {

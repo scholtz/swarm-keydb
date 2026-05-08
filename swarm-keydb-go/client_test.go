@@ -234,3 +234,26 @@ func TestManagementHelpers(t *testing.T) {
 		t.Fatalf("rotate failed: %v ref=%q", err, rotationRef)
 	}
 }
+
+func TestPrivacyModeTokenizesKeys(t *testing.T) {
+	ctx := context.Background()
+	backend := newMockRedis()
+	client := NewWithRedisClientAndOptions(backend, Options{
+		PrivacyMode:   PrivacyModeObliviousHashing,
+		PrivacyKeyHex: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+	})
+
+	if err := client.Put(ctx, "secret:key", "1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := backend.store["secret:key"]; ok {
+		t.Fatal("expected plaintext key to be hidden in backend")
+	}
+	keys, err := client.List(ctx, "secret:*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || keys[0] != "secret:key" {
+		t.Fatalf("unexpected listed keys: %#v", keys)
+	}
+}

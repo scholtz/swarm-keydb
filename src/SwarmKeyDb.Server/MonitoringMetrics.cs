@@ -13,14 +13,16 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
     private readonly ConcurrentQueue<MonitoringLogEntry> _logs = new();
     private readonly int _maxLogEntries;
     private readonly Func<ICacheStats> _cacheStatsAccessor;
+    private readonly string _privacyMode;
     private long _activeConnections;
     private long _swarmReads;
     private long _swarmWrites;
 
-    public MonitoringMetrics(Func<ICacheStats> cacheStatsAccessor, int maxLogEntries = 200)
+    public MonitoringMetrics(Func<ICacheStats> cacheStatsAccessor, int maxLogEntries = 200, PrivacyMode privacyMode = PrivacyMode.None)
     {
         _cacheStatsAccessor = cacheStatsAccessor;
         _maxLogEntries = Math.Max(10, maxLogEntries);
+        _privacyMode = privacyMode.ToString().ToLowerInvariant();
     }
 
     public void OnConnectionOpened() => Interlocked.Increment(ref _activeConnections);
@@ -129,20 +131,21 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
         return builder.ToString();
     }
 
-    private static string FormatMetric(string name, long value, params (string Label, string Value)[] labels) =>
+    private string FormatMetric(string name, long value, params (string Label, string Value)[] labels) =>
         FormatMetric(name, value.ToString(CultureInfo.InvariantCulture), labels);
 
-    private static string FormatMetric(string name, double value, params (string Label, string Value)[] labels) =>
+    private string FormatMetric(string name, double value, params (string Label, string Value)[] labels) =>
         FormatMetric(name, value.ToString(CultureInfo.InvariantCulture), labels);
 
-    private static string FormatMetric(string name, string value, params (string Label, string Value)[] labels)
+    private string FormatMetric(string name, string value, params (string Label, string Value)[] labels)
     {
-        if (labels.Length == 0)
+        var allLabels = labels.Concat([(Label: "privacy_mode", Value: _privacyMode)]).ToArray();
+        if (allLabels.Length == 0)
         {
             return $"{name} {value}";
         }
 
-        var renderedLabels = string.Join(",", labels.Select(static label => $"{label.Label}=\"{EscapeLabel(label.Value)}\""));
+        var renderedLabels = string.Join(",", allLabels.Select(label => $"{label.Label}=\"{EscapeLabel(label.Value)}\""));
         return $"{name}{{{renderedLabels}}} {value}";
     }
 

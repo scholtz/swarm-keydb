@@ -21,5 +21,6 @@ Core API:
 - `SetWithTTL(ctx, key, value, ttlSeconds)`
 - `Backup(ctx)`, `Restore(ctx, ref, key)`, `RotateKey(ctx, oldKey, newKey)`
 - `PutJSON` / `GetJSON`
+- privacy options in `Options`: `PrivacyMode` + `PrivacyKeyHex` (`none`, `oblivious_hashing`, `full_psi`)
 
 Error handling note: Redis/server errors are returned directly (`error`) for invalid TTL, ACL denial, and failed reads.
