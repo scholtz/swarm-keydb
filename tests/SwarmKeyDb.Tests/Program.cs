@@ -85,6 +85,14 @@ var tests = new (string Name, Func<Task> Test)[]
     ("delete namespace removes all keys under prefix", DeleteNamespaceRemovesAllKeysUnderPrefixAsync),
     ("with namespace scopes client operations", WithNamespaceScopesClientOperationsAsync),
     ("cli delete namespace removes prefixed keys", CliDeleteNamespaceRemovesPrefixedKeysAsync),
+    ("btree index lookup insert delete", BTreeIndexLookupInsertDeleteAsync),
+    ("btree index range scan returns ordered subset", BTreeIndexRangeScanReturnsOrderedSubsetAsync),
+    ("btree index prefix scan uses efficient range", BTreeIndexPrefixScanUsesEfficientRangeAsync),
+    ("btree index expiry evicts keys on access", BTreeIndexExpiryEvictsKeysOnAccessAsync),
+    ("btree index rebuild purges expired entries", BTreeIndexRebuildPurgesExpiredEntriesAsync),
+    ("btree index range scan open bounds", BTreeIndexRangeScanOpenBoundsAsync),
+    ("swarm store with btree index range scan", SwarmStoreWithBTreeIndexRangeScanAsync),
+    ("swarm store with btree index prefix scan", SwarmStoreWithBTreeIndexPrefixScanAsync),
 };
 
 foreach (var (name, test) in tests)
@@ -1512,6 +1520,142 @@ static IKeyValueStore GetInnerStoreAtDepth(IKeyValueStore store, int depth)
     }
 
     return current;
+}
+
+// ── BTreeKeyIndex tests ──────────────────────────────────────────────────────
+
+static async Task BTreeIndexLookupInsertDeleteAsync()
+{
+    var index = new BTreeKeyIndex();
+
+    // Insert and lookup
+    await index.SetReferenceAsync("b", "ref-b");
+    await index.SetReferenceAsync("a", "ref-a");
+    await index.SetReferenceAsync("c", "ref-c");
+
+    AssertEqual("ref-a", await index.GetReferenceAsync("a"));
+    AssertEqual("ref-b", await index.GetReferenceAsync("b"));
+    AssertEqual("ref-c", await index.GetReferenceAsync("c"));
+    AssertEqual(null, await index.GetReferenceAsync("missing"));
+
+    // Keys are returned in sorted order
+    AssertSequenceEqual(new[] { "a", "b", "c" }, await index.ListKeysAsync());
+
+    // Delete
+    Assert(await index.RemoveAsync("b"), "Delete should return true for existing key.");
+    Assert(!await index.RemoveAsync("b"), "Delete should return false for missing key.");
+    AssertEqual(null, await index.GetReferenceAsync("b"));
+    AssertSequenceEqual(new[] { "a", "c" }, await index.ListKeysAsync());
+}
+
+static async Task BTreeIndexRangeScanReturnsOrderedSubsetAsync()
+{
+    var index = new BTreeKeyIndex();
+    foreach (var k in new[] { "k:1", "k:2", "k:3", "k:4", "k:5" })
+    {
+        await index.SetReferenceAsync(k, "ref");
+    }
+
+    // Inclusive bounds
+    var range = await index.GetKeysInRangeAsync("k:2", "k:4", includeStart: true, includeEnd: true);
+    AssertSequenceEqual(new[] { "k:2", "k:3", "k:4" }, range);
+
+    // Exclusive start
+    var excStart = await index.GetKeysInRangeAsync("k:2", "k:4", includeStart: false, includeEnd: true);
+    AssertSequenceEqual(new[] { "k:3", "k:4" }, excStart);
+
+    // Exclusive end
+    var excEnd = await index.GetKeysInRangeAsync("k:2", "k:4", includeStart: true, includeEnd: false);
+    AssertSequenceEqual(new[] { "k:2", "k:3" }, excEnd);
+
+    // Open lower bound
+    var openLow = await index.GetKeysInRangeAsync(null, "k:2", includeEnd: true);
+    AssertSequenceEqual(new[] { "k:1", "k:2" }, openLow);
+
+    // Open upper bound
+    var openHigh = await index.GetKeysInRangeAsync("k:4", null, includeStart: true);
+    AssertSequenceEqual(new[] { "k:4", "k:5" }, openHigh);
+}
+
+static async Task BTreeIndexPrefixScanUsesEfficientRangeAsync()
+{
+    var index = new BTreeKeyIndex();
+    await index.SetReferenceAsync("user:alice:profile", "r1");
+    await index.SetReferenceAsync("user:alice:settings", "r2");
+    await index.SetReferenceAsync("user:bob:profile", "r3");
+    await index.SetReferenceAsync("zzz:other", "r4");
+
+    // Prefix range: ["user:alice:", "user:alice;") — ';' is the char after ':'
+    var aliceKeys = await index.GetKeysInRangeAsync("user:alice:", "user:alice;", includeStart: true, includeEnd: false);
+    AssertSequenceEqual(new[] { "user:alice:profile", "user:alice:settings" }, aliceKeys);
+}
+
+static async Task BTreeIndexExpiryEvictsKeysOnAccessAsync()
+{
+    var index = new BTreeKeyIndex();
+    var past = DateTimeOffset.UtcNow.AddSeconds(-1);
+    await index.SetReferenceAsync("expired", "ref", past);
+    await index.SetReferenceAsync("alive", "ref-alive");
+
+    AssertEqual(null, await index.GetReferenceAsync("expired"));
+    AssertEqual("ref-alive", await index.GetReferenceAsync("alive"));
+    AssertSequenceEqual(new[] { "alive" }, await index.ListKeysAsync());
+}
+
+static async Task BTreeIndexRebuildPurgesExpiredEntriesAsync()
+{
+    var index = new BTreeKeyIndex();
+    var past = DateTimeOffset.UtcNow.AddSeconds(-1);
+    await index.SetReferenceAsync("gone", "ref", past);
+    await index.SetReferenceAsync("keep", "ref2");
+
+    await index.RebuildIndexAsync();
+
+    AssertSequenceEqual(new[] { "keep" }, await index.ListKeysAsync());
+}
+
+static async Task BTreeIndexRangeScanOpenBoundsAsync()
+{
+    var index = new BTreeKeyIndex();
+    foreach (var k in new[] { "aaa", "bbb", "ccc" })
+    {
+        await index.SetReferenceAsync(k, "r");
+    }
+
+    // Fully open range returns all keys
+    var all = await index.GetKeysInRangeAsync(null, null);
+    AssertSequenceEqual(new[] { "aaa", "bbb", "ccc" }, all);
+}
+
+static async Task SwarmStoreWithBTreeIndexRangeScanAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new BTreeKeyIndex());
+    await store.PutAsync("order:001", Encoding.UTF8.GetBytes("first"));
+    await store.PutAsync("order:002", Encoding.UTF8.GetBytes("second"));
+    await store.PutAsync("order:003", Encoding.UTF8.GetBytes("third"));
+    await store.PutAsync("other:x", Encoding.UTF8.GetBytes("outside"));
+
+    var range = await store.GetKeyRangeAsync("order:001", "order:002", new RangeScanOptions
+    {
+        IncludeStart = true,
+        IncludeEnd = true,
+        IncludeValues = true
+    });
+
+    AssertSequenceEqual(new[] { "order:001", "order:002" }, range.Select(e => e.Key));
+    AssertEqual("first", Encoding.UTF8.GetString(range[0].Value!));
+    AssertEqual("second", Encoding.UTF8.GetString(range[1].Value!));
+}
+
+static async Task SwarmStoreWithBTreeIndexPrefixScanAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new BTreeKeyIndex());
+    await store.PutAsync("tag:alpha", Encoding.UTF8.GetBytes("1"));
+    await store.PutAsync("tag:beta", Encoding.UTF8.GetBytes("2"));
+    await store.PutAsync("other:gamma", Encoding.UTF8.GetBytes("3"));
+
+    var keys = await store.GetKeysWithPrefixAsync("tag:");
+    AssertSequenceEqual(new[] { "tag:alpha", "tag:beta" }, keys);
 }
 
 internal sealed record Settings(bool Enabled, int Count);

@@ -39,8 +39,33 @@ public sealed class SwarmKeyValueStore : IKeyValueStore
     public async Task<IReadOnlyList<string>> GetKeysWithPrefixAsync(string prefix, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(prefix);
-        var keys = await _index.ListKeysAsync(cancellationToken).ConfigureAwait(false);
-        return keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)).ToArray();
+
+        // Compute the exclusive upper bound for the prefix range:
+        // increment the last character so that all keys that start with the
+        // prefix fall strictly before the bound.
+        string? prefixEnd = null;
+        if (prefix.Length > 0)
+        {
+            var lastChar = prefix[^1];
+            if (lastChar < char.MaxValue)
+            {
+                prefixEnd = prefix[..^1] + (char)(lastChar + 1);
+            }
+        }
+
+        // Use index range scan (O(log n + k)) when a meaningful bound exists; otherwise fall back.
+        IReadOnlyList<string> keys;
+        if (prefixEnd is not null)
+        {
+            keys = await _index.GetKeysInRangeAsync(prefix, prefixEnd, includeStart: true, includeEnd: false, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            keys = await _index.ListKeysAsync(cancellationToken).ConfigureAwait(false);
+            keys = keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)).ToArray();
+        }
+
+        return keys;
     }
 
     public async Task<IReadOnlyList<RangeScanEntry>> GetKeyRangeAsync(
@@ -60,10 +85,9 @@ public sealed class SwarmKeyValueStore : IKeyValueStore
             throw new ArgumentOutOfRangeException(nameof(options), "Limit must be greater than zero.");
         }
 
-        var keys = await _index.ListKeysAsync(cancellationToken).ConfigureAwait(false);
-        var filtered = keys.Where(key =>
-            QueryScanHelpers.MatchesLowerBound(key, startKey, options.IncludeStart) &&
-            QueryScanHelpers.MatchesUpperBound(key, endKey, options.IncludeEnd));
+        // Delegate to the index range scan for O(log n + k) retrieval.
+        var keys = await _index.GetKeysInRangeAsync(startKey, endKey, options.IncludeStart, options.IncludeEnd, cancellationToken).ConfigureAwait(false);
+        var filtered = keys.AsEnumerable();
 
         filtered = options.Descending
             ? filtered.OrderByDescending(static key => key, StringComparer.Ordinal)
