@@ -155,7 +155,7 @@ public sealed class SwarmKeyDbClient
             {
                 if (task.IsFaulted)
                 {
-                    _logger.LogError(task.Exception?.GetBaseException(), "Fire-and-forget operation '{OperationName}' failed.", operationName);
+                    LogFireAndForgetFailure(task.Exception?.GetBaseException(), operationName);
                 }
 
                 return;
@@ -164,7 +164,7 @@ public sealed class SwarmKeyDbClient
             _ = task.ContinueWith(
                 continuationTask =>
                 {
-                    _logger.LogError(continuationTask.Exception?.GetBaseException(), "Fire-and-forget operation '{OperationName}' failed.", operationName);
+                    LogFireAndForgetFailure(continuationTask.Exception?.GetBaseException(), operationName);
                 },
                 CancellationToken.None,
                 TaskContinuationOptions.OnlyOnFaulted,
@@ -172,7 +172,7 @@ public sealed class SwarmKeyDbClient
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Fire-and-forget operation '{OperationName}' failed.", operationName);
+            LogFireAndForgetFailure(ex, operationName);
         }
     }
 
@@ -184,5 +184,10 @@ public sealed class SwarmKeyDbClient
             operation();
             return Task.CompletedTask;
         }, operationName);
+    }
+
+    private void LogFireAndForgetFailure(Exception? exception, string operationName)
+    {
+        _logger.LogError(exception, "Fire-and-forget operation '{OperationName}' failed.", operationName);
     }
 }

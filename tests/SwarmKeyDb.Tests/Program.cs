@@ -517,15 +517,17 @@ static async Task AsyncFireAndForgetCapturesAndLogsErrorsAsync()
     var store = new AsyncQueuedKeyValueStore(new CountingKeyValueStore(), new AsyncProcessingOptions(), logger);
 
     store.FireAndForget(() => throw new InvalidOperationException("boom"), "exploding-write");
+    store.FireAndForget(() => throw new InvalidOperationException("boom-action"), "exploding-action");
 
     var captured = await WaitUntilValueAsync(
         action: () => Task.FromResult(logger.Messages.Count),
-        predicate: count => count > 0,
+        predicate: count => count >= 2,
         timeout: TimeSpan.FromSeconds(2),
         pollInterval: TimeSpan.FromMilliseconds(25));
 
-    Assert(captured > 0, "Expected fire-and-forget logger to capture the exception.");
+    Assert(captured >= 2, "Expected fire-and-forget logger to capture both async and action overload failures.");
     Assert(logger.Messages.Any(message => message.Contains("exploding-write", StringComparison.Ordinal)), "Expected operation name in structured log message.");
+    Assert(logger.Messages.Any(message => message.Contains("exploding-action", StringComparison.Ordinal)), "Expected action overload operation name in structured log message.");
 }
 
 static async Task AsyncWriteQueueRespectsConfiguredMaxConcurrencyAsync()
@@ -571,7 +573,7 @@ static async Task AsyncBatchThroughputIsAtLeastTwoXSequentialBaselineAsync()
     await asyncClient.FlushAsync();
     asyncWatch.Stop();
 
-    var improvedAtLeastTwoX = asyncWatch.Elapsed.TotalMilliseconds * 2 <= baselineWatch.Elapsed.TotalMilliseconds;
+    var improvedAtLeastTwoX = baselineWatch.Elapsed.TotalMilliseconds >= 2 * asyncWatch.Elapsed.TotalMilliseconds;
     Assert(improvedAtLeastTwoX,
         $"Expected >=2x throughput improvement. Baseline: {baselineWatch.Elapsed.TotalMilliseconds:F2} ms, Async: {asyncWatch.Elapsed.TotalMilliseconds:F2} ms.");
 }

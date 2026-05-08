@@ -113,7 +113,7 @@ public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingS
             {
                 if (task.IsFaulted)
                 {
-                    _logger.LogError(task.Exception?.GetBaseException(), "Fire-and-forget operation '{OperationName}' failed.", operationName);
+                    LogFireAndForgetFailure(task.Exception?.GetBaseException(), operationName);
                 }
 
                 return;
@@ -122,7 +122,7 @@ public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingS
             _ = task.ContinueWith(
                 continuationTask =>
                 {
-                    _logger.LogError(continuationTask.Exception?.GetBaseException(), "Fire-and-forget operation '{OperationName}' failed.", operationName);
+                    LogFireAndForgetFailure(continuationTask.Exception?.GetBaseException(), operationName);
                 },
                 CancellationToken.None,
                 TaskContinuationOptions.OnlyOnFaulted,
@@ -130,7 +130,7 @@ public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingS
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Fire-and-forget operation '{OperationName}' failed.", operationName);
+            LogFireAndForgetFailure(ex, operationName);
         }
     }
 
@@ -143,7 +143,7 @@ public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingS
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Fire-and-forget operation '{OperationName}' failed.", operationName);
+            LogFireAndForgetFailure(ex, operationName);
         }
     }
 
@@ -267,6 +267,11 @@ public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingS
                 _flushCompletionSource = null;
             }
         }
+    }
+
+    private void LogFireAndForgetFailure(Exception? exception, string operationName)
+    {
+        _logger.LogError(exception, "Fire-and-forget operation '{OperationName}' failed.", operationName);
     }
 
     private sealed class QueuedWriteOperation
