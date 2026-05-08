@@ -66,15 +66,15 @@ class SwarmKeyDb:
         return self._client.execute_command("BACKUP")
 
     def restore(self, ref: str, key: Optional[str] = None) -> int:
-        _validate_ref(ref)
+        _validate_non_empty_string(ref, name="ref")
         args = ["RESTOREDB", ref]
         if key:
             args.append(key)
         return int(self._client.execute_command(*args))
 
     def rotate_key(self, old_key: str, new_key: str) -> str:
-        _validate_ref(old_key, name="old_key")
-        _validate_ref(new_key, name="new_key")
+        _validate_non_empty_string(old_key, name="old_key")
+        _validate_non_empty_string(new_key, name="new_key")
         return self._client.execute_command("ROTATEKEY", old_key, new_key)
 
     def batchGet(self, keys: Sequence[str]) -> List[Optional[str]]:
@@ -140,15 +140,15 @@ class AsyncSwarmKeyDb:
         return await self._client.execute_command("BACKUP")
 
     async def restore(self, ref: str, key: Optional[str] = None) -> int:
-        _validate_ref(ref)
+        _validate_non_empty_string(ref, name="ref")
         args = ["RESTOREDB", ref]
         if key:
             args.append(key)
         return int(await self._client.execute_command(*args))
 
     async def rotate_key(self, old_key: str, new_key: str) -> str:
-        _validate_ref(old_key, name="old_key")
-        _validate_ref(new_key, name="new_key")
+        _validate_non_empty_string(old_key, name="old_key")
+        _validate_non_empty_string(new_key, name="new_key")
         return await self._client.execute_command("ROTATEKEY", old_key, new_key)
 
     async def batchGet(self, keys: Sequence[str]) -> List[Optional[str]]:
@@ -172,6 +172,6 @@ def _validate_key(key: str) -> None:
         raise ValueError("key must be a non-empty string")
 
 
-def _validate_ref(value: str, name: str = "ref") -> None:
+def _validate_non_empty_string(value: str, name: str = "value") -> None:
     if not isinstance(value, str) or len(value) == 0:
         raise ValueError(f"{name} must be a non-empty string")
