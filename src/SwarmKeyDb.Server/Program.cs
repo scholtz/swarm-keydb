@@ -119,8 +119,18 @@ static AclOptions GetAclOptions()
             Entries = entries
         };
     }
-    catch (JsonException ex) when (enabled)
+    catch (JsonException ex)
     {
+        if (!enabled)
+        {
+            return new AclOptions
+            {
+                Enabled = false,
+                Mode = mode,
+                Entries = []
+            };
+        }
+
         throw new InvalidOperationException(
             "ACL is enabled (SWARM_KEYDB_ACL_ENABLED=true) but SWARM_KEYDB_ACL_ENTRIES is not valid JSON. " +
             "Configure a JSON array of {\"address\":\"0x...\",\"permission\":\"read|write|admin\"} entries.",
