@@ -15,7 +15,7 @@ public sealed class SwarmKeyValueStore : IKeyValueStore
     {
         ValidateKey(key);
         var reference = await _swarmClient.UploadAsync(value, cancellationToken).ConfigureAwait(false);
-        await _index.SetReferenceAsync(key, reference, cancellationToken).ConfigureAwait(false);
+        await _index.SetReferenceAsync(key, reference, expiresAt: null, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<byte[]?> GetAsync(string key, CancellationToken cancellationToken = default)
@@ -35,6 +35,40 @@ public sealed class SwarmKeyValueStore : IKeyValueStore
 
     public Task<IReadOnlyList<string>> ListKeysAsync(CancellationToken cancellationToken = default) =>
         _index.ListKeysAsync(cancellationToken);
+
+    public async Task<bool> SetTtlAsync(string key, TimeSpan ttl, CancellationToken cancellationToken = default)
+    {
+        ValidateKey(key);
+        if (ttl <= TimeSpan.Zero)
+        {
+            throw new ArgumentException("TTL must be greater than zero.", nameof(ttl));
+        }
+
+        return await _index.SetExpiryAsync(key, DateTimeOffset.UtcNow.Add(ttl), cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<(bool Exists, TimeSpan? Ttl)> GetTtlAsync(string key, CancellationToken cancellationToken = default)
+    {
+        ValidateKey(key);
+        var (exists, expiresAt) = await _index.GetExpiryAsync(key, cancellationToken).ConfigureAwait(false);
+        if (!exists)
+        {
+            return (false, null);
+        }
+
+        if (expiresAt is null)
+        {
+            return (true, null);
+        }
+
+        return (true, expiresAt.Value - DateTimeOffset.UtcNow);
+    }
+
+    public async Task<bool> RemoveTtlAsync(string key, CancellationToken cancellationToken = default)
+    {
+        ValidateKey(key);
+        return await _index.RemoveExpiryAsync(key, cancellationToken).ConfigureAwait(false);
+    }
 
     private static void ValidateKey(string key)
     {
