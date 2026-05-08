@@ -62,8 +62,8 @@ public sealed class SwarmKeyValueStore : IKeyValueStore
 
         var keys = await _index.ListKeysAsync(cancellationToken).ConfigureAwait(false);
         var filtered = keys.Where(key =>
-            (startKey is null || StringComparer.Ordinal.Compare(key, startKey) > 0 || (options.IncludeStart && key.Equals(startKey, StringComparison.Ordinal))) &&
-            (endKey is null || StringComparer.Ordinal.Compare(key, endKey) < 0 || (options.IncludeEnd && key.Equals(endKey, StringComparison.Ordinal))));
+            QueryScanHelpers.MatchesLowerBound(key, startKey, options.IncludeStart) &&
+            QueryScanHelpers.MatchesUpperBound(key, endKey, options.IncludeEnd));
 
         filtered = options.Descending
             ? filtered.OrderByDescending(static key => key, StringComparer.Ordinal)
@@ -121,10 +121,10 @@ public sealed class SwarmKeyValueStore : IKeyValueStore
         }
 
         var keys = await _index.ListKeysAsync(cancellationToken).ConfigureAwait(false);
-        var startIndex = DecodeCursor(cursor, keys.Count);
+        var startIndex = QueryScanHelpers.DecodeCursor(cursor, keys.Count);
         var page = keys.Skip(startIndex).Take(count).ToArray();
         var nextIndex = startIndex + page.Length;
-        var nextCursor = nextIndex >= keys.Count ? string.Empty : EncodeCursor(nextIndex);
+        var nextCursor = nextIndex >= keys.Count ? string.Empty : QueryScanHelpers.EncodeCursor(nextIndex);
         return new ScanResult(nextCursor, page);
     }
 
@@ -169,30 +169,4 @@ public sealed class SwarmKeyValueStore : IKeyValueStore
             throw new ArgumentException("Keys must not be empty.", nameof(key));
         }
     }
-
-    private static int DecodeCursor(string? cursor, int upperBound)
-    {
-        if (string.IsNullOrEmpty(cursor))
-        {
-            return 0;
-        }
-
-        try
-        {
-            var raw = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(cursor));
-            if (!int.TryParse(raw, out var offset) || offset < 0 || offset > upperBound)
-            {
-                throw new ArgumentException("cursor is invalid.", nameof(cursor));
-            }
-
-            return offset;
-        }
-        catch (FormatException)
-        {
-            throw new ArgumentException("cursor is invalid.", nameof(cursor));
-        }
-    }
-
-    private static string EncodeCursor(int value) =>
-        Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(value.ToString(System.Globalization.CultureInfo.InvariantCulture)));
 }

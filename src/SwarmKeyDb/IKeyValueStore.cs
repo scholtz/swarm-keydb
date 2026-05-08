@@ -75,8 +75,8 @@ public interface IKeyValueStore
 
         var keys = await ListKeysAsync(cancellationToken).ConfigureAwait(false);
         var filtered = keys.Where(key =>
-            MatchesLowerBound(key, startKey, options.IncludeStart) &&
-            MatchesUpperBound(key, endKey, options.IncludeEnd));
+            QueryScanHelpers.MatchesLowerBound(key, startKey, options.IncludeStart) &&
+            QueryScanHelpers.MatchesUpperBound(key, endKey, options.IncludeEnd));
 
         filtered = options.Descending
             ? filtered.OrderByDescending(static key => key, StringComparer.Ordinal)
@@ -89,7 +89,7 @@ public interface IKeyValueStore
 
         if (!options.IncludeValues)
         {
-            return filtered.Select(static key => new RangeScanEntry(key, Value: null)).ToArray();
+            return filtered.Select(static key => new RangeScanEntry(key, null)).ToArray();
         }
 
         var entries = new List<RangeScanEntry>();
@@ -163,10 +163,10 @@ public interface IKeyValueStore
         }
 
         var keys = await ListKeysAsync(cancellationToken).ConfigureAwait(false);
-        var startIndex = DecodeCursor(cursor, keys.Count);
+        var startIndex = QueryScanHelpers.DecodeCursor(cursor, keys.Count);
         var page = keys.Skip(startIndex).Take(count).ToArray();
         var nextIndex = startIndex + page.Length;
-        var nextCursor = nextIndex >= keys.Count ? string.Empty : EncodeCursor(nextIndex);
+        var nextCursor = nextIndex >= keys.Count ? string.Empty : QueryScanHelpers.EncodeCursor(nextIndex);
         return new ScanResult(nextCursor, page);
     }
 
@@ -175,35 +175,4 @@ public interface IKeyValueStore
         Task.FromResult((false, (TimeSpan?)null));
     Task<bool> RemoveTtlAsync(string key, CancellationToken cancellationToken = default) => Task.FromResult(false);
 
-    private static bool MatchesLowerBound(string key, string? startKey, bool includeStart) =>
-        startKey is null || StringComparer.Ordinal.Compare(key, startKey) > 0 || (includeStart && key.Equals(startKey, StringComparison.Ordinal));
-
-    private static bool MatchesUpperBound(string key, string? endKey, bool includeEnd) =>
-        endKey is null || StringComparer.Ordinal.Compare(key, endKey) < 0 || (includeEnd && key.Equals(endKey, StringComparison.Ordinal));
-
-    private static int DecodeCursor(string? cursor, int upperBound)
-    {
-        if (string.IsNullOrEmpty(cursor))
-        {
-            return 0;
-        }
-
-        try
-        {
-            var raw = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(cursor));
-            if (!int.TryParse(raw, out var offset) || offset < 0 || offset > upperBound)
-            {
-                throw new ArgumentException("cursor is invalid.", nameof(cursor));
-            }
-
-            return offset;
-        }
-        catch (FormatException)
-        {
-            throw new ArgumentException("cursor is invalid.", nameof(cursor));
-        }
-    }
-
-    private static string EncodeCursor(int value) =>
-        Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(value.ToString(System.Globalization.CultureInfo.InvariantCulture)));
 }
