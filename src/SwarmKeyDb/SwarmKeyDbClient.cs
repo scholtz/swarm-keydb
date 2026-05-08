@@ -1,15 +1,19 @@
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace SwarmKeyDb;
 
 public sealed class SwarmKeyDbClient
 {
     private readonly IKeyValueStore _store;
+    private readonly ILogger<SwarmKeyDbClient> _logger;
 
-    public SwarmKeyDbClient(IKeyValueStore store)
+    public SwarmKeyDbClient(IKeyValueStore store, ILogger<SwarmKeyDbClient>? logger = null)
     {
         _store = store;
+        _logger = logger ?? NullLogger<SwarmKeyDbClient>.Instance;
     }
 
     public Task PutBytesAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default) =>
@@ -151,7 +155,7 @@ public sealed class SwarmKeyDbClient
             {
                 if (task.IsFaulted)
                 {
-                    Console.Error.WriteLine($"[SwarmKeyDb] Fire-and-forget operation '{operationName}' failed: {task.Exception?.GetBaseException().Message}");
+                    _logger.LogError(task.Exception?.GetBaseException(), "Fire-and-forget operation '{OperationName}' failed.", operationName);
                 }
 
                 return;
@@ -160,7 +164,7 @@ public sealed class SwarmKeyDbClient
             _ = task.ContinueWith(
                 continuationTask =>
                 {
-                    Console.Error.WriteLine($"[SwarmKeyDb] Fire-and-forget operation '{operationName}' failed: {continuationTask.Exception?.GetBaseException().Message}");
+                    _logger.LogError(continuationTask.Exception?.GetBaseException(), "Fire-and-forget operation '{OperationName}' failed.", operationName);
                 },
                 CancellationToken.None,
                 TaskContinuationOptions.OnlyOnFaulted,
@@ -168,7 +172,7 @@ public sealed class SwarmKeyDbClient
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[SwarmKeyDb] Fire-and-forget operation '{operationName}' failed: {ex.Message}");
+            _logger.LogError(ex, "Fire-and-forget operation '{OperationName}' failed.", operationName);
         }
     }
 

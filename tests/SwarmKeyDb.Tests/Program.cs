@@ -496,7 +496,8 @@ static async Task AsyncBatchGetAndPutRoundTripAsync()
 static async Task AsyncFlushWaitsForQueuedFireAndForgetWritesAsync()
 {
     var inner = new DelayedWriteKeyValueStore(writeDelayMs: 30);
-    var client = new SwarmKeyDbClient(CreateAsyncQueuedStore(inner, maxConcurrentWrites: 4, batchSize: 50, flushIntervalMs: 10));
+    var logger = new TestLogger<AsyncQueuedKeyValueStore>();
+    var client = new SwarmKeyDbClient(CreateAsyncQueuedStore(inner, maxConcurrentWrites: 4, batchSize: 50, flushIntervalMs: 10, logger: logger));
 
     for (var i = 0; i < 30; i++)
     {
@@ -507,6 +508,7 @@ static async Task AsyncFlushWaitsForQueuedFireAndForgetWritesAsync()
     await client.FlushAsync();
     var keys = await client.GetKeysWithPrefixAsync("flush:");
     AssertEqual(30, keys.Count);
+    AssertEqual(0, logger.Messages.Count);
 }
 
 static async Task AsyncFireAndForgetCapturesAndLogsErrorsAsync()
@@ -825,7 +827,8 @@ static AsyncQueuedKeyValueStore CreateAsyncQueuedStore(
     IKeyValueStore inner,
     int maxConcurrentWrites,
     int batchSize = 64,
-    int flushIntervalMs = 5) =>
+    int flushIntervalMs = 5,
+    Microsoft.Extensions.Logging.ILogger<AsyncQueuedKeyValueStore>? logger = null) =>
     new(
         inner,
         new AsyncProcessingOptions
@@ -835,7 +838,7 @@ static AsyncQueuedKeyValueStore CreateAsyncQueuedStore(
             WriteBatchSize = batchSize,
             BatchFlushIntervalMs = flushIntervalMs
         },
-        NullLogger<AsyncQueuedKeyValueStore>.Instance);
+        logger ?? NullLogger<AsyncQueuedKeyValueStore>.Instance);
 
 static CompressingKeyValueStore CreateCompressingStore(IKeyValueStore inner, bool enabled = true, CompressionAlgorithm algorithm = CompressionAlgorithm.GZip, int minSizeBytes = 0)
 {

@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging;
 
 namespace SwarmKeyDb;
 
-public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingStore
+public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingStore, ICacheStats
 {
     private readonly IKeyValueStore _inner;
     private readonly AsyncProcessingOptions _options;
@@ -81,6 +81,10 @@ public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingS
 
     public Task<(bool Exists, TimeSpan? Ttl)> GetTtlAsync(string key, CancellationToken cancellationToken = default) =>
         _inner.GetTtlAsync(key, cancellationToken);
+
+    public long Hits => (_inner as ICacheStats)?.Hits ?? 0;
+    public long Misses => (_inner as ICacheStats)?.Misses ?? 0;
+    public long Evictions => (_inner as ICacheStats)?.Evictions ?? 0;
 
     public Task FlushAsync(CancellationToken cancellationToken = default)
     {
@@ -195,14 +199,18 @@ public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingS
                 batch.Clear();
                 batch.Add(firstOperation);
 
-                if (_options.BatchFlushIntervalMs > 0)
-                {
-                    await Task.Delay(_options.BatchFlushIntervalMs, _queueCancellation.Token).ConfigureAwait(false);
-                }
-
                 while (batch.Count < _options.WriteBatchSize && reader.TryRead(out var operation))
                 {
                     batch.Add(operation);
+                }
+
+                if (batch.Count < _options.WriteBatchSize && _options.BatchFlushIntervalMs > 0)
+                {
+                    await Task.Delay(_options.BatchFlushIntervalMs, _queueCancellation.Token).ConfigureAwait(false);
+                    while (batch.Count < _options.WriteBatchSize && reader.TryRead(out var operation))
+                    {
+                        batch.Add(operation);
+                    }
                 }
 
                 await Parallel.ForEachAsync(
