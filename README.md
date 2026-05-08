@@ -20,12 +20,22 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 
 Project documentation lives under `docs/`:
 
-- `docs/README.md`
-- `docs/architecture/README.md`
-- `docs/development/README.md`
-- `docs/development/migration.md`
-- `docs/deployment/README.md`
-- `docs/reference/configuration.md`
+- `docs/getting-started.md`
+- `docs/api-reference.md`
+- `docs/tutorials/`
+- `docs/sdk/`
+- `docs/deployment.md`
+- `docs/faq.md`
+
+## Quickstart (put/get round-trip)
+
+```csharp
+using SwarmKeyDb;
+var db = new SwarmKeyDbClient(new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()));
+await db.PutStringAsync("hello", "world");
+var value = await db.GetStringAsync("hello");
+Console.WriteLine(value == "world" ? "round-trip ok" : "round-trip failed");
+```
 
 ## Build and test
 

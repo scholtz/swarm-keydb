@@ -1,0 +1,59 @@
+# Deployment Guide
+
+Use this guide for production-style Docker deployment and operational checks.
+
+> [!IMPORTANT]
+> Bee-backed writes require a valid postage batch id. Without it, writes fail.
+
+## Docker run
+
+```bash
+docker build -t swarm-keydb .
+docker run --rm -p 6379:6379 -p 8080:8080 -p 9090:9090 \
+  -e SWARM_KEYDB_BACKEND=bee \
+  -e BEE_URL=http://host.docker.internal:1633/ \
+  -e BEE_POSTAGE_BATCH_ID=<your-postage-batch-id> \
+  -e METRICS_ENABLED=true \
+  -e DASHBOARD_ENABLED=true \
+  swarm-keydb
+```
+
+## Required environment variables
+
+- `SWARM_KEYDB_BACKEND` (`local` or `bee`)
+- `BEE_URL` (required when backend is `bee`)
+- `BEE_POSTAGE_BATCH_ID` (required when backend is `bee`)
+
+## Recommended production environment variables
+
+- `SWARM_KEYDB_BIND=0.0.0.0`
+- `SWARM_KEYDB_PORT=6379`
+- `SWARM_KEYDB_CACHE_ENABLED=true`
+- `SWARM_KEYDB_ASYNC_ENABLED=true`
+- `LOG_LEVEL=Information`
+- `METRICS_ENABLED=true`, `METRICS_PORT=9090`
+- `DASHBOARD_ENABLED=true`, `DASHBOARD_PORT=8080`
+
+See full variable reference in `docs/reference/configuration.md`.
+
+## Health checks
+
+```bash
+curl http://localhost:8080/health
+curl http://localhost:8080/ready
+```
+
+## Prometheus integration
+
+```yaml
+scrape_configs:
+  - job_name: swarm-keydb
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['swarm-keydb:9090']
+```
+
+## Existing deployment assets
+
+- Docker Compose + Bee: `docs/deployment/README.md`
+- Kubernetes manifests: `deploy/k8s/`
