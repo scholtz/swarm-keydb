@@ -8,6 +8,7 @@ This folder is the entrypoint for project documentation.
 - `development/` covers local setup, build, and test commands.
 - `deployment/` covers Docker Compose and Kubernetes deployment assets.
 - `reference/` documents configuration and environment variables.
+- `../examples/RangeScanExample/` contains a runnable C# example for prefix, range, and cursor scans.
 
 ## Quick links
 

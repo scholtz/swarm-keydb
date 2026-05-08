@@ -66,4 +66,23 @@ public sealed class SwarmKeyDbClient
 
     public Task<IReadOnlyList<string>> KeysAsync(CancellationToken cancellationToken = default) =>
         _store.ListKeysAsync(cancellationToken);
+
+    public Task<IReadOnlyList<string>> GetKeysWithPrefixAsync(string prefix, CancellationToken cancellationToken = default) =>
+        _store.GetKeysWithPrefixAsync(prefix, cancellationToken);
+
+    public Task<IReadOnlyList<RangeScanEntry>> GetKeyRangeAsync(
+        string? startKey,
+        string? endKey,
+        RangeScanOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        _store.GetKeyRangeAsync(startKey, endKey, options, cancellationToken);
+
+    public IAsyncEnumerable<KeyValuePair<string, byte[]>> QueryAsync(
+        Func<string, bool> keyPredicate,
+        Func<byte[], bool>? valuePredicate = null,
+        CancellationToken cancellationToken = default) =>
+        _store.QueryAsync(keyPredicate, valuePredicate, cancellationToken);
+
+    public Task<ScanResult> ScanAsync(string? cursor, int count, CancellationToken cancellationToken = default) =>
+        _store.ScanAsync(cursor, count, cancellationToken);
 }

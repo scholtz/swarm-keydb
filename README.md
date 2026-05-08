@@ -8,7 +8,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 - Connection-scoped Ethereum-address ACL enforcement via `AUTHADDR` for shared databases.
 - String, JSON, and binary value helpers in the `SwarmKeyDbClient` library.
 - CRDT-backed conflict resolution (LWW register by default, with OR-Set and PN-counter strategies available).
-- Key listing and cursor-based iteration.
+- Prefix scans, lexicographic range scans, predicate queries, and cursor-based iteration.
 - Bee HTTP API storage with postage batch configuration handled by environment variables.
 - Local file storage backend for development and tests.
 - .NET 10 build, Docker packaging, and Kubernetes deployment manifests.
@@ -50,6 +50,37 @@ MSET a 1 b 2 c 3                  -> +OK
 MGET a b missing                  -> *3\r\n$1\r\n1\r\n$1\r\n2\r\n$-1
 PERSIST session:token             -> :1 (or :0 when no TTL exists)
 SET profile:name Ada EX 60        -> +OK
+```
+
+## Querying
+
+```csharp
+using System.Text;
+using SwarmKeyDb;
+
+var swarm = new BeeSwarmClient(new Uri("http://localhost:1633/"), postageBatchId);
+var index = new FileKeyIndex(".swarm-keydb/index.json");
+var db = new SwarmKeyDbClient(new SwarmKeyValueStore(swarm, index));
+
+await db.PutStringAsync("orders:0001", "paid");
+await db.PutStringAsync("orders:0002", "pending");
+await db.PutStringAsync("profile:alice", "active");
+
+var prefixKeys = await db.GetKeysWithPrefixAsync("orders:");
+var range = await db.GetKeyRangeAsync("orders:0001", "orders:9999", new RangeScanOptions { IncludeValues = true });
+
+var scan = await db.ScanAsync(null, 2);
+while (!string.IsNullOrEmpty(scan.NextCursor))
+{
+    scan = await db.ScanAsync(scan.NextCursor, 2);
+}
+
+await foreach (var item in db.QueryAsync(
+                   key => key.StartsWith("orders:", StringComparison.Ordinal),
+                   value => Encoding.UTF8.GetString(value).Contains("paid", StringComparison.Ordinal)))
+{
+    Console.WriteLine($"{item.Key} -> {Encoding.UTF8.GetString(item.Value)}");
+}
 ```
 
 ## Run against Bee/Swarm
