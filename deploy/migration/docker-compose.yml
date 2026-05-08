@@ -1,0 +1,68 @@
+services:
+  redis-source:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  seed-source:
+    image: redis:7-alpine
+    depends_on:
+      redis-source:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        redis-cli -h redis-source SET user:1 '{"name":"Alice"}'
+        redis-cli -h redis-source SET user:2 '{"name":"Bob"}'
+        redis-cli -h redis-source SET session:1 token-123
+        redis-cli -h redis-source EXPIRE session:1 120
+
+  swarm-keydb:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      SWARM_KEYDB_BACKEND: local
+      SWARM_KEYDB_BIND: 0.0.0.0
+      SWARM_KEYDB_PORT: 6380
+      SWARM_KEYDB_DATA_DIR: /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6380", "PING"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  swarmkeydb-migrate:
+    build:
+      context: ../..
+      dockerfile: src/SwarmKeyDb.Migrate/Dockerfile
+    depends_on:
+      seed-source:
+        condition: service_completed_successfully
+      swarm-keydb:
+        condition: service_healthy
+    command:
+      - --from
+      - redis://redis-source:6379
+      - --to
+      - redis://swarm-keydb:6380
+      - --validate
+      - --validate-sample-percent
+      - "100"
+
+  verify:
+    image: redis:7-alpine
+    depends_on:
+      swarmkeydb-migrate:
+        condition: service_completed_successfully
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        redis-cli -h swarm-keydb -p 6380 GET user:1
+        redis-cli -h swarm-keydb -p 6380 TTL session:1

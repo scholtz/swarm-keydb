@@ -22,6 +22,16 @@ The stack starts:
 - `swarm-bee` on ports `1633` and `1634`
 - `swarm-keydb` on port `6379`
 
+## Redis migration demo (Docker Compose)
+
+A self-contained migration demo is available at `deploy/migration/docker-compose.yml`.
+
+```bash
+docker compose -f deploy/migration/docker-compose.yml up --build --abort-on-container-exit
+```
+
+The migration demo provisions a source Redis container, seeds sample data, migrates keys into SwarmKeyDb, and runs validation.
+
 ## Kubernetes
 
 Manifests are under `deploy/k8s/`.

@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SwarmKeyDb;
 using SwarmKeyDb.Cli;
+using SwarmKeyDb.Migrate;
 using SwarmKeyDb.Server;
 
 var tests = new (string Name, Func<Task> Test)[]
@@ -105,6 +106,10 @@ var tests = new (string Name, Func<Task> Test)[]
     ("monitoring metrics endpoint exposes operation counters and cache ratio", MonitoringMetricsEndpointExposesCountersAsync),
     ("monitoring health and readiness endpoints return expected status codes", MonitoringHealthAndReadinessEndpointsAsync),
     ("redis command logging includes correlation ids", RedisCommandLoggingIncludesCorrelationIdsAsync),
+    ("migrate scan pattern applies prefix filter", MigrateScanPatternAppliesPrefixFilterAsync),
+    ("migrate checkpoint store saves and loads", MigrateCheckpointStoreSavesAndLoadsAsync),
+    ("migrate dry run does not write to destination", MigrateDryRunDoesNotWriteToDestinationAsync),
+    ("migrate preserves ttl on write", MigratePreservesTtlOnWriteAsync),
 };
 
 foreach (var (name, test) in tests)
@@ -1604,6 +1609,106 @@ static async Task CliDeleteNamespaceRemovesPrefixedKeysAsync()
     Assert(listResult.Stdout.Contains("users:bob:profile", StringComparison.Ordinal), "Bob's key should remain.");
 }
 
+static Task MigrateScanPatternAppliesPrefixFilterAsync()
+{
+    AssertEqual("*", MigrationEngine.BuildScanPattern(null));
+    AssertEqual("*", MigrationEngine.BuildScanPattern(string.Empty));
+    AssertEqual("user:*", MigrationEngine.BuildScanPattern("user:"));
+    return Task.CompletedTask;
+}
+
+static async Task MigrateCheckpointStoreSavesAndLoadsAsync()
+{
+    var path = Path.Combine(Path.GetTempPath(), "swarm-keydb-tests", Guid.NewGuid().ToString("N"), "checkpoint.json");
+    var store = new FileMigrationCheckpointStore(path);
+    var expected = new MigrationCheckpoint
+    {
+        Cursor = 42,
+        PendingBatchNextCursor = 84,
+        PendingBatchKeys = ["a", "b"],
+        PendingBatchIndex = 1
+    };
+
+    await store.SaveAsync(expected, CancellationToken.None);
+    var actual = await store.LoadAsync(CancellationToken.None);
+
+    AssertEqual(expected.Cursor, actual.Cursor);
+    AssertEqual(expected.PendingBatchNextCursor, actual.PendingBatchNextCursor);
+    AssertEqual(expected.PendingBatchIndex, actual.PendingBatchIndex);
+    AssertSequenceEqual(expected.PendingBatchKeys, actual.PendingBatchKeys);
+
+    await store.DeleteAsync(CancellationToken.None);
+    Assert(!File.Exists(path), "Checkpoint file should be removed.");
+}
+
+static async Task MigrateDryRunDoesNotWriteToDestinationAsync()
+{
+    var source = new FakeMigrationSource(
+    [
+        new MigrationEntry
+        {
+            Key = "user:1",
+            Type = RedisDataType.String,
+            Payload = Encoding.UTF8.GetBytes("alice"),
+            Ttl = TimeSpan.FromSeconds(120)
+        }
+    ]);
+    var destination = new FakeMigrationDestination();
+    var checkpoint = new InMemoryMigrationCheckpointStore();
+    var reporter = new SilentMigrationReporter();
+    var engine = new MigrationEngine(source, destination, checkpoint, reporter, new Random(1));
+
+    var result = await engine.RunAsync(new MigrationOptions
+    {
+        SourceUri = new Uri("redis://source:6379"),
+        DestinationUri = new Uri("redis://destination:6380"),
+        DryRun = true,
+        Prefix = "user:",
+        CheckpointPath = "memory",
+        Validate = false,
+        ValidateSamplePercent = 5,
+        ScanCount = 10
+    }, CancellationToken.None);
+
+    AssertEqual(1L, result.Progress.MigratedKeys);
+    AssertEqual(0, destination.WriteCount);
+}
+
+static async Task MigratePreservesTtlOnWriteAsync()
+{
+    var source = new FakeMigrationSource(
+    [
+        new MigrationEntry
+        {
+            Key = "session:1",
+            Type = RedisDataType.String,
+            Payload = Encoding.UTF8.GetBytes("token"),
+            Ttl = TimeSpan.FromSeconds(30)
+        }
+    ]);
+    var destination = new FakeMigrationDestination();
+    var checkpoint = new InMemoryMigrationCheckpointStore();
+    var reporter = new SilentMigrationReporter();
+    var engine = new MigrationEngine(source, destination, checkpoint, reporter, new Random(1));
+
+    await engine.RunAsync(new MigrationOptions
+    {
+        SourceUri = new Uri("redis://source:6379"),
+        DestinationUri = new Uri("redis://destination:6380"),
+        DryRun = false,
+        Prefix = "session:",
+        CheckpointPath = "memory",
+        Validate = false,
+        ValidateSamplePercent = 100,
+        ScanCount = 10
+    }, CancellationToken.None);
+
+    AssertEqual(1, destination.WriteCount);
+    var destinationValue = await destination.ReadValueAsync("session:1", CancellationToken.None);
+    Assert(destinationValue is not null, "Expected destination to contain migrated key.");
+    Assert(Math.Abs((destinationValue!.Ttl!.Value - TimeSpan.FromSeconds(30)).TotalSeconds) <= 1, "Expected TTL to be preserved.");
+}
+
 static CliExecutionOptions CreateCliTestOptions()
 {
     var swarm = new InMemorySwarmClient();
@@ -2125,5 +2230,133 @@ internal static class TestNetHelpers
         {
             listener.Stop();
         }
+    }
+}
+
+internal sealed class FakeMigrationSource : IMigrationSource
+{
+    private readonly Dictionary<string, MigrationEntry> _entries;
+    private readonly string[] _orderedKeys;
+
+    public FakeMigrationSource(IEnumerable<MigrationEntry> entries)
+    {
+        _entries = entries.ToDictionary(static entry => entry.Key, StringComparer.Ordinal);
+        _orderedKeys = _entries.Keys.OrderBy(static key => key, StringComparer.Ordinal).ToArray();
+    }
+
+    public Task<long?> GetApproximateTotalKeysAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult<long?>(_entries.Count);
+    }
+
+    public Task<ScanBatch> ScanAsync(ulong cursor, string matchPattern, int count, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var prefix = matchPattern.EndsWith('*')
+            ? matchPattern[..^1]
+            : matchPattern;
+        var filtered = _orderedKeys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)).ToArray();
+        var offset = (int)cursor;
+        var keys = filtered.Skip(offset).Take(count).ToArray();
+        var nextCursor = (ulong)(offset + keys.Length);
+        if (nextCursor >= (ulong)filtered.Length)
+        {
+            nextCursor = 0;
+        }
+
+        return Task.FromResult(new ScanBatch
+        {
+            NextCursor = nextCursor,
+            Keys = keys
+        });
+    }
+
+    public Task<MigrationEntry?> ReadEntryAsync(string key, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!_entries.TryGetValue(key, out var entry))
+        {
+            return Task.FromResult<MigrationEntry?>(null);
+        }
+
+        return Task.FromResult<MigrationEntry?>(new MigrationEntry
+        {
+            Key = entry.Key,
+            Type = entry.Type,
+            Payload = entry.Payload.ToArray(),
+            Ttl = entry.Ttl
+        });
+    }
+}
+
+internal sealed class FakeMigrationDestination : IMigrationDestination
+{
+    private readonly Dictionary<string, DestinationValue> _values = new(StringComparer.Ordinal);
+
+    public int WriteCount { get; private set; }
+
+    public Task WriteEntryAsync(MigrationEntry entry, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        WriteCount++;
+        _values[entry.Key] = new DestinationValue
+        {
+            Payload = entry.Payload.ToArray(),
+            Ttl = entry.Ttl
+        };
+        return Task.CompletedTask;
+    }
+
+    public Task<DestinationValue?> ReadValueAsync(string key, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(_values.TryGetValue(key, out var value)
+            ? new DestinationValue
+            {
+                Payload = value.Payload.ToArray(),
+                Ttl = value.Ttl
+            }
+            : null);
+    }
+}
+
+internal sealed class InMemoryMigrationCheckpointStore : IMigrationCheckpointStore
+{
+    private MigrationCheckpoint _checkpoint = MigrationCheckpoint.Start;
+
+    public Task<MigrationCheckpoint> LoadAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(_checkpoint);
+    }
+
+    public Task SaveAsync(MigrationCheckpoint checkpoint, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _checkpoint = checkpoint;
+        return Task.CompletedTask;
+    }
+
+    public Task DeleteAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _checkpoint = MigrationCheckpoint.Start;
+        return Task.CompletedTask;
+    }
+}
+
+internal sealed class SilentMigrationReporter : IMigrationReporter
+{
+    public void ReportProgress(MigrationProgress progress)
+    {
+    }
+
+    public void ReportError(string key, Exception exception)
+    {
+    }
+
+    public void ReportSummary(MigrationResult result)
+    {
     }
 }

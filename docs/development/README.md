@@ -32,6 +32,16 @@ Run the CLI from source:
 dotnet run --project src/SwarmKeyDb.Cli/SwarmKeyDb.Cli.csproj -- --help
 ```
 
+## Migration workflow
+
+Run the Redis migration CLI from source:
+
+```bash
+dotnet run --project src/SwarmKeyDb.Migrate/SwarmKeyDb.Migrate.csproj -- --help
+```
+
+See `docs/development/migration.md` for full, dry-run, prefix-only, resumable, and validation examples.
+
 ## Documentation expectation
 
 When runtime behavior, deployment, configuration, or workflows change, update the relevant files in `docs/` and any impacted top-level documentation in the same change.

@@ -12,6 +12,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 - Bee HTTP API storage with postage batch configuration handled by environment variables.
 - Local file storage backend for development and tests.
 - `skdb` CLI for database management and debugging from the terminal.
+- `swarmkeydb-migrate` CLI for Redis-to-SwarmKeyDb migrations with dry-run, prefix filters, resumable checkpoints, and validation sampling.
 - .NET 10 build, Docker packaging, and Kubernetes deployment manifests.
 
 ## Documentation
@@ -21,6 +22,7 @@ Project documentation lives under `docs/`:
 - `docs/README.md`
 - `docs/architecture/README.md`
 - `docs/development/README.md`
+- `docs/development/migration.md`
 - `docs/deployment/README.md`
 - `docs/reference/configuration.md`
 
@@ -70,6 +72,25 @@ Global overrides:
 
 - `--bee-url`, `--batch-id`, `--output plain|json|table`
 - `SWARMKEYDB_BEE_URL`, `SWARMKEYDB_BATCH_ID`, `SWARMKEYDB_OUTPUT`
+
+## Migration CLI (`swarmkeydb-migrate`)
+
+Run from source:
+
+```bash
+dotnet run --project src/SwarmKeyDb.Migrate/SwarmKeyDb.Migrate.csproj -- \
+  --from redis://localhost:6379 \
+  --to redis://localhost:6380
+```
+
+Common scenarios:
+
+- Dry run (scan/report only): add `--dry-run`
+- Prefix filter: add `--prefix user:`
+- Validation sample: add `--validate --validate-sample-percent 5`
+- Resume after interruption: re-run with the same `--checkpoint` file (default `.swarmkeydb-migrate.checkpoint.json`)
+
+TTL from source keys is preserved on migrated keys and validation enforces a 1-second tolerance.
 
 ## Run locally
 
@@ -375,6 +396,12 @@ docker run --rm -p 6379:6379 \
   -e BEE_POSTAGE_BATCH_ID=<your-postage-batch-id> \
   -v swarm-keydb-data:/data \
   swarm-keydb
+```
+
+Migration demo:
+
+```bash
+docker compose -f deploy/migration/docker-compose.yml up --build --abort-on-container-exit
 ```
 
 ## Library example
