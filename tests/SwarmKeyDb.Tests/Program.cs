@@ -15,7 +15,12 @@ var tests = new (string Name, Func<Task> Test)[]
     ("ttl returns negative two for missing key", TtlReturnsNegativeTwoForMissingKeyAsync),
     ("set with ex option sets expiry", SetWithExOptionSetsExpiryAsync),
     ("batch operations resp format", BatchOperationsRespFormatAsync),
-    ("setex rejects non positive ttl", SetExRejectsNonPositiveTtlAsync)
+    ("setex rejects non positive ttl", SetExRejectsNonPositiveTtlAsync),
+    ("msetnx does not partially write when blocked", MSetNxDoesNotPartiallyWriteWhenBlockedAsync),
+    ("pexpire and pttl round trip", PExpireAndPttlRoundTripAsync),
+    ("expireat in past removes key", ExpireAtInPastRemovesKeyAsync),
+    ("set with exat option sets expiry", SetWithExAtOptionSetsExpiryAsync),
+    ("setex rejects overflow ttl", SetExRejectsOverflowTtlAsync)
 };
 
 foreach (var (name, test) in tests)
@@ -118,13 +123,15 @@ static async Task SetExStoresValueWithTtlAsync()
 
 static async Task ExpireEvictsKeyAfterDelayAsync()
 {
+    const int ttlSeconds = 1;
+    const int expiryDelayMs = 1100;
     var processor = CreateProcessor();
     var response = await ExecuteAsync(processor,
         RespCommand("SET", "short", "1") +
-        RespCommand("EXPIRE", "short", "1"));
+        RespCommand("EXPIRE", "short", ttlSeconds.ToString()));
     AssertEqual("+OK\r\n:1\r\n", response);
 
-    await Task.Delay(1100);
+    await Task.Delay(expiryDelayMs);
     AssertEqual("$-1\r\n", await ExecuteAsync(processor, RespCommand("GET", "short")));
 }
 
@@ -174,6 +181,62 @@ static async Task SetExRejectsNonPositiveTtlAsync()
     var processor = CreateProcessor();
     AssertEqual("-ERR invalid expire time in 'setex' command\r\n", await ExecuteAsync(processor, RespCommand("SETEX", "bad", "0", "v")));
     AssertEqual("-ERR invalid expire time in 'psetex' command\r\n", await ExecuteAsync(processor, RespCommand("PSETEX", "bad", "-1", "v")));
+}
+
+static async Task MSetNxDoesNotPartiallyWriteWhenBlockedAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "a", "existing") +
+        RespCommand("MSETNX", "a", "new", "b", "new-b") +
+        RespCommand("MGET", "a", "b"));
+
+    AssertEqual("+OK\r\n:0\r\n*2\r\n$8\r\nexisting\r\n$-1\r\n", response);
+}
+
+static async Task PExpireAndPttlRoundTripAsync()
+{
+    var processor = CreateProcessor();
+    var setResponse = await ExecuteAsync(processor,
+        RespCommand("SET", "ms:key", "v") +
+        RespCommand("PEXPIRE", "ms:key", "500") +
+        RespCommand("PTTL", "ms:key"));
+
+    Assert(setResponse.StartsWith("+OK\r\n:1\r\n:", StringComparison.Ordinal), "PEXPIRE should apply and PTTL should return integer.");
+    var pttl = ParseIntegerResponse(setResponse[(setResponse.LastIndexOf(':'))..]);
+    Assert(pttl is > 0 and <= 500, "PTTL should be positive and not exceed requested TTL.");
+}
+
+static async Task ExpireAtInPastRemovesKeyAsync()
+{
+    var processor = CreateProcessor();
+    var past = DateTimeOffset.UtcNow.AddSeconds(-1).ToUnixTimeSeconds().ToString();
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "past:key", "v") +
+        RespCommand("EXPIREAT", "past:key", past) +
+        RespCommand("GET", "past:key"));
+
+    AssertEqual("+OK\r\n:1\r\n$-1\r\n", response);
+}
+
+static async Task SetWithExAtOptionSetsExpiryAsync()
+{
+    var processor = CreateProcessor();
+    var exat = DateTimeOffset.UtcNow.AddSeconds(10).ToUnixTimeSeconds().ToString();
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "exat:key", "v", "EXAT", exat) +
+        RespCommand("TTL", "exat:key"));
+
+    Assert(response.StartsWith("+OK\r\n:", StringComparison.Ordinal), "SET EXAT should return OK then TTL integer.");
+    var ttl = ParseIntegerResponse(response[(response.LastIndexOf(':'))..]);
+    Assert(ttl is > 0 and <= 10, "EXAT should set a near-future TTL.");
+}
+
+static async Task SetExRejectsOverflowTtlAsync()
+{
+    var processor = CreateProcessor();
+    AssertEqual("-ERR value is not an integer or out of range\r\n", await ExecuteAsync(processor, RespCommand("SETEX", "bad", "9223372036854775807", "v")));
+    AssertEqual("-ERR value is not an integer or out of range\r\n", await ExecuteAsync(processor, RespCommand("SET", "bad", "v", "PX", "9223372036854775807")));
 }
 
 static RedisCommandProcessor CreateProcessor() =>

@@ -130,7 +130,11 @@ public sealed class RedisCommandProcessor : IDisposable
             return RespValue.Error($"ERR invalid expire time in '{args[0].AsString().ToLowerInvariant()}' command");
         }
 
-        var ttl = milliseconds ? TimeSpan.FromMilliseconds(ttlValue) : TimeSpan.FromSeconds(ttlValue);
+        if (!TryParseRelativeTtl(ttlValue, milliseconds, out var ttl))
+        {
+            return RespValue.Error("ERR value is not an integer or out of range");
+        }
+
         await _store.PutAsync(args[1].AsString(), args[3].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
         await _store.SetTtlAsync(args[1].AsString(), ttl, cancellationToken).ConfigureAwait(false);
         return RespValue.SimpleString("OK");
@@ -304,7 +308,11 @@ public sealed class RedisCommandProcessor : IDisposable
             return RespValue.IntegerValue(await _store.DeleteAsync(args[1].AsString(), cancellationToken).ConfigureAwait(false) ? 1 : 0);
         }
 
-        var relativeTtl = milliseconds ? TimeSpan.FromMilliseconds(ttlValue) : TimeSpan.FromSeconds(ttlValue);
+        if (!TryParseRelativeTtl(ttlValue, milliseconds, out var relativeTtl))
+        {
+            return RespValue.Error("ERR value is not an integer or out of range");
+        }
+
         return RespValue.IntegerValue(await _store.SetTtlAsync(args[1].AsString(), relativeTtl, cancellationToken).ConfigureAwait(false) ? 1 : 0);
     }
 
@@ -437,10 +445,18 @@ public sealed class RedisCommandProcessor : IDisposable
         switch (option)
         {
             case "EX":
-                ttl = TimeSpan.FromSeconds(value);
+                if (!TryParseRelativeTtl(value, milliseconds: false, out ttl))
+                {
+                    error = "ERR value is not an integer or out of range";
+                    return null;
+                }
                 break;
             case "PX":
-                ttl = TimeSpan.FromMilliseconds(value);
+                if (!TryParseRelativeTtl(value, milliseconds: true, out ttl))
+                {
+                    error = "ERR value is not an integer or out of range";
+                    return null;
+                }
                 break;
             case "EXAT":
                 try
@@ -466,6 +482,20 @@ public sealed class RedisCommandProcessor : IDisposable
         }
 
         return ttl;
+    }
+
+    private static bool TryParseRelativeTtl(long value, bool milliseconds, out TimeSpan ttl)
+    {
+        try
+        {
+            ttl = milliseconds ? TimeSpan.FromMilliseconds(value) : TimeSpan.FromSeconds(value);
+            return true;
+        }
+        catch (OverflowException)
+        {
+            ttl = default;
+            return false;
+        }
     }
 
     private static Regex GlobToRegex(string pattern)
