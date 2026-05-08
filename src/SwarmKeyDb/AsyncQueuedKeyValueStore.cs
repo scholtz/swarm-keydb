@@ -137,14 +137,11 @@ public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingS
     public void FireAndForget(Action operation, string operationName = "fire-and-forget")
     {
         ArgumentNullException.ThrowIfNull(operation);
-        try
+        FireAndForget(() =>
         {
             operation();
-        }
-        catch (Exception ex)
-        {
-            LogFireAndForgetFailure(ex, operationName);
-        }
+            return Task.CompletedTask;
+        }, operationName);
     }
 
     private async Task<T> QueueWriteAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken)

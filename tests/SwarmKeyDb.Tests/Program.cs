@@ -508,6 +508,10 @@ static async Task AsyncFlushWaitsForQueuedFireAndForgetWritesAsync()
     await client.FlushAsync();
     var keys = await client.GetKeysWithPrefixAsync("flush:");
     AssertEqual(30, keys.Count);
+    foreach (var key in keys)
+    {
+        AssertEqual("value", await client.GetStringAsync(key));
+    }
     AssertEqual(0, logger.Messages.Count);
 }
 
@@ -516,8 +520,8 @@ static async Task AsyncFireAndForgetCapturesAndLogsErrorsAsync()
     var logger = new TestLogger<AsyncQueuedKeyValueStore>();
     var store = new AsyncQueuedKeyValueStore(new CountingKeyValueStore(), new AsyncProcessingOptions(), logger);
 
-    store.FireAndForget(() => throw new InvalidOperationException("boom"), "exploding-write");
-    store.FireAndForget(() => throw new InvalidOperationException("boom-action"), "exploding-action");
+    store.FireAndForget(() => throw new InvalidOperationException("boom"), "exploding-async-task");
+    store.FireAndForget(() => throw new InvalidOperationException("boom-action"), "exploding-sync-action");
 
     var captured = await WaitUntilValueAsync(
         action: () => Task.FromResult(logger.Messages.Count),
@@ -526,8 +530,8 @@ static async Task AsyncFireAndForgetCapturesAndLogsErrorsAsync()
         pollInterval: TimeSpan.FromMilliseconds(25));
 
     Assert(captured >= 2, "Expected fire-and-forget logger to capture both async and action overload failures.");
-    Assert(logger.Messages.Any(message => message.Contains("exploding-write", StringComparison.Ordinal)), "Expected operation name in structured log message.");
-    Assert(logger.Messages.Any(message => message.Contains("exploding-action", StringComparison.Ordinal)), "Expected action overload operation name in structured log message.");
+    Assert(logger.Messages.Any(message => message.Contains("exploding-async-task", StringComparison.Ordinal)), "Expected operation name in structured log message.");
+    Assert(logger.Messages.Any(message => message.Contains("exploding-sync-action", StringComparison.Ordinal)), "Expected action overload operation name in structured log message.");
 }
 
 static async Task AsyncWriteQueueRespectsConfiguredMaxConcurrencyAsync()

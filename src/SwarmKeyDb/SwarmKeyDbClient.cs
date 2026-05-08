@@ -179,11 +179,24 @@ public sealed class SwarmKeyDbClient
     public void FireAndForget(Action operation, string operationName = "fire-and-forget")
     {
         ArgumentNullException.ThrowIfNull(operation);
-        FireAndForget(() =>
+
+        if (_store is IAsyncProcessingStore asyncStore)
         {
-            operation();
-            return Task.CompletedTask;
-        }, operationName);
+            asyncStore.FireAndForget(operation, operationName);
+            return;
+        }
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                operation();
+            }
+            catch (Exception ex)
+            {
+                LogFireAndForgetFailure(ex, operationName);
+            }
+        });
     }
 
     private void LogFireAndForgetFailure(Exception? exception, string operationName)
