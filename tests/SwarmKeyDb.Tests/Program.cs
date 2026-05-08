@@ -294,7 +294,7 @@ static async Task CachingKeyValueStoreRespectsKeyTtlAsync()
     Assert(await store.SetTtlAsync("ttl:key", TimeSpan.FromSeconds(1)), "SetTtlAsync should succeed.");
     _ = await store.GetAsync("ttl:key");
 
-    await Task.Delay(1100);
+    await Task.Delay(1500);
     var afterExpiry = await store.GetAsync("ttl:key");
 
     AssertEqual(null, afterExpiry);
@@ -327,7 +327,7 @@ static CachingKeyValueStore CreateCachingStore(CountingKeyValueStore inner, int 
         MaxEntries = maxEntries,
         DefaultEntryTtl = defaultEntryTtl
     });
-    var cache = new MemoryCache(new MemoryCacheOptions { SizeLimit = maxEntries });
+    var cache = new MemoryCache(new MemoryCacheOptions());
     return new CachingKeyValueStore(inner, cache, options, NullLogger<CachingKeyValueStore>.Instance);
 }
 

@@ -19,14 +19,14 @@ var cacheOptions = new CacheOptions
     Enabled = GetBool("SWARM_KEYDB_CACHE_ENABLED", true),
     MaxEntries = Math.Max(1, GetInt("SWARM_KEYDB_CACHE_MAX_ENTRIES", 1_000)),
     DefaultEntryTtl = GetNullableInt("SWARM_KEYDB_CACHE_DEFAULT_TTL_SECONDS") is { } ttlSeconds
-        ? TimeSpan.FromSeconds(Math.Max(1, ttlSeconds))
+        ? TimeSpan.FromSeconds(ttlSeconds)
         : null
 };
 var services = new ServiceCollection();
 services.AddLogging(builder => builder.AddSimpleConsole().SetMinimumLevel(LogLevel.Information));
 services.AddOptions();
 services.AddSingleton<IOptions<CacheOptions>>(Options.Create(cacheOptions));
-services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions { SizeLimit = cacheOptions.MaxEntries }));
+services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
 services.AddSingleton<IKeyValueStore>(sp => new CachingKeyValueStore(
     new SwarmKeyValueStore(swarmClient, index),
     sp.GetRequiredService<IMemoryCache>(),

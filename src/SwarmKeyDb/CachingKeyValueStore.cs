@@ -78,7 +78,6 @@ public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats
         }
 
         using var entry = _cache.CreateEntry(key);
-        entry.Size = 1;
         entry.Value = value.ToArray();
         if (ttl is not null)
         {
