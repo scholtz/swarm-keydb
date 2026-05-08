@@ -6,7 +6,21 @@ var tests = new (string Name, Func<Task> Test)[]
     ("client stores strings json binary and lists keys", ClientStoresSupportedValuesAsync),
     ("bee client parses upload references", BeeClientParsesUploadReferenceAsync),
     ("redis protocol supports set get exists delete", RedisProtocolRoundTripAsync),
-    ("redis protocol supports keys and scan", RedisProtocolKeyIterationAsync)
+    ("redis protocol supports keys and scan", RedisProtocolKeyIterationAsync),
+    ("mget returns nulls for missing keys", MGetReturnsNullsForMissingKeysAsync),
+    ("mset sets multiple keys atomically", MSetSetsMultipleKeysAtomicallyAsync),
+    ("setex stores value with ttl", SetExStoresValueWithTtlAsync),
+    ("expire evicts key after delay", ExpireEvictsKeyAfterDelayAsync),
+    ("persist removes ttl", PersistRemovesTtlAsync),
+    ("ttl returns negative two for missing key", TtlReturnsNegativeTwoForMissingKeyAsync),
+    ("set with ex option sets expiry", SetWithExOptionSetsExpiryAsync),
+    ("batch operations resp format", BatchOperationsRespFormatAsync),
+    ("setex rejects non positive ttl", SetExRejectsNonPositiveTtlAsync),
+    ("msetnx does not partially write when blocked", MSetNxDoesNotPartiallyWriteWhenBlockedAsync),
+    ("pexpire and pttl round trip", PExpireAndPttlRoundTripAsync),
+    ("expireat in past removes key", ExpireAtInPastRemovesKeyAsync),
+    ("set with exat option sets expiry", SetWithExAtOptionSetsExpiryAsync),
+    ("setex rejects overflow ttl", SetExRejectsOverflowTtlAsync)
 };
 
 foreach (var (name, test) in tests)
@@ -76,6 +90,155 @@ static async Task RedisProtocolKeyIterationAsync()
     Assert(response.EndsWith("*2\r\n$1\r\n1\r\n*1\r\n$5\r\napp:a\r\n", StringComparison.Ordinal), "SCAN should return next cursor and one key.");
 }
 
+static async Task MGetReturnsNullsForMissingKeysAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "a", "1") +
+        RespCommand("MGET", "a", "missing", "b"));
+
+    AssertEqual("+OK\r\n*3\r\n$1\r\n1\r\n$-1\r\n$-1\r\n", response);
+}
+
+static async Task MSetSetsMultipleKeysAtomicallyAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("MSET", "a", "1", "b", "2", "c", "3") +
+        RespCommand("MGET", "a", "b", "c"));
+
+    AssertEqual("+OK\r\n*3\r\n$1\r\n1\r\n$1\r\n2\r\n$1\r\n3\r\n", response);
+}
+
+static async Task SetExStoresValueWithTtlAsync()
+{
+    var processor = CreateProcessor();
+    var setExResponse = await ExecuteAsync(processor, RespCommand("SETEX", "session:token", "300", "abc123"));
+    AssertEqual("+OK\r\n", setExResponse);
+
+    var ttlResponse = await ExecuteAsync(processor, RespCommand("TTL", "session:token"));
+    var ttl = ParseIntegerResponse(ttlResponse);
+    Assert(ttl is > 0 and <= 300, "TTL should be within expected range.");
+}
+
+static async Task ExpireEvictsKeyAfterDelayAsync()
+{
+    const int ttlSeconds = 1;
+    const int expiryDelayMs = 1100;
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "short", "1") +
+        RespCommand("EXPIRE", "short", ttlSeconds.ToString()));
+    AssertEqual("+OK\r\n:1\r\n", response);
+
+    await Task.Delay(expiryDelayMs);
+    AssertEqual("$-1\r\n", await ExecuteAsync(processor, RespCommand("GET", "short")));
+}
+
+static async Task PersistRemovesTtlAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "persist:key", "value") +
+        RespCommand("EXPIRE", "persist:key", "30") +
+        RespCommand("PERSIST", "persist:key") +
+        RespCommand("TTL", "persist:key"));
+
+    AssertEqual("+OK\r\n:1\r\n:1\r\n:-1\r\n", response);
+}
+
+static async Task TtlReturnsNegativeTwoForMissingKeyAsync()
+{
+    var processor = CreateProcessor();
+    AssertEqual(":-2\r\n", await ExecuteAsync(processor, RespCommand("TTL", "missing:key")));
+}
+
+static async Task SetWithExOptionSetsExpiryAsync()
+{
+    var processor = CreateProcessor();
+    var setResponse = await ExecuteAsync(processor, RespCommand("SET", "option:key", "v", "EX", "10"));
+    AssertEqual("+OK\r\n", setResponse);
+
+    var ttl = ParseIntegerResponse(await ExecuteAsync(processor, RespCommand("TTL", "option:key")));
+    Assert(ttl is > 0 and <= 10, "SET EX should apply TTL.");
+}
+
+static async Task BatchOperationsRespFormatAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("MSET", "a", "1", "b", "2") +
+        RespCommand("MGET", "a", "missing", "b") +
+        RespCommand("MSETNX", "a", "9", "c", "3") +
+        RespCommand("MSETNX", "x", "7", "y", "8") +
+        RespCommand("MDEL", "a", "x", "missing"));
+
+    AssertEqual("+OK\r\n*3\r\n$1\r\n1\r\n$-1\r\n$1\r\n2\r\n:0\r\n:1\r\n:2\r\n", response);
+}
+
+static async Task SetExRejectsNonPositiveTtlAsync()
+{
+    var processor = CreateProcessor();
+    AssertEqual("-ERR invalid expire time in 'setex' command\r\n", await ExecuteAsync(processor, RespCommand("SETEX", "bad", "0", "v")));
+    AssertEqual("-ERR invalid expire time in 'psetex' command\r\n", await ExecuteAsync(processor, RespCommand("PSETEX", "bad", "-1", "v")));
+}
+
+static async Task MSetNxDoesNotPartiallyWriteWhenBlockedAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "a", "existing") +
+        RespCommand("MSETNX", "a", "new", "b", "new-b") +
+        RespCommand("MGET", "a", "b"));
+
+    AssertEqual("+OK\r\n:0\r\n*2\r\n$8\r\nexisting\r\n$-1\r\n", response);
+}
+
+static async Task PExpireAndPttlRoundTripAsync()
+{
+    var processor = CreateProcessor();
+    var setResponse = await ExecuteAsync(processor,
+        RespCommand("SET", "ms:key", "v") +
+        RespCommand("PEXPIRE", "ms:key", "500") +
+        RespCommand("PTTL", "ms:key"));
+
+    Assert(setResponse.StartsWith("+OK\r\n:1\r\n:", StringComparison.Ordinal), "PEXPIRE should apply and PTTL should return integer.");
+    var pttl = ParseIntegerResponse(setResponse[(setResponse.LastIndexOf(':'))..]);
+    Assert(pttl is > 0 and <= 500, "PTTL should be positive and not exceed requested TTL.");
+}
+
+static async Task ExpireAtInPastRemovesKeyAsync()
+{
+    var processor = CreateProcessor();
+    var past = DateTimeOffset.UtcNow.AddSeconds(-1).ToUnixTimeSeconds().ToString();
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "past:key", "v") +
+        RespCommand("EXPIREAT", "past:key", past) +
+        RespCommand("GET", "past:key"));
+
+    AssertEqual("+OK\r\n:1\r\n$-1\r\n", response);
+}
+
+static async Task SetWithExAtOptionSetsExpiryAsync()
+{
+    var processor = CreateProcessor();
+    var exat = DateTimeOffset.UtcNow.AddSeconds(10).ToUnixTimeSeconds().ToString();
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "exat:key", "v", "EXAT", exat) +
+        RespCommand("TTL", "exat:key"));
+
+    Assert(response.StartsWith("+OK\r\n:", StringComparison.Ordinal), "SET EXAT should return OK then TTL integer.");
+    var ttl = ParseIntegerResponse(response[(response.LastIndexOf(':'))..]);
+    Assert(ttl is > 0 and <= 10, "EXAT should set a near-future TTL.");
+}
+
+static async Task SetExRejectsOverflowTtlAsync()
+{
+    var processor = CreateProcessor();
+    AssertEqual("-ERR value is not an integer or out of range\r\n", await ExecuteAsync(processor, RespCommand("SETEX", "bad", "9223372036854775807", "v")));
+    AssertEqual("-ERR value is not an integer or out of range\r\n", await ExecuteAsync(processor, RespCommand("SET", "bad", "v", "PX", "9223372036854775807")));
+}
+
 static RedisCommandProcessor CreateProcessor() =>
     new(new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()));
 
@@ -124,6 +287,12 @@ static void AssertSequenceEqual<T>(IEnumerable<T> expected, IEnumerable<T> actua
     {
         throw new InvalidOperationException($"Expected [{string.Join(", ", expectedArray)}], got [{string.Join(", ", actualArray)}].");
     }
+}
+
+static long ParseIntegerResponse(string response)
+{
+    Assert(response.StartsWith(':') && response.EndsWith("\r\n", StringComparison.Ordinal), "Expected RESP integer response.");
+    return long.Parse(response[1..^2]);
 }
 
 internal sealed record Settings(bool Enabled, int Count);

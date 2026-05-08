@@ -2,9 +2,10 @@ using System.Text.RegularExpressions;
 
 namespace SwarmKeyDb;
 
-public sealed class RedisCommandProcessor
+public sealed class RedisCommandProcessor : IDisposable
 {
     private readonly IKeyValueStore _store;
+    private readonly SemaphoreSlim _mutationGate = new(1, 1);
 
     public RedisCommandProcessor(IKeyValueStore store)
     {
@@ -58,9 +59,21 @@ public sealed class RedisCommandProcessor
                 "PING" => args.Count > 1 ? RespValue.BulkString(args[1].Bytes) : RespValue.SimpleString("PONG"),
                 "ECHO" => RequireArity(args, 2) ?? RespValue.BulkString(args[1].Bytes),
                 "SET" => await SetAsync(args, cancellationToken).ConfigureAwait(false),
+                "SETEX" => await SetExAsync(args, milliseconds: false, cancellationToken).ConfigureAwait(false),
+                "PSETEX" => await SetExAsync(args, milliseconds: true, cancellationToken).ConfigureAwait(false),
                 "GET" => await GetAsync(args, cancellationToken).ConfigureAwait(false),
                 "DEL" => await DelAsync(args, cancellationToken).ConfigureAwait(false),
+                "MDEL" => await MDelAsync(args, cancellationToken).ConfigureAwait(false),
+                "MGET" => await MGetAsync(args, cancellationToken).ConfigureAwait(false),
+                "MSET" => await MSetAsync(args, cancellationToken).ConfigureAwait(false),
+                "MSETNX" => await MSetNxAsync(args, cancellationToken).ConfigureAwait(false),
                 "EXISTS" => await ExistsAsync(args, cancellationToken).ConfigureAwait(false),
+                "EXPIRE" => await ExpireAsync(args, milliseconds: false, absolute: false, cancellationToken).ConfigureAwait(false),
+                "PEXPIRE" => await ExpireAsync(args, milliseconds: true, absolute: false, cancellationToken).ConfigureAwait(false),
+                "EXPIREAT" => await ExpireAsync(args, milliseconds: false, absolute: true, cancellationToken).ConfigureAwait(false),
+                "TTL" => await TtlAsync(args, milliseconds: false, cancellationToken).ConfigureAwait(false),
+                "PTTL" => await TtlAsync(args, milliseconds: true, cancellationToken).ConfigureAwait(false),
+                "PERSIST" => await PersistAsync(args, cancellationToken).ConfigureAwait(false),
                 "KEYS" => await KeysAsync(args, cancellationToken).ConfigureAwait(false),
                 "SCAN" => await ScanAsync(args, cancellationToken).ConfigureAwait(false),
                 "TYPE" => await TypeAsync(args, cancellationToken).ConfigureAwait(false),
@@ -76,22 +89,54 @@ public sealed class RedisCommandProcessor
         {
             return RespValue.Error("ERR " + ex.Message);
         }
+        catch (OverflowException ex)
+        {
+            return RespValue.Error("ERR " + ex.Message);
+        }
     }
 
     private async Task<RespValue> SetAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
     {
-        var arityError = RequireArity(args, 3);
+        if (args.Count != 3 && args.Count != 5)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'SET'");
+        }
+
+        var ttl = TryParseSetExpiryOption(args, out var setError);
+        if (setError is not null)
+        {
+            return RespValue.Error(setError);
+        }
+
+        await _store.PutAsync(args[1].AsString(), args[2].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
+        if (ttl is { } expiry)
+        {
+            await _store.SetTtlAsync(args[1].AsString(), expiry, cancellationToken).ConfigureAwait(false);
+        }
+
+        return RespValue.SimpleString("OK");
+    }
+
+    private async Task<RespValue> SetExAsync(IReadOnlyList<RespValue> args, bool milliseconds, CancellationToken cancellationToken)
+    {
+        var arityError = RequireArity(args, 4);
         if (arityError is not null)
         {
             return arityError;
         }
 
-        if (args.Count > 3)
+        if (!long.TryParse(args[2].AsString(), out var ttlValue) || ttlValue <= 0)
         {
-            return RespValue.Error("ERR SET options are not supported");
+            return RespValue.Error($"ERR invalid expire time in '{args[0].AsString().ToLowerInvariant()}' command");
         }
 
-        await _store.PutAsync(args[1].AsString(), args[2].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
+        if (!TryParseRelativeTtl(ttlValue, milliseconds, out var ttl))
+        {
+            return RespValue.Error("ERR value is not an integer or out of range");
+        }
+
+        await _store.PutAsync(args[1].AsString(), args[3].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
+        await _store.SetTtlAsync(args[1].AsString(), ttl, cancellationToken).ConfigureAwait(false);
         return RespValue.SimpleString("OK");
     }
 
@@ -108,9 +153,19 @@ public sealed class RedisCommandProcessor
 
     private async Task<RespValue> DelAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
     {
+        return await DeleteManyAsync(args, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<RespValue> MDelAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        return await DeleteManyAsync(args, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<RespValue> DeleteManyAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
         if (args.Count < 2)
         {
-            return RespValue.Error("ERR wrong number of arguments for 'DEL'");
+            return RespValue.Error($"ERR wrong number of arguments for '{args[0].AsString()}'");
         }
 
         var deleted = 0;
@@ -123,6 +178,76 @@ public sealed class RedisCommandProcessor
         }
 
         return RespValue.IntegerValue(deleted);
+    }
+
+    private async Task<RespValue> MGetAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        if (args.Count < 2)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'MGET'");
+        }
+
+        var values = new RespValue[args.Count - 1];
+        for (var i = 1; i < args.Count; i++)
+        {
+            values[i - 1] = RespValue.BulkString(await _store.GetAsync(args[i].AsString(), cancellationToken).ConfigureAwait(false));
+        }
+
+        return RespValue.Array(values);
+    }
+
+    private async Task<RespValue> MSetAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        if (args.Count < 3 || args.Count % 2 == 0)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'MSET'");
+        }
+
+        await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            for (var i = 1; i < args.Count; i += 2)
+            {
+                await _store.PutAsync(args[i].AsString(), args[i + 1].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            _mutationGate.Release();
+        }
+
+        return RespValue.SimpleString("OK");
+    }
+
+    private async Task<RespValue> MSetNxAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        if (args.Count < 3 || args.Count % 2 == 0)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'MSETNX'");
+        }
+
+        await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            for (var i = 1; i < args.Count; i += 2)
+            {
+                if (await _store.GetAsync(args[i].AsString(), cancellationToken).ConfigureAwait(false) is not null)
+                {
+                    return RespValue.IntegerValue(0);
+                }
+            }
+
+            for (var i = 1; i < args.Count; i += 2)
+            {
+                await _store.PutAsync(args[i].AsString(), args[i + 1].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            _mutationGate.Release();
+        }
+
+        return RespValue.IntegerValue(1);
     }
 
     private async Task<RespValue> ExistsAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
@@ -142,6 +267,89 @@ public sealed class RedisCommandProcessor
         }
 
         return RespValue.IntegerValue(found);
+    }
+
+    private async Task<RespValue> ExpireAsync(IReadOnlyList<RespValue> args, bool milliseconds, bool absolute, CancellationToken cancellationToken)
+    {
+        var arityError = RequireArity(args, 3);
+        if (arityError is not null)
+        {
+            return arityError;
+        }
+
+        if (!long.TryParse(args[2].AsString(), out var ttlValue))
+        {
+            return RespValue.Error("ERR value is not an integer or out of range");
+        }
+
+        if (absolute)
+        {
+            DateTimeOffset expiresAt;
+            try
+            {
+                expiresAt = DateTimeOffset.FromUnixTimeSeconds(ttlValue);
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return RespValue.Error("ERR value is not an integer or out of range");
+            }
+
+            var ttl = expiresAt - DateTimeOffset.UtcNow;
+            if (ttl <= TimeSpan.Zero)
+            {
+                return RespValue.IntegerValue(await _store.DeleteAsync(args[1].AsString(), cancellationToken).ConfigureAwait(false) ? 1 : 0);
+            }
+
+            return RespValue.IntegerValue(await _store.SetTtlAsync(args[1].AsString(), ttl, cancellationToken).ConfigureAwait(false) ? 1 : 0);
+        }
+
+        if (ttlValue <= 0)
+        {
+            return RespValue.IntegerValue(await _store.DeleteAsync(args[1].AsString(), cancellationToken).ConfigureAwait(false) ? 1 : 0);
+        }
+
+        if (!TryParseRelativeTtl(ttlValue, milliseconds, out var relativeTtl))
+        {
+            return RespValue.Error("ERR value is not an integer or out of range");
+        }
+
+        return RespValue.IntegerValue(await _store.SetTtlAsync(args[1].AsString(), relativeTtl, cancellationToken).ConfigureAwait(false) ? 1 : 0);
+    }
+
+    private async Task<RespValue> TtlAsync(IReadOnlyList<RespValue> args, bool milliseconds, CancellationToken cancellationToken)
+    {
+        var arityError = RequireArity(args, 2);
+        if (arityError is not null)
+        {
+            return arityError;
+        }
+
+        var (exists, ttl) = await _store.GetTtlAsync(args[1].AsString(), cancellationToken).ConfigureAwait(false);
+        if (!exists)
+        {
+            return RespValue.IntegerValue(-2);
+        }
+
+        if (ttl is null)
+        {
+            return RespValue.IntegerValue(-1);
+        }
+
+        var value = milliseconds
+            ? (long)Math.Floor(ttl.Value.TotalMilliseconds)
+            : (long)Math.Floor(ttl.Value.TotalSeconds);
+        return RespValue.IntegerValue(Math.Max(0, value));
+    }
+
+    private async Task<RespValue> PersistAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        var arityError = RequireArity(args, 2);
+        if (arityError is not null)
+        {
+            return arityError;
+        }
+
+        return RespValue.IntegerValue(await _store.RemoveTtlAsync(args[1].AsString(), cancellationToken).ConfigureAwait(false) ? 1 : 0);
     }
 
     private async Task<RespValue> KeysAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
@@ -218,9 +426,86 @@ public sealed class RedisCommandProcessor
     private static bool IsQuit(RespValue request) =>
         request.Type == RespType.Array && request.Items is { Count: > 0 } && request.Items[0].AsString().Equals("QUIT", StringComparison.OrdinalIgnoreCase);
 
+    private static TimeSpan? TryParseSetExpiryOption(IReadOnlyList<RespValue> args, out string? error)
+    {
+        error = null;
+        if (args.Count == 3)
+        {
+            return null;
+        }
+
+        var option = args[3].AsString().ToUpperInvariant();
+        if (!long.TryParse(args[4].AsString(), out var value))
+        {
+            error = "ERR value is not an integer or out of range";
+            return null;
+        }
+
+        TimeSpan ttl;
+        switch (option)
+        {
+            case "EX":
+                if (!TryParseRelativeTtl(value, milliseconds: false, out ttl))
+                {
+                    error = "ERR value is not an integer or out of range";
+                    return null;
+                }
+                break;
+            case "PX":
+                if (!TryParseRelativeTtl(value, milliseconds: true, out ttl))
+                {
+                    error = "ERR value is not an integer or out of range";
+                    return null;
+                }
+                break;
+            case "EXAT":
+                try
+                {
+                    ttl = DateTimeOffset.FromUnixTimeSeconds(value) - DateTimeOffset.UtcNow;
+                }
+                catch (ArgumentOutOfRangeException)
+                {
+                    error = "ERR value is not an integer or out of range";
+                    return null;
+                }
+
+                break;
+            default:
+                error = "ERR syntax error";
+                return null;
+        }
+
+        if (ttl <= TimeSpan.Zero)
+        {
+            error = "ERR invalid expire time in 'set' command";
+            return null;
+        }
+
+        return ttl;
+    }
+
+    private static bool TryParseRelativeTtl(long value, bool milliseconds, out TimeSpan ttl)
+    {
+        try
+        {
+            ttl = milliseconds ? TimeSpan.FromMilliseconds(value) : TimeSpan.FromSeconds(value);
+            return true;
+        }
+        catch (OverflowException)
+        {
+            ttl = default;
+            return false;
+        }
+    }
+
     private static Regex GlobToRegex(string pattern)
     {
         var escaped = Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".");
         return new Regex("^" + escaped + "$", RegexOptions.CultureInvariant);
+    }
+
+    public void Dispose()
+    {
+        _mutationGate.Dispose();
     }
 }

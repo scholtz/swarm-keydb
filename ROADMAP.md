@@ -2,8 +2,8 @@
 
 ## Core Functionality Enhancements
 - [ ] Implement CRDTs for conflict-free concurrent writes and merges.
-- [ ] Add support for TTL and expiration of keys.
-- [ ] Enable batch operations for multiple get/put/delete in one call.
+- [x] Add support for TTL and expiration of keys. (100%)
+- [x] Enable batch operations for multiple get/put/delete in one call. (100%)
 - [ ] Introduce advanced querying capabilities like range scans and filters.
 - [ ] Support for composite keys and hierarchical namespaces.
 

@@ -4,7 +4,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 
 ## Features
 
-- Redis-compatible commands for `PING`, `SET`, `GET`, `DEL`, `EXISTS`, `KEYS`, `SCAN`, `TYPE`, and `QUIT`.
+- Redis-compatible commands for `PING`, `SET`, `SETEX`, `PSETEX`, `GET`, `MGET`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXISTS`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `KEYS`, `SCAN`, `TYPE`, and `QUIT`.
 - String, JSON, and binary value helpers in the `SwarmKeyDbClient` library.
 - Key listing and cursor-based iteration.
 - Bee HTTP API storage with postage batch configuration handled by environment variables.
@@ -27,6 +27,17 @@ dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
 redis-cli -p 6379 SET profile:name Ada
 redis-cli -p 6379 GET profile:name
 redis-cli -p 6379 KEYS '*'
+```
+
+## Redis command examples (RESP responses)
+
+```text
+SETEX session:token 300 abc123    -> +OK
+TTL session:token                 -> :<1..300>
+MSET a 1 b 2 c 3                  -> +OK
+MGET a b missing                  -> *3\r\n$1\r\n1\r\n$1\r\n2\r\n$-1
+PERSIST session:token             -> :1 (or :0 when no TTL exists)
+SET profile:name Ada EX 60        -> +OK
 ```
 
 ## Run against Bee/Swarm
