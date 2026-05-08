@@ -33,6 +33,7 @@ public static class ServiceCollectionExtensions
                 store,
                 sp.GetRequiredService<IOptions<CompressionOptions>>(),
                 sp.GetRequiredService<ILogger<CompressingKeyValueStore>>());
+            store = new CrdtKeyValueStore(store);
             store = new CachingKeyValueStore(
                 store,
                 sp.GetRequiredService<IMemoryCache>(),

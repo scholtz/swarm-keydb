@@ -7,6 +7,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 - Redis-compatible commands for `PING`, `SET`, `SETEX`, `PSETEX`, `GET`, `MGET`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXISTS`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `KEYS`, `SCAN`, `TYPE`, and `QUIT`.
 - Connection-scoped Ethereum-address ACL enforcement via `AUTHADDR` for shared databases.
 - String, JSON, and binary value helpers in the `SwarmKeyDbClient` library.
+- CRDT-backed conflict resolution (LWW register by default, with OR-Set and PN-counter strategies available).
 - Key listing and cursor-based iteration.
 - Bee HTTP API storage with postage batch configuration handled by environment variables.
 - Local file storage backend for development and tests.
@@ -111,7 +112,7 @@ Configure it with:
 
 **Startup behaviour:** If `SWARM_KEYDB_ENCRYPTION_ENABLED=true` but neither `SWARM_KEYDB_ENCRYPTION_KEY` nor `SWARM_KEYDB_ENCRYPTION_ETH_KEY` is set, the server fails fast with a descriptive error — it will never silently store plaintext when encryption is expected.
 
-**Layer ordering:** Encryption sits between Swarm storage and the compression layer (Swarm → Encrypt → Compress → Cache), so compressed data is stored encrypted.
+**Layer ordering:** Encryption sits below CRDT merge handling and below compression (Swarm → ACL → Encrypt → Compress → CRDT → Cache), so CRDT merges run on plaintext while persisted Swarm bytes remain encrypted.
 
 **Example (Docker):**
 
@@ -162,7 +163,7 @@ Configure it with:
 
 **Startup behaviour:** If `SWARM_KEYDB_ACL_ENABLED=true` and `SWARM_KEYDB_ACL_ENTRIES` is empty or invalid, the server fails fast with a descriptive error.
 
-**Layer ordering:** ACL checks run before encryption and compression (Swarm → ACL → Encrypt → Compress → Cache).
+**Layer ordering:** ACL checks run before encryption/compression/CRDT merge handling (Swarm → ACL → Encrypt → Compress → CRDT → Cache).
 
 **Supplying caller identity:** SwarmKeyDb currently speaks Redis RESP over TCP, so there is no HTTP header transport on the wire. For the Redis server, identify the caller once per connection with `AUTHADDR <0x-address>`. HTTP adapters can map the same identity to an `X-Eth-Address` header and translate `AccessDeniedException` to HTTP `403`.
 
@@ -240,4 +241,15 @@ foreach (var key in await db.KeysAsync())
 {
     Console.WriteLine(key);
 }
+```
+
+### CRDT merge example
+
+```csharp
+await db.SetKeyOptionsAsync("shared:set", new KeyOptions { MergeStrategy = OrSetMergeStrategy.Instance });
+await db.PutBytesAsync("shared:set", OrSetValue.Empty.Add("alice", "node-a:1").ToByteArray());
+await db.MergeBytesAsync("shared:set", OrSetValue.Empty.Add("bob", "node-b:1").ToByteArray());
+
+var merged = OrSetValue.FromByteArray(await db.GetBytesAsync("shared:set")!);
+Console.WriteLine(string.Join(",", merged.Elements)); // alice,bob
 ```

@@ -25,6 +25,13 @@ var tests = new (string Name, Func<Task> Test)[]
     ("expireat in past removes key", ExpireAtInPastRemovesKeyAsync),
     ("set with exat option sets expiry", SetWithExAtOptionSetsExpiryAsync),
     ("setex rejects overflow ttl", SetExRejectsOverflowTtlAsync),
+    ("vector clock increment compare and merge", VectorClockIncrementCompareAndMergeAsync),
+    ("lww register tie break is deterministic", LwwRegisterTieBreakIsDeterministicAsync),
+    ("or set add remove and concurrent merge", OrSetAddRemoveAndConcurrentMergeAsync),
+    ("pn counter increment decrement merge", PnCounterIncrementDecrementMergeAsync),
+    ("crdt merge method uses default lww register", CrdtMergeMethodUsesDefaultLwwRegisterAsync),
+    ("custom merge strategy can be configured per key", CustomMergeStrategyCanBeConfiguredPerKeyAsync),
+    ("two instances merge concurrent writes deterministically", TwoInstancesMergeConcurrentWritesDeterministicallyAsync),
     ("caching store get returns cached value after put", CachingKeyValueStoreGetReturnsCachedValueAfterPutAsync),
     ("caching store put invalidates cache", CachingKeyValueStorePutInvalidatesCacheAsync),
     ("caching store delete invalidates cache", CachingKeyValueStoreDeleteInvalidatesCacheAsync),
@@ -271,6 +278,102 @@ static async Task SetExRejectsOverflowTtlAsync()
     var processor = CreateProcessor();
     AssertEqual("-ERR value is not an integer or out of range\r\n", await ExecuteAsync(processor, RespCommand("SETEX", "bad", "9223372036854775807", "v")));
     AssertEqual("-ERR value is not an integer or out of range\r\n", await ExecuteAsync(processor, RespCommand("SET", "bad", "v", "PX", "9223372036854775807")));
+}
+
+static Task VectorClockIncrementCompareAndMergeAsync()
+{
+    var left = VectorClock.Empty.Increment("node-a").Increment("node-a");
+    var right = VectorClock.Empty.Increment("node-b");
+
+    AssertEqual(VectorClockComparison.Concurrent, left.Compare(right));
+    AssertEqual(VectorClockComparison.Before, right.Compare(left.Merge(right)));
+    AssertEqual(VectorClockComparison.After, left.Merge(right).Compare(right));
+    AssertEqual(2L, left.Merge(right).Entries["node-a"]);
+    AssertEqual(1L, left.Merge(right).Entries["node-b"]);
+    return Task.CompletedTask;
+}
+
+static Task LwwRegisterTieBreakIsDeterministicAsync()
+{
+    var strategy = LwwRegisterMergeStrategy.Instance;
+    var timestamp = DateTimeOffset.UtcNow;
+    var existing = new CrdtValue(
+        Encoding.UTF8.GetBytes("left"),
+        new VectorClock(new Dictionary<string, long>(StringComparer.Ordinal) { ["a"] = 1 }),
+        timestamp,
+        "node-a");
+    var incoming = new CrdtValue(
+        Encoding.UTF8.GetBytes("right"),
+        new VectorClock(new Dictionary<string, long>(StringComparer.Ordinal) { ["b"] = 1 }),
+        timestamp,
+        "node-b");
+
+    var merged = strategy.Merge("k", existing, incoming);
+    AssertEqual("right", Encoding.UTF8.GetString(merged.Value));
+    AssertEqual(VectorClockComparison.Equal, merged.VectorClock.Compare(new VectorClock(new Dictionary<string, long>(StringComparer.Ordinal) { ["a"] = 1, ["b"] = 1 })));
+    return Task.CompletedTask;
+}
+
+static Task OrSetAddRemoveAndConcurrentMergeAsync()
+{
+    var left = OrSetValue.Empty.Add("alpha", "node-a:1");
+    var right = OrSetValue.Empty.Remove("alpha").Add("beta", "node-b:1");
+    var merged = left.Merge(right);
+    AssertSequenceEqual(new[] { "alpha", "beta" }, merged.Elements);
+
+    var removed = merged.Remove("alpha");
+    AssertSequenceEqual(new[] { "beta" }, removed.Elements);
+    return Task.CompletedTask;
+}
+
+static Task PnCounterIncrementDecrementMergeAsync()
+{
+    var left = PnCounterValue.Zero.Increment("node-a", 3).Decrement("node-a", 1);
+    var right = PnCounterValue.Zero.Increment("node-b", 2).Decrement("node-b", 1);
+    var merged = left.Merge(right);
+
+    AssertEqual(3L, merged.Value);
+    return Task.CompletedTask;
+}
+
+static async Task CrdtMergeMethodUsesDefaultLwwRegisterAsync()
+{
+    var store = new CrdtKeyValueStore(new CountingKeyValueStore(), nodeId: "node-a");
+    await store.PutAsync("doc", Encoding.UTF8.GetBytes("v1"));
+    await store.MergeAsync("doc", Encoding.UTF8.GetBytes("v2"));
+
+    AssertEqual("v2", Encoding.UTF8.GetString((await store.GetAsync("doc"))!));
+}
+
+static async Task CustomMergeStrategyCanBeConfiguredPerKeyAsync()
+{
+    var store = new CrdtKeyValueStore(new CountingKeyValueStore(), nodeId: "node-a");
+    await store.SetKeyOptionsAsync("set:key", new KeyOptions { MergeStrategy = OrSetMergeStrategy.Instance });
+
+    await store.PutAsync("set:key", OrSetValue.Empty.Add("one", "node-a:1").ToByteArray());
+    await store.MergeAsync("set:key", OrSetValue.Empty.Add("two", "node-b:1").ToByteArray());
+
+    var merged = OrSetValue.FromByteArray((await store.GetAsync("set:key"))!);
+    AssertSequenceEqual(new[] { "one", "two" }, merged.Elements);
+}
+
+static async Task TwoInstancesMergeConcurrentWritesDeterministicallyAsync()
+{
+    var swarm = new InMemorySwarmClient();
+    var index = new InMemoryKeyIndex();
+    var storeA = new CrdtKeyValueStore(new SwarmKeyValueStore(swarm, index), nodeId: "node-a");
+    var storeB = new CrdtKeyValueStore(new SwarmKeyValueStore(swarm, index), nodeId: "node-b");
+
+    await storeA.SetKeyOptionsAsync("shared:set", new KeyOptions { MergeStrategy = OrSetMergeStrategy.Instance });
+    await storeB.SetKeyOptionsAsync("shared:set", new KeyOptions { MergeStrategy = OrSetMergeStrategy.Instance });
+
+    await storeA.PutAsync("shared:set", OrSetValue.Empty.Add("alice", "node-a:1").ToByteArray());
+    await storeB.MergeAsync("shared:set", OrSetValue.Empty.Add("bob", "node-b:1").ToByteArray());
+
+    var fromA = OrSetValue.FromByteArray((await storeA.GetAsync("shared:set"))!);
+    var fromB = OrSetValue.FromByteArray((await storeB.GetAsync("shared:set"))!);
+    AssertSequenceEqual(new[] { "alice", "bob" }, fromA.Elements);
+    AssertSequenceEqual(fromA.Elements, fromB.Elements);
 }
 
 static async Task CachingKeyValueStoreGetReturnsCachedValueAfterPutAsync()
@@ -773,10 +876,11 @@ static async Task ServiceCollectionPlacesAclBetweenSwarmAndEncryptionAsync()
     var store = provider.GetRequiredService<IKeyValueStore>();
 
     AssertEqual(typeof(CachingKeyValueStore), store.GetType());
-    AssertEqual(typeof(CompressingKeyValueStore), GetInnerStore(store).GetType());
-    AssertEqual(typeof(EncryptingKeyValueStore), GetInnerStore(GetInnerStore(store)).GetType());
-    AssertEqual(typeof(AclKeyValueStore), GetInnerStore(GetInnerStore(GetInnerStore(store))).GetType());
-    AssertEqual(typeof(SwarmKeyValueStore), GetInnerStore(GetInnerStore(GetInnerStore(GetInnerStore(store)))).GetType());
+    AssertEqual(typeof(CrdtKeyValueStore), GetInnerStore(store).GetType());
+    AssertEqual(typeof(CompressingKeyValueStore), GetInnerStore(GetInnerStore(store)).GetType());
+    AssertEqual(typeof(EncryptingKeyValueStore), GetInnerStore(GetInnerStore(GetInnerStore(store))).GetType());
+    AssertEqual(typeof(AclKeyValueStore), GetInnerStore(GetInnerStore(GetInnerStore(GetInnerStore(store)))).GetType());
+    AssertEqual(typeof(SwarmKeyValueStore), GetInnerStore(GetInnerStore(GetInnerStore(GetInnerStore(GetInnerStore(store))))).GetType());
 
     await store.PutAsync("pipeline:key", Encoding.UTF8.GetBytes("value"));
     AssertEqual("value", Encoding.UTF8.GetString((await store.GetAsync("pipeline:key"))!));

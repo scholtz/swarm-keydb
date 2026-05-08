@@ -45,6 +45,19 @@ public sealed class EncryptingKeyValueStore : IKeyValueStore, IAccessControlVeri
         await _inner.PutAsync(key, encrypted, cancellationToken).ConfigureAwait(false);
     }
 
+    public Task PutWithStrategyAsync(
+        string key,
+        ReadOnlyMemory<byte> value,
+        IMergeStrategy mergeStrategy,
+        CancellationToken cancellationToken = default) =>
+        _inner.PutWithStrategyAsync(key, Encrypt(value.Span, _key), mergeStrategy, cancellationToken);
+
+    public Task MergeAsync(string key, ReadOnlyMemory<byte> incomingValue, CancellationToken cancellationToken = default) =>
+        _inner.MergeAsync(key, Encrypt(incomingValue.Span, _key), cancellationToken);
+
+    public Task SetKeyOptionsAsync(string key, KeyOptions options, CancellationToken cancellationToken = default) =>
+        _inner.SetKeyOptionsAsync(key, options, cancellationToken);
+
     public async Task<byte[]?> GetAsync(string key, CancellationToken cancellationToken = default)
     {
         var data = await _inner.GetAsync(key, cancellationToken).ConfigureAwait(false);

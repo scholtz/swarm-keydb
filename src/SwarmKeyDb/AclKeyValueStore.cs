@@ -27,6 +27,28 @@ public sealed class AclKeyValueStore : IKeyValueStore, IAccessControlVerifier
         await _inner.PutAsync(key, value, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task PutWithStrategyAsync(
+        string key,
+        ReadOnlyMemory<byte> value,
+        IMergeStrategy mergeStrategy,
+        CancellationToken cancellationToken = default)
+    {
+        EnsurePermission(Operation.Write);
+        await _inner.PutWithStrategyAsync(key, value, mergeStrategy, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task MergeAsync(string key, ReadOnlyMemory<byte> incomingValue, CancellationToken cancellationToken = default)
+    {
+        EnsurePermission(Operation.Write);
+        await _inner.MergeAsync(key, incomingValue, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task SetKeyOptionsAsync(string key, KeyOptions options, CancellationToken cancellationToken = default)
+    {
+        EnsurePermission(Operation.Write);
+        await _inner.SetKeyOptionsAsync(key, options, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<byte[]?> GetAsync(string key, CancellationToken cancellationToken = default)
     {
         EnsurePermission(Operation.Read);
