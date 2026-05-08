@@ -55,8 +55,8 @@ var compressionOptions = new CompressionOptions
 {
     Enabled = GetBool("SWARM_KEYDB_COMPRESSION_ENABLED", false),
     Algorithm = Enum.TryParse<CompressionAlgorithm>(
-        GetSetting("SWARM_KEYDB_COMPRESSION_ALGORITHM"), ignoreCase: true, out var algorithm)
-        ? algorithm
+        GetSetting("SWARM_KEYDB_COMPRESSION_ALGORITHM"), ignoreCase: true, out var compressionAlgorithm)
+        ? compressionAlgorithm
         : CompressionAlgorithm.GZip,
     MinSizeBytes = GetInt("SWARM_KEYDB_COMPRESSION_MIN_SIZE_BYTES", 64)
 };
