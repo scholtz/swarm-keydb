@@ -5,7 +5,7 @@
 - [x] Add support for TTL and expiration of keys. (100%)
 - [x] Enable batch operations for multiple get/put/delete in one call. (100%)
 - [x] Introduce advanced querying capabilities like range scans and filters. (100%)
-- [ ] Support for composite keys and hierarchical namespaces.
+- [x] Support for composite keys and hierarchical namespaces. (100%)
 
 ## Performance and Scalability
 - [x] Add in-memory caching layer for frequently accessed keys. (100%)

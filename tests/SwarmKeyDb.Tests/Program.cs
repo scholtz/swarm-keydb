@@ -73,7 +73,18 @@ var tests = new (string Name, Func<Task> Test)[]
     ("acl startup fails when enabled with empty entries", AclStartupFailsWhenEnabledWithEmptyEntriesAsync),
     ("service collection places acl between swarm and encryption", ServiceCollectionPlacesAclBetweenSwarmAndEncryptionAsync),
     ("cached read still requires acl permission", CachedReadStillRequiresAclPermissionAsync),
-    ("redis protocol returns access denied error for unauthorized address", RedisProtocolReturnsAccessDeniedErrorForUnauthorizedAddressAsync)
+    ("redis protocol returns access denied error for unauthorized address", RedisProtocolReturnsAccessDeniedErrorForUnauthorizedAddressAsync),
+    ("composite key constructs key from segments", CompositeKeyConstructsKeyFromSegmentsAsync),
+    ("composite key rejects segment containing separator", CompositeKeyRejectsSegmentContainingSeparatorAsync),
+    ("composite key rejects empty segment", CompositeKeyRejectsEmptySegmentAsync),
+    ("composite key supports custom separator", CompositeKeySupportsCustomSeparatorAsync),
+    ("namespaced store scopes put and get to prefix", NamespacedStoreScopesPutAndGetToPrefixAsync),
+    ("namespaced store list keys strips prefix", NamespacedStoreListKeysStripsPrefixAsync),
+    ("namespaced store delete removes prefixed key", NamespacedStoreDeleteRemovesPrefixedKeyAsync),
+    ("namespaced store isolates two namespaces", NamespacedStoreIsolatesTwoNamespacesAsync),
+    ("delete namespace removes all keys under prefix", DeleteNamespaceRemovesAllKeysUnderPrefixAsync),
+    ("with namespace scopes client operations", WithNamespaceScopesClientOperationsAsync),
+    ("cli delete namespace removes prefixed keys", CliDeleteNamespaceRemovesPrefixedKeysAsync),
 };
 
 foreach (var (name, test) in tests)
@@ -1175,6 +1186,204 @@ static async Task RedisProtocolReturnsAccessDeniedErrorForUnauthorizedAddressAsy
     AssertEqual(
         $"+OK\r\n-ERR Access denied: address {EthereumAddress.Normalize(OtherAddress)} does not have read permission.\r\n",
         response);
+}
+
+static Task CompositeKeyConstructsKeyFromSegmentsAsync()
+{
+    AssertEqual("a:b:c", CompositeKey.Of("a", "b", "c"));
+    AssertEqual("users:alice:profile", CompositeKey.Of("users", "alice", "profile"));
+    AssertEqual("single", CompositeKey.Of("single"));
+    return Task.CompletedTask;
+}
+
+static Task CompositeKeyRejectsSegmentContainingSeparatorAsync()
+{
+    var threw = false;
+    try
+    {
+        _ = CompositeKey.Of("a", "b:c");
+    }
+    catch (ArgumentException ex) when (ex.Message.Contains("separator", StringComparison.Ordinal))
+    {
+        threw = true;
+    }
+
+    Assert(threw, "Expected ArgumentException when a segment contains the separator character.");
+    return Task.CompletedTask;
+}
+
+static Task CompositeKeyRejectsEmptySegmentAsync()
+{
+    var threw = false;
+    try
+    {
+        _ = CompositeKey.Of("a", "", "c");
+    }
+    catch (ArgumentException)
+    {
+        threw = true;
+    }
+
+    Assert(threw, "Expected ArgumentException when a segment is empty.");
+
+    // Also verify null segment throws
+    threw = false;
+    try
+    {
+        _ = CompositeKey.Of("a", null!, "c");
+    }
+    catch (ArgumentException)
+    {
+        threw = true;
+    }
+
+    Assert(threw, "Expected ArgumentException when a segment is null.");
+    return Task.CompletedTask;
+}
+
+static Task CompositeKeySupportsCustomSeparatorAsync()
+{
+    AssertEqual("users/alice/profile", CompositeKey.Of('/', "users", "alice", "profile"));
+
+    var threw = false;
+    try
+    {
+        _ = CompositeKey.Of('/', "users/alice", "profile");
+    }
+    catch (ArgumentException ex) when (ex.Message.Contains("separator", StringComparison.Ordinal))
+    {
+        threw = true;
+    }
+
+    Assert(threw, "Expected ArgumentException when segment contains custom separator.");
+    return Task.CompletedTask;
+}
+
+static async Task NamespacedStoreScopesPutAndGetToPrefixAsync()
+{
+    var inner = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    var ns = new NamespacedKeyValueStore(inner, "users:alice:");
+
+    await ns.PutAsync("profile", Encoding.UTF8.GetBytes("Alice"));
+    var value = await ns.GetAsync("profile");
+    AssertEqual("Alice", Encoding.UTF8.GetString(value!));
+
+    // Verify underlying store has prefixed key
+    var rawValue = await inner.GetAsync("users:alice:profile");
+    AssertEqual("Alice", Encoding.UTF8.GetString(rawValue!));
+
+    // Key without prefix should not be visible through namespaced view
+    var notFound = await ns.GetAsync("users:alice:profile");
+    Assert(notFound is null, "Namespaced store should not find a key that includes the prefix in its name.");
+}
+
+static async Task NamespacedStoreListKeysStripsPrefixAsync()
+{
+    var inner = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    await inner.PutAsync("users:alice:profile", Encoding.UTF8.GetBytes("1"));
+    await inner.PutAsync("users:alice:settings", Encoding.UTF8.GetBytes("2"));
+    await inner.PutAsync("users:bob:profile", Encoding.UTF8.GetBytes("3"));
+
+    var ns = new NamespacedKeyValueStore(inner, "users:alice:");
+    var keys = await ns.ListKeysAsync();
+
+    AssertSequenceEqual(new[] { "profile", "settings" }, keys);
+}
+
+static async Task NamespacedStoreDeleteRemovesPrefixedKeyAsync()
+{
+    var inner = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    var ns = new NamespacedKeyValueStore(inner, "ns:");
+
+    await ns.PutAsync("key1", Encoding.UTF8.GetBytes("v1"));
+    Assert(await ns.DeleteAsync("key1"), "Delete should return true for existing key.");
+    Assert(await ns.GetAsync("key1") is null, "Key should be gone after delete.");
+
+    // Underlying store should also have no prefixed key
+    Assert(await inner.GetAsync("ns:key1") is null, "Underlying prefixed key should also be gone.");
+}
+
+static async Task NamespacedStoreIsolatesTwoNamespacesAsync()
+{
+    var inner = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    var ns1 = new NamespacedKeyValueStore(inner, "ns1:");
+    var ns2 = new NamespacedKeyValueStore(inner, "ns2:");
+
+    await ns1.PutAsync("shared", Encoding.UTF8.GetBytes("from-ns1"));
+    await ns2.PutAsync("shared", Encoding.UTF8.GetBytes("from-ns2"));
+
+    AssertEqual("from-ns1", Encoding.UTF8.GetString((await ns1.GetAsync("shared"))!));
+    AssertEqual("from-ns2", Encoding.UTF8.GetString((await ns2.GetAsync("shared"))!));
+
+    var keys1 = await ns1.ListKeysAsync();
+    var keys2 = await ns2.ListKeysAsync();
+    AssertSequenceEqual(new[] { "shared" }, keys1);
+    AssertSequenceEqual(new[] { "shared" }, keys2);
+}
+
+static async Task DeleteNamespaceRemovesAllKeysUnderPrefixAsync()
+{
+    IKeyValueStore store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    await store.PutAsync("users:alice:profile", Encoding.UTF8.GetBytes("1"));
+    await store.PutAsync("users:alice:settings", Encoding.UTF8.GetBytes("2"));
+    await store.PutAsync("users:bob:profile", Encoding.UTF8.GetBytes("3"));
+
+    var deleted = await store.DeleteNamespaceAsync("users:alice:");
+    AssertEqual(2, deleted);
+
+    var remaining = await store.ListKeysAsync();
+    AssertSequenceEqual(new[] { "users:bob:profile" }, remaining);
+}
+
+static async Task WithNamespaceScopesClientOperationsAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    var client = new SwarmKeyDbClient(store);
+
+    var aliceDb = client.WithNamespace("users:alice:");
+    await aliceDb.PutStringAsync("profile", "{\"name\":\"Alice\"}");
+    await aliceDb.PutStringAsync("settings", "{\"theme\":\"dark\"}");
+
+    var bobDb = client.WithNamespace("users:bob:");
+    await bobDb.PutStringAsync("profile", "{\"name\":\"Bob\"}");
+
+    // Scoped list returns only local keys
+    var aliceKeys = await aliceDb.KeysAsync();
+    AssertSequenceEqual(new[] { "profile", "settings" }, aliceKeys);
+
+    var bobKeys = await bobDb.KeysAsync();
+    AssertSequenceEqual(new[] { "profile" }, bobKeys);
+
+    // Scoped get returns correct value
+    AssertEqual("{\"name\":\"Alice\"}", await aliceDb.GetStringAsync("profile"));
+    AssertEqual("{\"name\":\"Bob\"}", await bobDb.GetStringAsync("profile"));
+
+    // Delete namespace via client
+    var deletedCount = await client.DeleteNamespaceAsync("users:alice:");
+    AssertEqual(2, deletedCount);
+
+    var afterDelete = await aliceDb.KeysAsync();
+    AssertSequenceEqual(Array.Empty<string>(), afterDelete);
+
+    // Bob's data unaffected
+    AssertEqual("{\"name\":\"Bob\"}", await bobDb.GetStringAsync("profile"));
+}
+
+static async Task CliDeleteNamespaceRemovesPrefixedKeysAsync()
+{
+    var options = CreateCliTestOptions();
+
+    await RunCliAsync(new[] { "put", "users:alice:profile", "Alice" }, options);
+    await RunCliAsync(new[] { "put", "users:alice:settings", "dark" }, options);
+    await RunCliAsync(new[] { "put", "users:bob:profile", "Bob" }, options);
+
+    var deleteResult = await RunCliAsync(new[] { "delete-namespace", "users:alice:" }, options);
+    AssertEqual(0, deleteResult.ExitCode);
+    AssertEqual("2", deleteResult.Stdout.Trim());
+
+    var listResult = await RunCliAsync(new[] { "list" }, options);
+    Assert(!listResult.Stdout.Contains("users:alice:", StringComparison.Ordinal), "Alice's keys should be deleted.");
+    Assert(listResult.Stdout.Contains("users:bob:profile", StringComparison.Ordinal), "Bob's key should remain.");
 }
 
 static CliExecutionOptions CreateCliTestOptions()

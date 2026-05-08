@@ -175,4 +175,29 @@ public interface IKeyValueStore
         Task.FromResult((false, (TimeSpan?)null));
     Task<bool> RemoveTtlAsync(string key, CancellationToken cancellationToken = default) => Task.FromResult(false);
 
+    /// <summary>
+    /// Deletes all keys that begin with <paramref name="prefix"/>.
+    /// Returns the number of keys deleted.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// int deleted = await store.DeleteNamespaceAsync("users:alice:");
+    /// </code>
+    /// </example>
+    async Task<int> DeleteNamespaceAsync(string prefix, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(prefix);
+        var keys = await GetKeysWithPrefixAsync(prefix, cancellationToken).ConfigureAwait(false);
+        var count = 0;
+        foreach (var key in keys)
+        {
+            if (await DeleteAsync(key, cancellationToken).ConfigureAwait(false))
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
 }
