@@ -4,7 +4,7 @@ using Microsoft.Extensions.Options;
 
 namespace SwarmKeyDb;
 
-public sealed class CompressingKeyValueStore : IKeyValueStore
+public sealed class CompressingKeyValueStore : IKeyValueStore, IAccessControlVerifier
 {
     // GZip magic bytes (RFC 1952)
     private static readonly byte[] GZipMagic = [0x1F, 0x8B];
@@ -74,6 +74,22 @@ public sealed class CompressingKeyValueStore : IKeyValueStore
 
     public Task<bool> RemoveTtlAsync(string key, CancellationToken cancellationToken = default) =>
         _inner.RemoveTtlAsync(key, cancellationToken);
+
+    public void EnsureReadAccess()
+    {
+        if (_inner is IAccessControlVerifier verifier)
+        {
+            verifier.EnsureReadAccess();
+        }
+    }
+
+    public void EnsureWriteAccess()
+    {
+        if (_inner is IAccessControlVerifier verifier)
+        {
+            verifier.EnsureWriteAccess();
+        }
+    }
 
     private static byte[] Compress(ReadOnlySpan<byte> data, CompressionAlgorithm algorithm)
     {

@@ -49,6 +49,11 @@ public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats
 
         if (_cache.TryGetValue(key, out byte[]? cached) && cached is not null)
         {
+            if (_inner is IAccessControlVerifier verifier)
+            {
+                verifier.EnsureReadAccess();
+            }
+
             Interlocked.Increment(ref _hits);
             TouchLru(key);
             _logger.LogDebug("Cache hit for key '{Key}'.", key);

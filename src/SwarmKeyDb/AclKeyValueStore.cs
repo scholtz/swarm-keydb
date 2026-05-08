@@ -2,7 +2,7 @@ using Microsoft.Extensions.Options;
 
 namespace SwarmKeyDb;
 
-public sealed class AclKeyValueStore : IKeyValueStore
+public sealed class AclKeyValueStore : IKeyValueStore, IAccessControlVerifier
 {
     private readonly IKeyValueStore _inner;
     private readonly IEthAddressAccessor _ethAddressAccessor;
@@ -62,6 +62,10 @@ public sealed class AclKeyValueStore : IKeyValueStore
         EnsurePermission(Operation.Write);
         return await _inner.RemoveTtlAsync(key, cancellationToken).ConfigureAwait(false);
     }
+
+    public void EnsureReadAccess() => EnsurePermission(Operation.Read);
+
+    public void EnsureWriteAccess() => EnsurePermission(Operation.Write);
 
     private void EnsurePermission(Operation operation)
     {

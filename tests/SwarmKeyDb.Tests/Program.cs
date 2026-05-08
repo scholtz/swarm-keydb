@@ -53,6 +53,7 @@ var tests = new (string Name, Func<Task> Test)[]
     ("acl disabled passes all operations through", AclDisabledPassesAllOperationsThroughAsync),
     ("acl startup fails when enabled with empty entries", AclStartupFailsWhenEnabledWithEmptyEntriesAsync),
     ("service collection places acl between swarm and encryption", ServiceCollectionPlacesAclBetweenSwarmAndEncryptionAsync),
+    ("cached read still requires acl permission", CachedReadStillRequiresAclPermissionAsync),
     ("redis protocol returns access denied error for unauthorized address", RedisProtocolReturnsAccessDeniedErrorForUnauthorizedAddressAsync)
 };
 
@@ -779,6 +780,44 @@ static async Task ServiceCollectionPlacesAclBetweenSwarmAndEncryptionAsync()
 
     await store.PutAsync("pipeline:key", Encoding.UTF8.GetBytes("value"));
     AssertEqual("value", Encoding.UTF8.GetString((await store.GetAsync("pipeline:key"))!));
+}
+
+static async Task CachedReadStillRequiresAclPermissionAsync()
+{
+    var services = new ServiceCollection();
+    services.AddOptions();
+    services.AddSingleton<IOptions<CacheOptions>>(Options.Create(new CacheOptions { Enabled = true, MaxEntries = 8 }));
+    services.AddSingleton<IOptions<CompressionOptions>>(Options.Create(new CompressionOptions { Enabled = true, MinSizeBytes = 0 }));
+    services.AddSingleton<IOptions<EncryptionOptions>>(Options.Create(new EncryptionOptions { Enabled = true, KeyHex = MakeKeyHex() }));
+    services.AddSingleton<IOptions<AclOptions>>(Options.Create(new AclOptions
+    {
+        Enabled = true,
+        Mode = AclMode.Allowlist,
+        Entries = [new AclEntry { EthAddress = AllowedAddress, Permission = AclPermission.Admin }]
+    }));
+    var accessor = new AsyncLocalEthAddressAccessor();
+    services.AddSingleton<IEthAddressAccessor>(accessor);
+    services.AddSingleton<Microsoft.Extensions.Caching.Memory.IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
+    services.AddSingleton<Microsoft.Extensions.Logging.ILogger<CachingKeyValueStore>>(NullLogger<CachingKeyValueStore>.Instance);
+    services.AddSingleton<Microsoft.Extensions.Logging.ILogger<CompressingKeyValueStore>>(NullLogger<CompressingKeyValueStore>.Instance);
+    services.AddSingleton<Microsoft.Extensions.Logging.ILogger<EncryptingKeyValueStore>>(NullLogger<EncryptingKeyValueStore>.Instance);
+    services.AddSwarmKeyDbStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+
+    using var provider = services.BuildServiceProvider();
+    var processor = new RedisCommandProcessor(provider.GetRequiredService<IKeyValueStore>(), accessor);
+
+    var allowed = await ExecuteAsync(processor,
+        RespCommand("AUTHADDR", AllowedAddress) +
+        RespCommand("SET", "shared:key", "value") +
+        RespCommand("GET", "shared:key"));
+    AssertEqual("+OK\r\n+OK\r\n$5\r\nvalue\r\n", allowed);
+
+    var denied = await ExecuteAsync(processor,
+        RespCommand("AUTHADDR", OtherAddress) +
+        RespCommand("GET", "shared:key"));
+    AssertEqual(
+        $"+OK\r\n-ERR Access denied: address {EthereumAddress.Normalize(OtherAddress)} does not have read permission.\r\n",
+        denied);
 }
 
 static async Task RedisProtocolReturnsAccessDeniedErrorForUnauthorizedAddressAsync()
