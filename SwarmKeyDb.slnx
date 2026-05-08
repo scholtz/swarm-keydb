@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/SwarmKeyDb.Cli/SwarmKeyDb.Cli.csproj" />
     <Project Path="src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj" />
     <Project Path="src/SwarmKeyDb/SwarmKeyDb.csproj" />
   </Folder>

@@ -11,6 +11,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 - Prefix scans, lexicographic range scans, predicate queries, and cursor-based iteration.
 - Bee HTTP API storage with postage batch configuration handled by environment variables.
 - Local file storage backend for development and tests.
+- `skdb` CLI for database management and debugging from the terminal.
 - .NET 10 build, Docker packaging, and Kubernetes deployment manifests.
 
 ## Documentation
@@ -29,6 +30,32 @@ Project documentation lives under `docs/`:
 dotnet build SwarmKeyDb.slnx
 dotnet run --project tests/SwarmKeyDb.Tests/SwarmKeyDb.Tests.csproj
 ```
+
+## CLI (`skdb`)
+
+Install as a .NET tool:
+
+```bash
+dotnet pack src/SwarmKeyDb.Cli/SwarmKeyDb.Cli.csproj -c Release
+dotnet tool install -g SwarmKeyDb.Cli --add-source src/SwarmKeyDb.Cli/bin/Release
+```
+
+Configure Bee once, then use the CLI commands:
+
+```bash
+skdb config set --bee-url http://localhost:1633/ --batch-id <your-postage-batch-id>
+skdb put user:alice '{"name":"Alice","role":"admin"}'
+skdb get user:alice
+skdb list --prefix user:
+skdb scan --from user:a --to user:z
+skdb delete user:alice
+skdb stats
+```
+
+Global overrides:
+
+- `--bee-url`, `--batch-id`, `--output plain|json|table`
+- `SWARMKEYDB_BEE_URL`, `SWARMKEYDB_BATCH_ID`, `SWARMKEYDB_OUTPUT`
 
 ## Run locally
 

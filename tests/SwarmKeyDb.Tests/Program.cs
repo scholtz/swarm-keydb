@@ -1,9 +1,11 @@
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SwarmKeyDb;
+using SwarmKeyDb.Cli;
 
 var tests = new (string Name, Func<Task> Test)[]
 {
@@ -17,6 +19,10 @@ var tests = new (string Name, Func<Task> Test)[]
     ("scan async returns paginated opaque cursor", ScanAsyncReturnsPaginatedOpaqueCursorAsync),
     ("query async applies key and value predicates", QueryAsyncAppliesKeyAndValuePredicatesAsync),
     ("persistent file index supports restart querying", PersistentFileIndexSupportsRestartQueryingAsync),
+    ("cli supports put get delete list scan and stats", CliSupportsDataCommandsAsync),
+    ("cli config set and get persists settings", CliConfigSetAndGetPersistsSettingsAsync),
+    ("cli put validates value source arguments", CliPutValidatesValueSourceArgumentsAsync),
+    ("cli uses environment variable overrides", CliUsesEnvironmentVariableOverridesAsync),
     ("mget returns nulls for missing keys", MGetReturnsNullsForMissingKeysAsync),
     ("mset sets multiple keys atomically", MSetSetsMultipleKeysAtomicallyAsync),
     ("setex stores value with ttl", SetExStoresValueWithTtlAsync),
@@ -248,6 +254,116 @@ static async Task PersistentFileIndexSupportsRestartQueryingAsync()
             Directory.Delete(root, recursive: true);
         }
     }
+}
+
+static async Task CliSupportsDataCommandsAsync()
+{
+    var swarm = new InMemorySwarmClient();
+    var index = new InMemoryKeyIndex();
+    var options = new CliExecutionOptions
+    {
+        SwarmClientFactory = _ => swarm,
+        KeyIndexFactory = _ => index,
+        EnvironmentFactory = static () => new EnvironmentSnapshot
+        {
+            Home = Path.Combine(Path.GetTempPath(), "swarm-keydb-cli-tests", Guid.NewGuid().ToString("N")),
+            BeeUrl = "http://localhost:1633/",
+            BatchId = "batch-id"
+        }
+    };
+
+    var putResult = await RunCliAsync(new[] { "put", "user:alice", "{\"name\":\"Alice\"}" }, options);
+    AssertEqual(0, putResult.ExitCode);
+    AssertEqual("OK user:alice", putResult.Stdout.Trim());
+
+    var getResult = await RunCliAsync(new[] { "get", "user:alice", "--output", "json" }, options);
+    AssertEqual(0, getResult.ExitCode);
+    var getPayload = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(getResult.Stdout.Trim());
+    Assert(getPayload is not null, "Expected get JSON payload.");
+    Assert(getPayload!["found"].GetBoolean(), "Expected key to exist.");
+    AssertEqual("{\"name\":\"Alice\"}", getPayload["value"].GetString());
+
+    await RunCliAsync(new[] { "put", "user:bob", "2" }, options);
+    await RunCliAsync(new[] { "put", "profile:charlie", "3" }, options);
+
+    var listResult = await RunCliAsync(new[] { "list", "--prefix", "user:" }, options);
+    AssertEqual(0, listResult.ExitCode);
+    Assert(listResult.Stdout.Contains("user:alice", StringComparison.Ordinal), "List should include prefixed key.");
+    Assert(listResult.Stdout.Contains("user:bob", StringComparison.Ordinal), "List should include second prefixed key.");
+    Assert(!listResult.Stdout.Contains("profile:charlie", StringComparison.Ordinal), "List should filter non-prefixed key.");
+
+    var scanResult = await RunCliAsync(new[] { "scan", "--from", "user:a", "--to", "user:z" }, options);
+    AssertEqual(0, scanResult.ExitCode);
+    Assert(scanResult.Stdout.Contains("user:alice", StringComparison.Ordinal), "Scan should include user:alice.");
+    Assert(scanResult.Stdout.Contains("user:bob", StringComparison.Ordinal), "Scan should include user:bob.");
+
+    var statsResult = await RunCliAsync(new[] { "stats", "--output", "json" }, options);
+    AssertEqual(0, statsResult.ExitCode);
+    var statsPayload = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(statsResult.Stdout.Trim());
+    Assert(statsPayload is not null, "Expected stats JSON payload.");
+    Assert(statsPayload!["keyCount"].GetInt32() >= 3, "Stats should report all inserted keys.");
+    Assert(statsPayload["storageBytes"].GetInt64() > 0, "Stats should include storage usage.");
+
+    var deleteResult = await RunCliAsync(new[] { "delete", "user:alice" }, options);
+    AssertEqual(0, deleteResult.ExitCode);
+    AssertEqual("1", deleteResult.Stdout.Trim());
+
+    var missingResult = await RunCliAsync(new[] { "get", "user:alice" }, options);
+    AssertEqual(1, missingResult.ExitCode);
+}
+
+static async Task CliConfigSetAndGetPersistsSettingsAsync()
+{
+    var home = Path.Combine(Path.GetTempPath(), "swarm-keydb-cli-tests", Guid.NewGuid().ToString("N"));
+    var options = new CliExecutionOptions
+    {
+        EnvironmentFactory = () => new EnvironmentSnapshot
+        {
+            Home = home
+        }
+    };
+
+    var setResult = await RunCliAsync(new[] { "config", "set", "--bee-url", "http://localhost:1733/", "--batch-id", "batch-123", "--output", "table" }, options);
+    AssertEqual(0, setResult.ExitCode);
+    var configPath = Path.Combine(home, ".swarmkeydb", "config.json");
+    Assert(File.Exists(configPath), "Config file should be created.");
+
+    var getResult = await RunCliAsync(new[] { "config", "get", "--output", "json" }, options);
+    AssertEqual(0, getResult.ExitCode);
+    var payload = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(getResult.Stdout.Trim());
+    Assert(payload is not null, "Expected config JSON payload.");
+    AssertEqual("http://localhost:1733/", payload!["BeeUrl"].GetString());
+    AssertEqual("batch-123", payload["BatchId"].GetString());
+}
+
+static async Task CliPutValidatesValueSourceArgumentsAsync()
+{
+    var options = CreateCliTestOptions();
+
+    var noValueResult = await RunCliAsync(new[] { "put", "k" }, options);
+    AssertEqual(1, noValueResult.ExitCode);
+    Assert(noValueResult.Stderr.Contains("put requires <value> or --file <path>.", StringComparison.Ordinal), "Expected validation message for missing value.");
+
+    var bothSourcesResult = await RunCliAsync(new[] { "put", "k", "v", "--file", "x" }, options);
+    AssertEqual(1, bothSourcesResult.ExitCode);
+    Assert(bothSourcesResult.Stderr.Contains("Use either inline <value> or --file, not both.", StringComparison.Ordinal), "Expected validation message for conflicting value sources.");
+}
+
+static async Task CliUsesEnvironmentVariableOverridesAsync()
+{
+    var options = new CliExecutionOptions
+    {
+        EnvironmentFactory = static () => new EnvironmentSnapshot
+        {
+            Home = "/tmp/swarm-keydb-cli-env",
+            BeeUrl = "http://127.0.0.1:1/",
+            BatchId = "env-batch"
+        }
+    };
+
+    var result = await RunCliAsync(new[] { "put", "env:test", "1" }, options);
+    AssertEqual(1, result.ExitCode);
+    Assert(result.Stderr.Contains("Bee node unreachable", StringComparison.Ordinal), "Expected Bee connectivity error.");
 }
 
 static async Task MGetReturnsNullsForMissingKeysAsync()
@@ -1058,6 +1174,31 @@ static async Task RedisProtocolReturnsAccessDeniedErrorForUnauthorizedAddressAsy
     AssertEqual(
         $"+OK\r\n-ERR Access denied: address {EthereumAddress.Normalize(OtherAddress)} does not have read permission.\r\n",
         response);
+}
+
+static CliExecutionOptions CreateCliTestOptions()
+{
+    var swarm = new InMemorySwarmClient();
+    var index = new InMemoryKeyIndex();
+    return new CliExecutionOptions
+    {
+        SwarmClientFactory = _ => swarm,
+        KeyIndexFactory = _ => index,
+        EnvironmentFactory = static () => new EnvironmentSnapshot
+        {
+            Home = Path.Combine(Path.GetTempPath(), "swarm-keydb-cli-tests", Guid.NewGuid().ToString("N")),
+            BeeUrl = "http://localhost:1633/",
+            BatchId = "batch-id"
+        }
+    };
+}
+
+static async Task<(int ExitCode, string Stdout, string Stderr)> RunCliAsync(string[] args, CliExecutionOptions options)
+{
+    var stdout = new StringWriter();
+    var stderr = new StringWriter();
+    var code = await SwarmKeyDbCliApp.RunAsync(args, stdout, stderr, options);
+    return (code, stdout.ToString(), stderr.ToString());
 }
 
 static async Task<string> ExecuteAsync(RedisCommandProcessor processor, string commands)

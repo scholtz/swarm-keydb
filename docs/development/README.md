@@ -24,6 +24,14 @@ redis-cli -p 6379 GET profile:name
 
 To use Bee instead, set `SWARM_KEYDB_BACKEND=bee` together with `BEE_URL` and `BEE_POSTAGE_BATCH_ID`.
 
+## CLI workflow
+
+Run the CLI from source:
+
+```bash
+dotnet run --project src/SwarmKeyDb.Cli/SwarmKeyDb.Cli.csproj -- --help
+```
+
 ## Documentation expectation
 
 When runtime behavior, deployment, configuration, or workflows change, update the relevant files in `docs/` and any impacted top-level documentation in the same change.
