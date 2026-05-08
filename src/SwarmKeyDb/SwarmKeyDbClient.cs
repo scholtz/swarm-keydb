@@ -85,4 +85,25 @@ public sealed class SwarmKeyDbClient
 
     public Task<ScanResult> ScanAsync(string? cursor, int count, CancellationToken cancellationToken = default) =>
         _store.ScanAsync(cursor, count, cancellationToken);
+
+    /// <summary>
+    /// Returns a scoped <see cref="SwarmKeyDbClient"/> where all operations are implicitly prefixed with
+    /// <paramref name="prefix"/>. Listed keys have the prefix stripped so callers only see relative key names.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// var userDb = client.WithNamespace("users:alice:");
+    /// await userDb.PutStringAsync("profile", json);
+    /// var keys = await userDb.KeysAsync(); // ["profile"]
+    /// </code>
+    /// </example>
+    public SwarmKeyDbClient WithNamespace(string prefix) =>
+        new SwarmKeyDbClient(new NamespacedKeyValueStore(_store, prefix));
+
+    /// <summary>
+    /// Deletes all keys that start with <paramref name="prefix"/>.
+    /// Returns the number of keys deleted.
+    /// </summary>
+    public Task<int> DeleteNamespaceAsync(string prefix, CancellationToken cancellationToken = default) =>
+        _store.DeleteNamespaceAsync(prefix, cancellationToken);
 }

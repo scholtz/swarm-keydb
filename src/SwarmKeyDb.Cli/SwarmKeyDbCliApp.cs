@@ -249,6 +249,13 @@ internal sealed class CliRuntime
                 await WriteOutputAsync(context.Settings.Output, new { key, deleted }, deleted ? "1" : "0").ConfigureAwait(false);
                 return 0;
             }
+            case "delete-namespace":
+            {
+                var prefix = parsed.Positionals.FirstOrDefault() ?? throw new CliUsageException("delete-namespace requires <prefix>.");
+                var count = await context.Client.DeleteNamespaceAsync(prefix, cancellationToken).ConfigureAwait(false);
+                await WriteOutputAsync(context.Settings.Output, new { prefix, deletedCount = count }, count.ToString()).ConfigureAwait(false);
+                return 0;
+            }
             case "list":
             {
                 var prefix = parsed.TryGetOptionValue("--prefix");
@@ -389,6 +396,7 @@ internal sealed class CliRuntime
                   get <key>
                   put <key> <value> [--file <path>]
                   delete <key>
+                  delete-namespace <prefix>
                   list [--prefix <prefix>]
                   scan --from <start> --to <end>
                   stats
@@ -409,6 +417,7 @@ internal sealed class CliRuntime
             "put" => "Usage: skdb put <key> <value> | skdb put <key> --file <path>",
             "get" => "Usage: skdb get <key>",
             "delete" => "Usage: skdb delete <key>",
+            "delete-namespace" => "Usage: skdb delete-namespace <prefix>",
             "list" => "Usage: skdb list [--prefix <prefix>]",
             "scan" => "Usage: skdb scan --from <start> --to <end>",
             "stats" => "Usage: skdb stats",
