@@ -10,8 +10,9 @@ import (
 )
 
 type mockRedis struct {
-	store map[string]string
-	err   error
+	store      map[string]string
+	err        error
+	doCommands [][]interface{}
 }
 
 func newMockRedis() *mockRedis {
@@ -115,6 +116,10 @@ func (m *mockRedis) Do(ctx context.Context, args ...interface{}) *redis.Cmd {
 		return cmd
 	}
 
+	if len(args) > 0 {
+		m.doCommands = append(m.doCommands, args)
+	}
+
 	switch args[0] {
 	case "BACKUP":
 		cmd.SetVal("swarm://backup-ref")
@@ -122,6 +127,8 @@ func (m *mockRedis) Do(ctx context.Context, args ...interface{}) *redis.Cmd {
 		cmd.SetVal(int64(2))
 	case "ROTATEKEY":
 		cmd.SetVal("swarm://rotation-ref")
+	case "AUTHDID":
+		cmd.SetVal("OK")
 	default:
 		cmd.SetErr(errors.New("unexpected command"))
 	}
@@ -255,5 +262,67 @@ func TestPrivacyModeTokenizesKeys(t *testing.T) {
 	}
 	if len(keys) != 1 || keys[0] != "secret:key" {
 		t.Fatalf("unexpected listed keys: %#v", keys)
+	}
+}
+
+func TestDidAuthModeOption(t *testing.T) {
+	backend := newMockRedis()
+	client := NewWithRedisClientAndOptions(backend, Options{
+		DidMode:   DidAuthModeEthrDid,
+		DidRpcUrl: "http://localhost:8545",
+	})
+	if client.didMode != DidAuthModeEthrDid {
+		t.Fatalf("expected didMode=%s, got %s", DidAuthModeEthrDid, client.didMode)
+	}
+	if client.didRpcUrl != "http://localhost:8545" {
+		t.Fatalf("expected didRpcUrl=http://localhost:8545, got %s", client.didRpcUrl)
+	}
+}
+
+func TestSetDidWithoutProof(t *testing.T) {
+	ctx := context.Background()
+	backend := newMockRedis()
+	client := NewWithRedisClient(backend)
+
+	did := "did:ethr:0x1111111111111111111111111111111111111111"
+	if err := client.SetDid(ctx, did, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if client.currentDid != did {
+		t.Fatalf("expected currentDid=%s, got %s", did, client.currentDid)
+	}
+	if len(backend.doCommands) != 1 {
+		t.Fatalf("expected 1 Do command, got %d", len(backend.doCommands))
+	}
+	if backend.doCommands[0][0] != "AUTHDID" || backend.doCommands[0][1] != did {
+		t.Fatalf("unexpected AUTHDID command: %#v", backend.doCommands[0])
+	}
+}
+
+func TestSetDidWithProof(t *testing.T) {
+	ctx := context.Background()
+	backend := newMockRedis()
+	client := NewWithRedisClient(backend)
+
+	did := "did:ethr:0x1234"
+	if err := client.SetDid(ctx, did, "message", "0xsig"); err != nil {
+		t.Fatal(err)
+	}
+	if len(backend.doCommands) != 1 {
+		t.Fatalf("expected 1 Do command, got %d", len(backend.doCommands))
+	}
+	cmd := backend.doCommands[0]
+	if len(cmd) != 4 || cmd[2] != "message" || cmd[3] != "0xsig" {
+		t.Fatalf("expected AUTHDID with proof args, got %#v", cmd)
+	}
+}
+
+func TestClearDid(t *testing.T) {
+	backend := newMockRedis()
+	client := NewWithRedisClient(backend)
+	client.currentDid = "did:ethr:0x1111111111111111111111111111111111111111"
+	client.ClearDid()
+	if client.currentDid != "" {
+		t.Fatalf("expected empty currentDid after ClearDid, got %s", client.currentDid)
 	}
 }

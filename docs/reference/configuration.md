@@ -24,6 +24,9 @@
 | `SWARM_KEYDB_ENCRYPTION_ETH_KEY` | unset | Ethereum private key used to derive the encryption key. |
 | `SWARM_KEYDB_PRIVACY_MODE` | `None` | Key query privacy mode (`None`, `ObliviousHashing`, `FullPSI`). |
 | `SWARM_KEYDB_PRIVACY_KEY` | unset | 32-byte hex key used to derive HMAC key tokens in privacy modes. |
+| `SWARM_KEYDB_DID_MODE` | `None` | DID authentication mode (`None`, `EthrDid`). |
+| `SWARM_KEYDB_DID_RPC_URL` | unset | Ethereum JSON-RPC URL for on-chain `did:ethr` controller resolution. |
+| `SWARM_KEYDB_DID_METHOD` | `ethr` | DID method string (reserved for future extension). |
 | `SWARM_KEYDB_ASYNC_ENABLED` | `true` | Enables queued async write processing for high-throughput workloads. |
 | `SWARM_KEYDB_MAX_CONCURRENT_WRITES` | `4` | Maximum number of queued write operations processed in parallel. |
 | `SWARM_KEYDB_WRITE_BATCH_SIZE` | `64` | Maximum number of queued writes drained per batch. |

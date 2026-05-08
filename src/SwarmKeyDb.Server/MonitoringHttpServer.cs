@@ -18,6 +18,7 @@ public sealed class MonitoringHttpServer : IDisposable
     private readonly EthereumBridgeService? _ethereumBridge;
     private readonly CrossChainSyncService? _crossChainSyncService;
     private readonly string _privacyMode;
+    private readonly string _didMode;
 
     public MonitoringHttpServer(
         IPAddress address,
@@ -31,7 +32,8 @@ public sealed class MonitoringHttpServer : IDisposable
         IBackendStatusProvider? backendStatusProvider = null,
         EthereumBridgeService? ethereumBridge = null,
         CrossChainSyncService? crossChainSyncService = null,
-        PrivacyMode privacyMode = PrivacyMode.None)
+        PrivacyMode privacyMode = PrivacyMode.None,
+        DidAuthMode didMode = DidAuthMode.None)
     {
         _metrics = metrics;
         _readinessProbe = readinessProbe;
@@ -43,6 +45,7 @@ public sealed class MonitoringHttpServer : IDisposable
         _ethereumBridge = ethereumBridge;
         _crossChainSyncService = crossChainSyncService;
         _privacyMode = privacyMode.ToString().ToLowerInvariant();
+        _didMode = didMode.ToString().ToLowerInvariant();
         _listener.Prefixes.Add($"http://{(address.Equals(IPAddress.Any) ? "+" : address.ToString())}:{port}/");
     }
 
@@ -236,7 +239,7 @@ public sealed class MonitoringHttpServer : IDisposable
 
         if (_dashboardEnabled && (path.Equals("/dashboard", StringComparison.OrdinalIgnoreCase) || path.Equals("/", StringComparison.OrdinalIgnoreCase)))
         {
-            await WriteTextAsync(context.Response, HttpStatusCode.OK, BuildDashboardHtml(_privacyMode), "text/html; charset=utf-8", cancellationToken).ConfigureAwait(false);
+            await WriteTextAsync(context.Response, HttpStatusCode.OK, BuildDashboardHtml(_privacyMode, _didMode), "text/html; charset=utf-8", cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -291,8 +294,10 @@ public sealed class MonitoringHttpServer : IDisposable
             .Replace("\n", "\\n", StringComparison.Ordinal)
             .Replace("\r", "\\r", StringComparison.Ordinal);
 
-    private static string BuildDashboardHtml(string privacyMode) =>
-        DashboardHtmlTemplate.Replace("__PRIVACY_MODE__", WebUtility.HtmlEncode(privacyMode), StringComparison.Ordinal);
+    private static string BuildDashboardHtml(string privacyMode, string didMode) =>
+        DashboardHtmlTemplate
+            .Replace("__PRIVACY_MODE__", WebUtility.HtmlEncode(privacyMode), StringComparison.Ordinal)
+            .Replace("__DID_MODE__", WebUtility.HtmlEncode(didMode), StringComparison.Ordinal);
 
     private const string DashboardHtmlTemplate = """
                                          <!doctype html>
@@ -313,6 +318,7 @@ public sealed class MonitoringHttpServer : IDisposable
                                           <body>
                                             <h1>SwarmKeyDb Dashboard</h1>
                                             <p>Privacy Mode: <strong>__PRIVACY_MODE__</strong></p>
+                                             <p>DID Auth Mode: <strong>__DID_MODE__</strong></p>
                                             <p>Readiness: <span id="ready-status">loading...</span></p>
                                             <h2>Cross-chain replication health</h2>
                                             <table>

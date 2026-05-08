@@ -38,6 +38,16 @@ public static class ServiceCollectionExtensions
                     sp.GetRequiredService<IEthAddressAccessor>());
             }
 
+            var didOptions = sp.GetService<IOptions<SwarmKeyDbOptions>>()?.Value;
+            if (didOptions?.DidMode != DidAuthMode.None)
+            {
+                var provider = sp.GetService<IDecentralizedIdentityProvider>()
+                    ?? new EthrDidProvider(new EthrDidProviderOptions { RpcUrl = didOptions?.DidRpcUrl });
+                var contextAccessor = sp.GetService<IDidContextAccessor>()
+                    ?? new AsyncLocalDidContextAccessor();
+                store = new DidAuthKeyValueStore(store, provider, contextAccessor, didOptions!.DidMode);
+            }
+
             store = new EncryptingKeyValueStore(
                 store,
                 keyProvider,

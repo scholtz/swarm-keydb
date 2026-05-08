@@ -2,11 +2,13 @@ import asyncio
 import unittest
 
 from swarm_keydb import AsyncSwarmKeyDb, KeyNotFoundError, PrivacyMode, SwarmKeyDb
+from swarm_keydb.client import DidAuthMode
 
 
 class FakeRedis:
     def __init__(self):
         self.store = {}
+        self.commands = []
 
     def get(self, key):
         return self.store.get(key)
@@ -33,12 +35,15 @@ class FakeRedis:
         self.store[key] = value
 
     def execute_command(self, *args):
+        self.commands.append(args)
         if args[0] == "BACKUP":
             return "swarm://backup-ref"
         if args[0] == "RESTOREDB":
             return 2
         if args[0] == "ROTATEKEY":
             return "swarm://rotation-ref"
+        if args[0] == "AUTHDID":
+            return "OK"
         raise AssertionError(f"unexpected command {args[0]}")
 
 
@@ -119,6 +124,38 @@ class SwarmKeyDbTests(unittest.TestCase):
         db.put("secret:key", "value")
         self.assertIn("secret:key", db.list("secret:*"))
         self.assertNotIn("secret:key", backend.store)
+
+    def test_did_auth_mode_option(self):
+        backend = FakeRedis()
+        db = SwarmKeyDb(
+            host="localhost",
+            port=6379,
+            redis_client=backend,
+            did_mode=DidAuthMode.ETHR_DID,
+            did_rpc_url="http://localhost:8545",
+        )
+        self.assertEqual(db._did_mode, DidAuthMode.ETHR_DID)
+        self.assertEqual(db._did_rpc_url, "http://localhost:8545")
+
+    def test_set_did_sends_authdid_without_proof(self):
+        backend = FakeRedis()
+        db = SwarmKeyDb(host="localhost", port=6379, redis_client=backend)
+        db.set_did("did:ethr:0x1111111111111111111111111111111111111111")
+        self.assertEqual(db._current_did, "did:ethr:0x1111111111111111111111111111111111111111")
+        self.assertEqual(backend.commands, [("AUTHDID", "did:ethr:0x1111111111111111111111111111111111111111")])
+
+    def test_set_did_sends_authdid_with_proof(self):
+        backend = FakeRedis()
+        db = SwarmKeyDb(host="localhost", port=6379, redis_client=backend)
+        db.set_did("did:ethr:0x1234", "msg", "0xsig")
+        self.assertEqual(backend.commands, [("AUTHDID", "did:ethr:0x1234", "msg", "0xsig")])
+
+    def test_clear_did_resets_context(self):
+        backend = FakeRedis()
+        db = SwarmKeyDb(host="localhost", port=6379, redis_client=backend)
+        db._current_did = "did:ethr:0x1111111111111111111111111111111111111111"
+        db.clear_did()
+        self.assertIsNone(db._current_did)
 
 
 class AsyncSwarmKeyDbTests(unittest.IsolatedAsyncioTestCase):

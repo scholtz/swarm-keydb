@@ -31,7 +31,23 @@ type Options struct {
 	Password      string
 	PrivacyMode   PrivacyMode
 	PrivacyKeyHex string
+	// DidMode sets the DID authentication mode. Defaults to DidAuthModeNone.
+	DidMode   DidAuthMode
+	// DidRpcUrl is the Ethereum JSON-RPC endpoint used for on-chain DID controller lookups.
+	DidRpcUrl string
+	// DidMethod is the DID method string, e.g. "ethr" (default).
+	DidMethod string
 }
+
+// DidAuthMode controls whether DID authentication is required for store operations.
+type DidAuthMode string
+
+const (
+	// DidAuthModeNone disables DID authentication (default).
+	DidAuthModeNone   DidAuthMode = "none"
+	// DidAuthModeEthrDid requires callers to authenticate with a did:ethr identity.
+	DidAuthModeEthrDid DidAuthMode = "ethr_did"
+)
 
 type Client struct {
 	redis            RedisClient
@@ -39,6 +55,9 @@ type Client struct {
 	privacyKey       []byte
 	tokenToPlain     map[string]string
 	privacyConfigErr error
+	didMode          DidAuthMode
+	didRpcUrl        string
+	currentDid       string
 }
 
 type PrivacyMode string
@@ -76,13 +95,39 @@ func newClientWithOptions(r RedisClient, opts Options) *Client {
 	if mode != PrivacyModeNone {
 		privacyKey, privacyConfigErr = hex.DecodeString(opts.PrivacyKeyHex)
 	}
+	didMode := opts.DidMode
+	if didMode == "" {
+		didMode = DidAuthModeNone
+	}
 	return &Client{
 		redis:            r,
 		privacyMode:      mode,
 		privacyKey:       privacyKey,
 		tokenToPlain:     map[string]string{},
 		privacyConfigErr: privacyConfigErr,
+		didMode:          didMode,
+		didRpcUrl:        opts.DidRpcUrl,
 	}
+}
+
+// SetDid registers a decentralized identity (DID) for the current connection.
+// When proofMessage and proofSignature are non-empty the server verifies the
+// Ethereum personal-sign proof immediately via the AUTHDID command.
+// All subsequent operations on this connection are performed under the given DID.
+func (c *Client) SetDid(ctx context.Context, did, proofMessage, proofSignature string) error {
+	c.currentDid = did
+	args := []interface{}{"AUTHDID", did}
+	if proofMessage != "" && proofSignature != "" {
+		args = append(args, proofMessage, proofSignature)
+	}
+	return c.redis.Do(ctx, args...).Err()
+}
+
+// ClearDid clears the DID context from this client instance.
+// Note: the server-side DID binding persists until the connection is closed or
+// overwritten with a new AUTHDID call.
+func (c *Client) ClearDid() {
+	c.currentDid = ""
 }
 
 func (c *Client) Get(ctx context.Context, key string) (string, error) {

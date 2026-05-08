@@ -9,6 +9,8 @@ public sealed class RedisCommandProcessor : IDisposable
 {
     private readonly IKeyValueStore _store;
     private readonly IEthAddressAccessor? _ethAddressAccessor;
+    private readonly IDidContextAccessor? _didContextAccessor;
+    private readonly IDecentralizedIdentityProvider? _didProvider;
     private readonly BackupService? _backupService;
     private readonly RestoreService? _restoreService;
     private readonly KeyRotationService? _keyRotationService;
@@ -23,10 +25,14 @@ public sealed class RedisCommandProcessor : IDisposable
         RestoreService? restoreService = null,
         KeyRotationService? keyRotationService = null,
         IRedisCommandObserver? observer = null,
-        ILogger<RedisCommandProcessor>? logger = null)
+        ILogger<RedisCommandProcessor>? logger = null,
+        IDidContextAccessor? didContextAccessor = null,
+        IDecentralizedIdentityProvider? didProvider = null)
     {
         _store = store;
         _ethAddressAccessor = ethAddressAccessor;
+        _didContextAccessor = didContextAccessor;
+        _didProvider = didProvider;
         _backupService = backupService;
         _restoreService = restoreService;
         _keyRotationService = keyRotationService;
@@ -39,11 +45,18 @@ public sealed class RedisCommandProcessor : IDisposable
         var reader = new RespReader(input);
         var writer = new RespWriter(output);
         string? currentAddress = null;
+        DidContext? currentDidContext = null;
 
         if (_ethAddressAccessor is not null)
         {
             _ethAddressAccessor.CurrentAddress = null;
         }
+
+        if (_didContextAccessor is not null)
+        {
+            _didContextAccessor.Current = null;
+        }
+
         try
         {
             while (!cancellationToken.IsCancellationRequested)
@@ -68,11 +81,22 @@ public sealed class RedisCommandProcessor : IDisposable
                     _ethAddressAccessor.CurrentAddress = currentAddress;
                 }
 
+                if (_didContextAccessor is not null)
+                {
+                    _didContextAccessor.Current = currentDidContext;
+                }
+
                 var response = await ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
                 if (TryGetAuthorizedAddress(request, response, out var authorizedAddress))
                 {
                     currentAddress = authorizedAddress;
                 }
+
+                if (TryGetAuthorizedDidContext(request, response, out var authorizedDidContext))
+                {
+                    currentDidContext = authorizedDidContext;
+                }
+
                 await writer.WriteAsync(response, cancellationToken).ConfigureAwait(false);
                 if (IsQuit(request))
                 {
@@ -85,6 +109,11 @@ public sealed class RedisCommandProcessor : IDisposable
             if (_ethAddressAccessor is not null)
             {
                 _ethAddressAccessor.CurrentAddress = null;
+            }
+
+            if (_didContextAccessor is not null)
+            {
+                _didContextAccessor.Current = null;
             }
         }
     }
@@ -121,6 +150,7 @@ public sealed class RedisCommandProcessor : IDisposable
                 "PING" => args.Count > 1 ? RespValue.BulkString(args[1].Bytes) : RespValue.SimpleString("PONG"),
                 "ECHO" => RequireArity(args, 2) ?? RespValue.BulkString(args[1].Bytes),
                 "AUTHADDR" => SetCallerAddress(args),
+                "AUTHDID" => await SetDidContextAsync(args, cancellationToken).ConfigureAwait(false),
                 "SET" => await SetAsync(args, cancellationToken).ConfigureAwait(false),
                 "SETEX" => await SetExAsync(args, milliseconds: false, cancellationToken).ConfigureAwait(false),
                 "PSETEX" => await SetExAsync(args, milliseconds: true, cancellationToken).ConfigureAwait(false),
@@ -149,6 +179,10 @@ public sealed class RedisCommandProcessor : IDisposable
             };
         }
         catch (AccessDeniedException ex)
+        {
+            response = RespValue.Error("ERR " + ex.Message);
+        }
+        catch (DidAuthorizationException ex)
         {
             response = RespValue.Error("ERR " + ex.Message);
         }
@@ -192,6 +226,47 @@ public sealed class RedisCommandProcessor : IDisposable
         }
 
         _ethAddressAccessor.CurrentAddress = EthereumAddress.Normalize(args[1].AsString());
+        return RespValue.SimpleString("OK");
+    }
+
+    /// <summary>
+    /// Handles the <c>AUTHDID &lt;did&gt; [&lt;proof_message&gt; &lt;proof_signature&gt;]</c> command.
+    /// Registers the caller's DID (and optional Ethereum personal-sign proof) for subsequent operations.
+    /// When a proof is provided it is verified immediately.
+    /// </summary>
+    private async Task<RespValue> SetDidContextAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        if (args.Count < 2)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'AUTHDID' command");
+        }
+
+        if (_didContextAccessor is null)
+        {
+            return RespValue.Error("ERR AUTHDID is not available.");
+        }
+
+        var did = args[1].AsString();
+        DidProof? proof = null;
+
+        if (args.Count >= 4)
+        {
+            var message = args[2].AsString();
+            var signature = args[3].AsString();
+            proof = new DidProof(message, signature);
+
+            // Verify the proof immediately if a provider is configured.
+            if (_didProvider is not null)
+            {
+                var ok = await _didProvider.AuthenticateAsync(did, proof, cancellationToken).ConfigureAwait(false);
+                if (!ok)
+                {
+                    return RespValue.Error("ERR DID authentication failed: invalid proof.");
+                }
+            }
+        }
+
+        _didContextAccessor.Current = new DidContext(did, proof);
         return RespValue.SimpleString("OK");
     }
 
@@ -627,6 +702,34 @@ public sealed class RedisCommandProcessor : IDisposable
         }
 
         address = EthereumAddress.Normalize(items[1].AsString());
+        return true;
+    }
+
+    private static bool TryGetAuthorizedDidContext(RespValue request, RespValue response, out DidContext? context)
+    {
+        context = null;
+        if (response.Type == RespType.Error ||
+            request.Type != RespType.Array ||
+            request.Items is null ||
+            !request.Items[0].AsString().Equals("AUTHDID", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var items = request.Items;
+        if (items.Count < 2)
+        {
+            return false;
+        }
+
+        var did = items[1].AsString();
+        DidProof? proof = null;
+        if (items.Count >= 4)
+        {
+            proof = new DidProof(items[2].AsString(), items[3].AsString());
+        }
+
+        context = new DidContext(did, proof);
         return true;
     }
 

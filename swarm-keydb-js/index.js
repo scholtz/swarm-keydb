@@ -9,7 +9,29 @@ export const PrivacyMode = Object.freeze({
   FullPSI: 'full_psi'
 });
 
+/**
+ * DID authentication modes supported by SwarmKeyDB.
+ * @enum {string}
+ */
+export const DidAuthMode = Object.freeze({
+  /** No DID authentication (default). */
+  None: 'none',
+  /** Authenticate callers using did:ethr backed by an Ethereum address. */
+  EthrDid: 'ethr_did'
+});
+
 export class SwarmKeyDb {
+  /**
+   * @param {object} options - Connection and feature options.
+   * @param {string}  options.host        - Redis host.
+   * @param {number}  options.port        - Redis port.
+   * @param {string}  [options.privacyMode]  - Privacy mode (see PrivacyMode).
+   * @param {string}  [options.privacyKey]   - Privacy HMAC key (hex).
+   * @param {string}  [options.didMode]      - DID authentication mode (see DidAuthMode).
+   * @param {string}  [options.didRpcUrl]    - Ethereum RPC URL used for on-chain DID resolution.
+   * @param {string}  [options.didMethod]    - DID method string, e.g. "ethr" (default).
+   * @param {Function} [clientFactory]     - Optional factory for the underlying Redis client (for testing).
+   */
   constructor(options, clientFactory) {
     this.options = options;
     this.clientFactory = clientFactory ?? ((url) => createClient({ url }));
@@ -17,6 +39,10 @@ export class SwarmKeyDb {
     this.privacyMode = (options.privacyMode ?? PrivacyMode.None).toLowerCase();
     this.privacyKey = options.privacyKey;
     this.tokenToPlain = new Map();
+    this.didMode = options.didMode ?? DidAuthMode.None;
+    this._currentDid = null;
+    this._currentProofMessage = null;
+    this._currentProofSignature = null;
   }
 
   async connect() {
@@ -48,6 +74,37 @@ export class SwarmKeyDb {
     }
 
     this.client = null;
+  }
+
+  /**
+   * Registers a decentralized identity (DID) for the current connection.
+   * When both `proofMessage` and `proofSignature` are provided, the server verifies the
+   * Ethereum personal-sign proof immediately.  All subsequent operations on this connection
+   * are performed under the given DID.
+   *
+   * @param {string} did              - DID string, e.g. `did:ethr:0x…`.
+   * @param {string} [proofMessage]   - Plain-text challenge that was signed.
+   * @param {string} [proofSignature] - 65-byte hex-encoded Ethereum personal-sign signature.
+   */
+  async setDid(did, proofMessage, proofSignature) {
+    this._currentDid = did;
+    this._currentProofMessage = proofMessage ?? null;
+    this._currentProofSignature = proofSignature ?? null;
+
+    const args = ['AUTHDID', did];
+    if (proofMessage && proofSignature) {
+      args.push(proofMessage, proofSignature);
+    }
+    await this.client.sendCommand(args);
+  }
+
+  /**
+   * Clears the current DID context from this connection.
+   */
+  clearDid() {
+    this._currentDid = null;
+    this._currentProofMessage = null;
+    this._currentProofSignature = null;
   }
 
   async get(key) {

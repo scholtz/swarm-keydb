@@ -22,6 +22,12 @@ class PrivacyMode:
     FULL_PSI = "full_psi"
 
 
+class DidAuthMode:
+    """DID authentication modes supported by SwarmKeyDB."""
+    NONE = "none"
+    ETHR_DID = "ethr_did"
+
+
 class SwarmKeyDb:
     def __init__(
         self,
@@ -31,11 +37,45 @@ class SwarmKeyDb:
         redis_client: Any = None,
         privacy_mode: str = PrivacyMode.NONE,
         privacy_key: Optional[str] = None,
+        did_mode: str = DidAuthMode.NONE,
+        did_rpc_url: Optional[str] = None,
+        did_method: str = "ethr",
     ):
         self._client = redis_client or redis.Redis(host=host, port=port, password=password, decode_responses=True)
         self._privacy_mode = privacy_mode
         self._privacy_key = privacy_key
         self._token_to_plain: dict[str, str] = {}
+        self._did_mode = did_mode
+        self._did_rpc_url = did_rpc_url
+        self._did_method = did_method
+        self._current_did: Optional[str] = None
+
+    def set_did(
+        self,
+        did: str,
+        proof_message: Optional[str] = None,
+        proof_signature: Optional[str] = None,
+    ) -> None:
+        """Register a DID for subsequent operations on this connection.
+
+        When *proof_message* and *proof_signature* are provided, they are forwarded to the
+        server as part of the ``AUTHDID`` command so that the server can verify the
+        Ethereum personal-sign proof immediately.
+
+        Args:
+            did: DID string, e.g. ``did:ethr:0x…``.
+            proof_message: Plain-text challenge that was signed.
+            proof_signature: 65-byte hex-encoded Ethereum personal-sign signature.
+        """
+        self._current_did = did
+        args: list = ["AUTHDID", did]
+        if proof_message and proof_signature:
+            args += [proof_message, proof_signature]
+        self._client.execute_command(*args)
+
+    def clear_did(self) -> None:
+        """Clear the current DID context from this connection."""
+        self._current_did = None
 
     def get(self, key: str) -> Optional[str]:
         _validate_key(key)

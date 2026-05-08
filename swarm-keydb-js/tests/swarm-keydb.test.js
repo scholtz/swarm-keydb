@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ConnectionError, KeyNotFoundError, PrivacyMode, SwarmKeyDb } from '../index.js';
+import { ConnectionError, KeyNotFoundError, PrivacyMode, DidAuthMode, SwarmKeyDb } from '../index.js';
 
 function createMockClient(overrides = {}) {
   return {
@@ -126,4 +126,40 @@ test('privacy mode tokenizes outbound keys while list stays plaintext', async ()
   assert.notEqual(lastSetKey, 'secret:key');
   assert.notEqual(lastGetKey, 'secret:key');
   assert.deepEqual(await db.list('secret:*'), ['secret:key']);
+});
+
+test('didAuthMode option is stored on instance', () => {
+  const db = new SwarmKeyDb({ host: 'localhost', port: 6379, didMode: 'ethr_did', didRpcUrl: 'http://localhost:8545' }, () => createMockClient());
+  assert.equal(db.didMode, 'ethr_did');
+});
+
+test('setDid sends AUTHDID command without proof', async () => {
+  const commands = [];
+  const mock = createMockClient({
+    sendCommand: async (args) => { commands.push(args); return 'OK'; }
+  });
+  const db = new SwarmKeyDb({ host: 'localhost', port: 6379 }, () => mock);
+  await db.connect();
+  await db.setDid('did:ethr:0x1111111111111111111111111111111111111111');
+  assert.deepEqual(commands, [['AUTHDID', 'did:ethr:0x1111111111111111111111111111111111111111']]);
+  assert.equal(db._currentDid, 'did:ethr:0x1111111111111111111111111111111111111111');
+});
+
+test('setDid sends AUTHDID command with proof', async () => {
+  const commands = [];
+  const mock = createMockClient({
+    sendCommand: async (args) => { commands.push(args); return 'OK'; }
+  });
+  const db = new SwarmKeyDb({ host: 'localhost', port: 6379 }, () => mock);
+  await db.connect();
+  await db.setDid('did:ethr:0x1234', 'msg', '0xsig');
+  assert.deepEqual(commands, [['AUTHDID', 'did:ethr:0x1234', 'msg', '0xsig']]);
+});
+
+test('clearDid resets DID context', async () => {
+  const db = new SwarmKeyDb({ host: 'localhost', port: 6379 }, () => createMockClient());
+  await db.connect();
+  db._currentDid = 'did:ethr:0x1111111111111111111111111111111111111111';
+  db.clearDid();
+  assert.equal(db._currentDid, null);
 });
