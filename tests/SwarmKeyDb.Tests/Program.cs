@@ -11,6 +11,12 @@ var tests = new (string Name, Func<Task> Test)[]
     ("bee client parses upload references", BeeClientParsesUploadReferenceAsync),
     ("redis protocol supports set get exists delete", RedisProtocolRoundTripAsync),
     ("redis protocol supports keys and scan", RedisProtocolKeyIterationAsync),
+    ("prefix scan returns matching keys", PrefixScanReturnsMatchingKeysAsync),
+    ("range scan supports boundaries and reverse order", RangeScanSupportsBoundariesAndReverseOrderAsync),
+    ("range scan rejects invalid bounds", RangeScanRejectsInvalidBoundsAsync),
+    ("scan async returns paginated opaque cursor", ScanAsyncReturnsPaginatedOpaqueCursorAsync),
+    ("query async applies key and value predicates", QueryAsyncAppliesKeyAndValuePredicatesAsync),
+    ("persistent file index supports restart querying", PersistentFileIndexSupportsRestartQueryingAsync),
     ("mget returns nulls for missing keys", MGetReturnsNullsForMissingKeysAsync),
     ("mset sets multiple keys atomically", MSetSetsMultipleKeysAtomicallyAsync),
     ("setex stores value with ttl", SetExStoresValueWithTtlAsync),
@@ -129,6 +135,119 @@ static async Task RedisProtocolKeyIterationAsync()
 
     Assert(response.Contains("*2\r\n$5\r\napp:a\r\n$5\r\napp:b\r\n", StringComparison.Ordinal), "KEYS should return matching app keys.");
     Assert(response.EndsWith("*2\r\n$1\r\n1\r\n*1\r\n$5\r\napp:a\r\n", StringComparison.Ordinal), "SCAN should return next cursor and one key.");
+}
+
+static async Task PrefixScanReturnsMatchingKeysAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    await store.PutAsync("user:alice:profile", Encoding.UTF8.GetBytes("1"));
+    await store.PutAsync("user:alice:settings", Encoding.UTF8.GetBytes("2"));
+    await store.PutAsync("user:bob:profile", Encoding.UTF8.GetBytes("3"));
+
+    var keys = await store.GetKeysWithPrefixAsync("user:alice:");
+    AssertSequenceEqual(new[] { "user:alice:profile", "user:alice:settings" }, keys);
+}
+
+static async Task RangeScanSupportsBoundariesAndReverseOrderAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    await store.PutAsync("k:1", Encoding.UTF8.GetBytes("one"));
+    await store.PutAsync("k:2", Encoding.UTF8.GetBytes("two"));
+    await store.PutAsync("k:3", Encoding.UTF8.GetBytes("three"));
+
+    var descending = await store.GetKeyRangeAsync("k:1", "k:3", new RangeScanOptions
+    {
+        IncludeStart = false,
+        IncludeEnd = true,
+        Descending = true,
+        IncludeValues = true
+    });
+
+    AssertSequenceEqual(new[] { "k:3", "k:2" }, descending.Select(static item => item.Key));
+    AssertEqual("three", Encoding.UTF8.GetString(descending[0].Value!));
+    AssertEqual("two", Encoding.UTF8.GetString(descending[1].Value!));
+}
+
+static async Task RangeScanRejectsInvalidBoundsAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    await store.PutAsync("a", Encoding.UTF8.GetBytes("1"));
+
+    var threw = false;
+    try
+    {
+        _ = await store.GetKeyRangeAsync("z", "a");
+    }
+    catch (ArgumentException ex) when (ex.Message.Contains("startKey must be lexicographically ≤ endKey.", StringComparison.Ordinal))
+    {
+        threw = true;
+    }
+
+    Assert(threw, "Expected a clear error when startKey is greater than endKey.");
+}
+
+static async Task ScanAsyncReturnsPaginatedOpaqueCursorAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    await store.PutAsync("page:1", Encoding.UTF8.GetBytes("1"));
+    await store.PutAsync("page:2", Encoding.UTF8.GetBytes("2"));
+    await store.PutAsync("page:3", Encoding.UTF8.GetBytes("3"));
+
+    var first = await store.ScanAsync(null, 2);
+    AssertSequenceEqual(new[] { "page:1", "page:2" }, first.Keys);
+    Assert(!string.IsNullOrEmpty(first.NextCursor), "Expected non-empty cursor for additional pages.");
+    Assert(!first.NextCursor.Contains("page:2", StringComparison.Ordinal), "Cursor should be opaque, not a raw key.");
+
+    var second = await store.ScanAsync(first.NextCursor, 2);
+    AssertSequenceEqual(new[] { "page:3" }, second.Keys);
+    AssertEqual(string.Empty, second.NextCursor);
+}
+
+static async Task QueryAsyncAppliesKeyAndValuePredicatesAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    await store.PutAsync("msg:1", Encoding.UTF8.GetBytes("hello"));
+    await store.PutAsync("msg:2", Encoding.UTF8.GetBytes("bye"));
+    await store.PutAsync("cfg:1", Encoding.UTF8.GetBytes("hello"));
+
+    var matches = new List<string>();
+    await foreach (var item in store.QueryAsync(
+                       key => key.StartsWith("msg:", StringComparison.Ordinal),
+                       value => Encoding.UTF8.GetString(value).Contains("hello", StringComparison.Ordinal)))
+    {
+        matches.Add(item.Key);
+    }
+
+    AssertSequenceEqual(new[] { "msg:1" }, matches);
+}
+
+static async Task PersistentFileIndexSupportsRestartQueryingAsync()
+{
+    var root = Path.Combine(Path.GetTempPath(), "swarm-keydb-tests", Guid.NewGuid().ToString("N"));
+    var indexPath = Path.Combine(root, "index.json");
+    Directory.CreateDirectory(root);
+    try
+    {
+        var swarm = new InMemorySwarmClient();
+        var store1 = new SwarmKeyValueStore(swarm, new FileKeyIndex(indexPath));
+        await store1.PutAsync("orders:001", Encoding.UTF8.GetBytes("first"));
+        await store1.PutAsync("orders:002", Encoding.UTF8.GetBytes("second"));
+        await store1.PutAsync("profile:001", Encoding.UTF8.GetBytes("other"));
+
+        var store2 = new SwarmKeyValueStore(swarm, new FileKeyIndex(indexPath));
+        var prefix = await store2.GetKeysWithPrefixAsync("orders:");
+        var range = await store2.GetKeyRangeAsync("orders:001", "orders:999");
+
+        AssertSequenceEqual(new[] { "orders:001", "orders:002" }, prefix);
+        AssertSequenceEqual(new[] { "orders:001", "orders:002" }, range.Select(static item => item.Key));
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
 }
 
 static async Task MGetReturnsNullsForMissingKeysAsync()

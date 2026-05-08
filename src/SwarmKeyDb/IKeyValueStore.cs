@@ -32,8 +32,178 @@ public interface IKeyValueStore
     Task<byte[]?> GetAsync(string key, CancellationToken cancellationToken = default);
     Task<bool> DeleteAsync(string key, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<string>> ListKeysAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns all keys that begin with the provided prefix.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// var keys = await store.GetKeysWithPrefixAsync("user:alice:");
+    /// </code>
+    /// </example>
+    async Task<IReadOnlyList<string>> GetKeysWithPrefixAsync(string prefix, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(prefix);
+        var keys = await ListKeysAsync(cancellationToken).ConfigureAwait(false);
+        return keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)).ToArray();
+    }
+
+    /// <summary>
+    /// Returns keys in lexicographic order between <paramref name="startKey"/> and <paramref name="endKey"/>.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// var items = await store.GetKeyRangeAsync("order:1000", "order:1999", new RangeScanOptions { IncludeValues = true });
+    /// </code>
+    /// </example>
+    async Task<IReadOnlyList<RangeScanEntry>> GetKeyRangeAsync(
+        string? startKey,
+        string? endKey,
+        RangeScanOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        options ??= new RangeScanOptions();
+        if (startKey is not null && endKey is not null && StringComparer.Ordinal.Compare(startKey, endKey) > 0)
+        {
+            throw new ArgumentException("startKey must be lexicographically ≤ endKey.", nameof(startKey));
+        }
+
+        if (options.Limit is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "Limit must be greater than zero.");
+        }
+
+        var keys = await ListKeysAsync(cancellationToken).ConfigureAwait(false);
+        var filtered = keys.Where(key =>
+            MatchesLowerBound(key, startKey, options.IncludeStart) &&
+            MatchesUpperBound(key, endKey, options.IncludeEnd));
+
+        filtered = options.Descending
+            ? filtered.OrderByDescending(static key => key, StringComparer.Ordinal)
+            : filtered.OrderBy(static key => key, StringComparer.Ordinal);
+
+        if (options.Limit is { } limit)
+        {
+            filtered = filtered.Take(limit);
+        }
+
+        if (!options.IncludeValues)
+        {
+            return filtered.Select(static key => new RangeScanEntry(key, Value: null)).ToArray();
+        }
+
+        var entries = new List<RangeScanEntry>();
+        foreach (var key in filtered)
+        {
+            var value = await GetAsync(key, cancellationToken).ConfigureAwait(false);
+            entries.Add(new RangeScanEntry(key, value));
+        }
+
+        return entries;
+    }
+
+    /// <summary>
+    /// Streams keys and values matching predicates.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// await foreach (var item in store.QueryAsync(key => key.StartsWith("orders:"), value => value.Length &gt; 0))
+    /// {
+    ///     Console.WriteLine(item.Key);
+    /// }
+    /// </code>
+    /// </example>
+    async IAsyncEnumerable<KeyValuePair<string, byte[]>> QueryAsync(
+        Func<string, bool> keyPredicate,
+        Func<byte[], bool>? valuePredicate = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(keyPredicate);
+        var keys = await ListKeysAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var key in keys)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!keyPredicate(key))
+            {
+                continue;
+            }
+
+            var value = await GetAsync(key, cancellationToken).ConfigureAwait(false);
+            if (value is null)
+            {
+                continue;
+            }
+
+            if (valuePredicate is not null && !valuePredicate(value))
+            {
+                continue;
+            }
+
+            yield return new KeyValuePair<string, byte[]>(key, value);
+        }
+    }
+
+    /// <summary>
+    /// Iterates keys using an opaque cursor.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// var page = await store.ScanAsync(null, 50);
+    /// while (!string.IsNullOrEmpty(page.NextCursor))
+    /// {
+    ///     page = await store.ScanAsync(page.NextCursor, 50);
+    /// }
+    /// </code>
+    /// </example>
+    async Task<ScanResult> ScanAsync(string? cursor, int count, CancellationToken cancellationToken = default)
+    {
+        if (count <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(count), "count must be greater than zero.");
+        }
+
+        var keys = await ListKeysAsync(cancellationToken).ConfigureAwait(false);
+        var startIndex = DecodeCursor(cursor, keys.Count);
+        var page = keys.Skip(startIndex).Take(count).ToArray();
+        var nextIndex = startIndex + page.Length;
+        var nextCursor = nextIndex >= keys.Count ? string.Empty : EncodeCursor(nextIndex);
+        return new ScanResult(nextCursor, page);
+    }
+
     Task<bool> SetTtlAsync(string key, TimeSpan ttl, CancellationToken cancellationToken = default) => Task.FromResult(false);
     Task<(bool Exists, TimeSpan? Ttl)> GetTtlAsync(string key, CancellationToken cancellationToken = default) =>
         Task.FromResult((false, (TimeSpan?)null));
     Task<bool> RemoveTtlAsync(string key, CancellationToken cancellationToken = default) => Task.FromResult(false);
+
+    private static bool MatchesLowerBound(string key, string? startKey, bool includeStart) =>
+        startKey is null || StringComparer.Ordinal.Compare(key, startKey) > 0 || (includeStart && key.Equals(startKey, StringComparison.Ordinal));
+
+    private static bool MatchesUpperBound(string key, string? endKey, bool includeEnd) =>
+        endKey is null || StringComparer.Ordinal.Compare(key, endKey) < 0 || (includeEnd && key.Equals(endKey, StringComparison.Ordinal));
+
+    private static int DecodeCursor(string? cursor, int upperBound)
+    {
+        if (string.IsNullOrEmpty(cursor))
+        {
+            return 0;
+        }
+
+        try
+        {
+            var raw = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(cursor));
+            if (!int.TryParse(raw, out var offset) || offset < 0 || offset > upperBound)
+            {
+                throw new ArgumentException("cursor is invalid.", nameof(cursor));
+            }
+
+            return offset;
+        }
+        catch (FormatException)
+        {
+            throw new ArgumentException("cursor is invalid.", nameof(cursor));
+        }
+    }
+
+    private static string EncodeCursor(int value) =>
+        Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(value.ToString(System.Globalization.CultureInfo.InvariantCulture)));
 }
