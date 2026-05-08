@@ -32,7 +32,9 @@ public sealed class CliExecutionOptions
 }
 
 public sealed record RuntimeSettings(
+    string Backend,
     string BeeUrl,
+    string IpfsApiUrl,
     string BatchId,
     OutputFormat Output,
     string ConfigPath,
@@ -52,7 +54,9 @@ public sealed class EnvironmentSnapshot
 {
     public string? Home { get; init; }
     public string? UserProfile { get; init; }
+    public string? Backend { get; init; }
     public string? BeeUrl { get; init; }
+    public string? IpfsApiUrl { get; init; }
     public string? BatchId { get; init; }
     public string? Output { get; init; }
 
@@ -60,7 +64,9 @@ public sealed class EnvironmentSnapshot
     {
         Home = Environment.GetEnvironmentVariable("HOME"),
         UserProfile = Environment.GetEnvironmentVariable("USERPROFILE"),
+        Backend = Environment.GetEnvironmentVariable("SWARMKEYDB_BACKEND"),
         BeeUrl = Environment.GetEnvironmentVariable("SWARMKEYDB_BEE_URL"),
+        IpfsApiUrl = Environment.GetEnvironmentVariable("SWARMKEYDB_IPFS_API_URL"),
         BatchId = Environment.GetEnvironmentVariable("SWARMKEYDB_BATCH_ID"),
         Output = Environment.GetEnvironmentVariable("SWARMKEYDB_OUTPUT")
     };
@@ -69,6 +75,8 @@ public sealed class EnvironmentSnapshot
 internal sealed class CliRuntime
 {
     private const string DefaultBeeUrl = "http://localhost:1633/";
+    private const string DefaultIpfsApiUrl = "http://localhost:5001/";
+    private const string DefaultBackend = "swarm";
     private readonly TextWriter _stdout;
     private readonly TextWriter _stderr;
     private readonly CliExecutionOptions _options;
@@ -144,17 +152,30 @@ internal sealed class CliRuntime
         if (subcommand.Equals("set", StringComparison.OrdinalIgnoreCase))
         {
             var beeUrl = parsed.TryGetOptionValue("--bee-url");
+            var backend = parsed.TryGetOptionValue("--backend");
+            var ipfsApiUrl = parsed.TryGetOptionValue("--ipfs-api-url");
             var batchId = parsed.TryGetOptionValue("--batch-id");
             var outputText = parsed.TryGetOptionValue("--output");
-            if (beeUrl is null && batchId is null && outputText is null)
+            if (beeUrl is null && backend is null && ipfsApiUrl is null && batchId is null && outputText is null)
             {
-                throw new CliUsageException("No values provided. Use --bee-url, --batch-id, or --output.");
+                throw new CliUsageException("No values provided. Use --backend, --bee-url, --ipfs-api-url, --batch-id, or --output.");
             }
 
             if (beeUrl is not null)
             {
                 ValidateUri(beeUrl);
                 config.BeeUrl = beeUrl;
+            }
+
+            if (ipfsApiUrl is not null)
+            {
+                ValidateUri(ipfsApiUrl);
+                config.IpfsApiUrl = ipfsApiUrl;
+            }
+
+            if (backend is not null)
+            {
+                config.Backend = ParseBackend(backend);
             }
 
             if (batchId is not null)
@@ -169,7 +190,7 @@ internal sealed class CliRuntime
 
             await CliConfigStore.SaveAsync(configPath, config, cancellationToken).ConfigureAwait(false);
             await WriteOutputAsync(ParseOutput(parsed.TryGetOptionValue("--output") ?? config.Output ?? "plain"),
-                new { saved = true, configPath, config.BeeUrl, config.BatchId, config.Output },
+                new { saved = true, configPath, config.Backend, config.BeeUrl, config.IpfsApiUrl, config.BatchId, config.Output },
                 $"Saved config at {configPath}").ConfigureAwait(false);
             return 0;
         }
@@ -181,17 +202,19 @@ internal sealed class CliRuntime
             if (string.IsNullOrWhiteSpace(key))
             {
                 await WriteOutputAsync(output,
-                    new { config.BeeUrl, config.BatchId, config.Output, configPath },
-                    $"bee-url={config.BeeUrl ?? string.Empty}\nbatch-id={config.BatchId ?? string.Empty}\noutput={config.Output ?? "plain"}\nconfig={configPath}").ConfigureAwait(false);
+                    new { config.Backend, config.BeeUrl, config.IpfsApiUrl, config.BatchId, config.Output, configPath },
+                    $"backend={config.Backend ?? DefaultBackend}\nbee-url={config.BeeUrl ?? string.Empty}\nipfs-api-url={config.IpfsApiUrl ?? string.Empty}\nbatch-id={config.BatchId ?? string.Empty}\noutput={config.Output ?? "plain"}\nconfig={configPath}").ConfigureAwait(false);
                 return 0;
             }
 
             var value = key switch
             {
+                "backend" => config.Backend,
                 "bee-url" => config.BeeUrl,
+                "ipfs-api-url" => config.IpfsApiUrl,
                 "batch-id" => config.BatchId,
                 "output" => config.Output,
-                _ => throw new CliUsageException("Unsupported key. Use bee-url, batch-id, or output.")
+                _ => throw new CliUsageException("Unsupported key. Use backend, bee-url, ipfs-api-url, batch-id, or output.")
             };
 
             await WriteOutputAsync(output, new { key, value }, value ?? string.Empty).ConfigureAwait(false);
@@ -291,11 +314,13 @@ internal sealed class CliRuntime
                     {
                         keyCount = keys.Count,
                         storageBytes = totalBytes,
+                        backend = context.Settings.Backend,
                         beeUrl = context.Settings.BeeUrl,
+                        ipfsApiUrl = context.Settings.IpfsApiUrl,
                         batchId = context.Settings.BatchId,
                         indexPath = context.Settings.IndexPath
                     },
-                    $"keys={keys.Count}\nstorage-bytes={totalBytes}\nbee-url={context.Settings.BeeUrl}\nbatch-id={context.Settings.BatchId}\nindex={context.Settings.IndexPath}").ConfigureAwait(false);
+                    $"keys={keys.Count}\nstorage-bytes={totalBytes}\nbackend={context.Settings.Backend}\nbee-url={context.Settings.BeeUrl}\nipfs-api-url={context.Settings.IpfsApiUrl}\nbatch-id={context.Settings.BatchId}\nindex={context.Settings.IndexPath}").ConfigureAwait(false);
                 return 0;
             }
             case "backup":
@@ -354,14 +379,51 @@ internal sealed class CliRuntime
 
     private DataContext CreateContext(RuntimeSettings settings)
     {
-        if (string.IsNullOrWhiteSpace(settings.BatchId))
-        {
-            throw new CliUsageException("Missing Bee postage batch id. Set with 'skdb config set --batch-id <id>' or SWARMKEYDB_BATCH_ID.");
-        }
-
         try
         {
-            var swarm = _options.SwarmClientFactory(settings);
+            var backend = settings.Backend.ToLowerInvariant();
+            ISwarmClient swarm;
+            IDisposable? disposable = null;
+            switch (backend)
+            {
+                case "swarm":
+                case "bee":
+                    if (string.IsNullOrWhiteSpace(settings.BatchId))
+                    {
+                        throw new CliUsageException("Missing Bee postage batch id. Set with 'skdb config set --batch-id <id>' or SWARMKEYDB_BATCH_ID.");
+                    }
+
+                    swarm = _options.SwarmClientFactory(settings);
+                    disposable = swarm as IDisposable;
+                    break;
+                case "ipfs":
+                    var ipfs = new IpfsSwarmClient(new Uri(settings.IpfsApiUrl));
+                    swarm = ipfs;
+                    disposable = ipfs;
+                    break;
+                case "hybrid":
+                {
+                    ISwarmClient swarmBackend;
+                    IDisposable? swarmDisposable = null;
+                    if (!string.IsNullOrWhiteSpace(settings.BatchId))
+                    {
+                        swarmBackend = _options.SwarmClientFactory(settings);
+                        swarmDisposable = swarmBackend as IDisposable;
+                    }
+                    else
+                    {
+                        swarmBackend = new FileSwarmClient(Path.Combine(Path.GetDirectoryName(settings.IndexPath)!, "objects"));
+                    }
+
+                    var ipfsBackend = new IpfsSwarmClient(new Uri(settings.IpfsApiUrl));
+                    swarm = new HybridSwarmClient(swarmBackend, ipfsBackend);
+                    disposable = new CompositeDisposable([swarmDisposable, ipfsBackend]);
+                    break;
+                }
+                default:
+                    throw new CliUsageException("Invalid backend. Use swarm, ipfs, or hybrid.");
+            }
+
             var index = _options.KeyIndexFactory(settings.IndexPath);
             var keyProvider = new MutableEncryptionKeyProvider(new EncryptionOptions());
             if (!string.IsNullOrWhiteSpace(settings.KeyPath))
@@ -373,15 +435,17 @@ internal sealed class CliRuntime
                 });
             }
 
+            IKeyValueStore baseStore = new SwarmKeyValueStore(swarm, index);
+
             var store = new EncryptingKeyValueStore(
-                new SwarmKeyValueStore(swarm, index),
+                baseStore,
                 keyProvider,
                 NullLogger<EncryptingKeyValueStore>.Instance);
-            return new DataContext(new SwarmKeyDbClient(store), store, swarm, keyProvider, settings, swarm as IDisposable);
+            return new DataContext(new SwarmKeyDbClient(store), store, swarm, keyProvider, settings, disposable);
         }
         catch (UriFormatException)
         {
-            throw new CliUsageException($"Invalid Bee URL '{settings.BeeUrl}'.");
+            throw new CliUsageException("Invalid backend URL configuration.");
         }
     }
 
@@ -396,6 +460,9 @@ internal sealed class CliRuntime
             ValidateUri(beeFlag);
         }
 
+        var backend = ParseBackend(parsed.TryGetOptionValue("--backend") ?? env.Backend ?? config.Backend ?? DefaultBackend);
+        var ipfsApiUrl = parsed.TryGetOptionValue("--ipfs-api-url") ?? env.IpfsApiUrl ?? config.IpfsApiUrl ?? DefaultIpfsApiUrl;
+        ValidateUri(ipfsApiUrl);
         var beeUrl = beeFlag ?? env.BeeUrl ?? config.BeeUrl ?? DefaultBeeUrl;
         var batchId = parsed.TryGetOptionValue("--batch-id") ?? env.BatchId ?? config.BatchId ?? string.Empty;
         var output = ParseOutput(parsed.TryGetOptionValue("--output") ?? env.Output ?? config.Output ?? "plain");
@@ -405,7 +472,9 @@ internal sealed class CliRuntime
         var indexPath = Path.Combine(configDir, "index.json");
 
         return new RuntimeSettings(
+            Backend: backend,
             BeeUrl: beeUrl,
+            IpfsApiUrl: ipfsApiUrl,
             BatchId: batchId,
             Output: output,
             ConfigPath: configPath,
@@ -468,18 +537,22 @@ internal sealed class CliRuntime
                   backup [--out <path>]
                   restore --ref <swarm://reference> [--key <path>]
                   rotate-key --old-key <path> --new-key <path>
-                  config set [--bee-url <url>] [--batch-id <id>] [--output plain|json|table]
-                  config get [bee-url|batch-id|output]
+                  config set [--backend swarm|ipfs|hybrid] [--bee-url <url>] [--ipfs-api-url <url>] [--batch-id <id>] [--output plain|json|table]
+                  config get [backend|bee-url|ipfs-api-url|batch-id|output]
 
                 Global options:
+                  --backend swarm|ipfs|hybrid
                   --bee-url <url>
+                  --ipfs-api-url <url>
                   --batch-id <id>
                   --key <path>
                   --output plain|json|table
                   --help
 
                 Environment overrides:
+                  SWARMKEYDB_BACKEND
                   SWARMKEYDB_BEE_URL
+                  SWARMKEYDB_IPFS_API_URL
                   SWARMKEYDB_BATCH_ID
                   SWARMKEYDB_OUTPUT
                 """,
@@ -574,6 +647,21 @@ internal sealed class CliRuntime
         }
     }
 
+    private static string ParseBackend(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return DefaultBackend;
+        }
+
+        var backend = value.Trim().ToLowerInvariant();
+        return backend switch
+        {
+            "swarm" or "bee" or "ipfs" or "hybrid" => backend == "bee" ? "swarm" : backend,
+            _ => throw new CliUsageException("Invalid backend. Use swarm, ipfs, or hybrid.")
+        };
+    }
+
     private static async Task<string> ReadKeyFileAsync(string path, CancellationToken cancellationToken)
     {
         if (!File.Exists(path))
@@ -593,9 +681,29 @@ internal sealed class CliRuntime
 
 public sealed class CliConfig
 {
+    public string? Backend { get; set; }
     public string? BeeUrl { get; set; }
+    public string? IpfsApiUrl { get; set; }
     public string? BatchId { get; set; }
     public string? Output { get; set; }
+}
+
+internal sealed class CompositeDisposable : IDisposable
+{
+    private readonly IReadOnlyList<IDisposable> _disposables;
+
+    public CompositeDisposable(IEnumerable<IDisposable?> disposables)
+    {
+        _disposables = disposables.Where(static disposable => disposable is not null).Cast<IDisposable>().ToArray();
+    }
+
+    public void Dispose()
+    {
+        foreach (var disposable in _disposables)
+        {
+            disposable.Dispose();
+        }
+    }
 }
 
 public static class CliConfigStore

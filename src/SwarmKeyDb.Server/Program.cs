@@ -12,7 +12,9 @@ var appSettings = LoadAppSettings();
 var port = GetInt("SWARM_KEYDB_PORT", 6379);
 var bind = IPAddress.Parse(GetString("SWARM_KEYDB_BIND", "0.0.0.0"));
 var dataDir = GetString("SWARM_KEYDB_DATA_DIR", Path.Combine(AppContext.BaseDirectory, "data"));
-var backend = GetString("SWARM_KEYDB_BACKEND", "local");
+var backend = (GetFirstSetting("BACKEND", "SWARM_KEYDB_BACKEND") ?? "local").ToLowerInvariant();
+var ipfsApiUrl = GetFirstSetting("IPFS_API_URL", "Ipfs:ApiUrl") ?? "http://localhost:5001/";
+var ipfsPinOnWrite = GetBoolFromMany(defaultValue: true, "IPFS_PIN_ON_WRITE", "Ipfs:PinOnWrite");
 var metricsEnabled = GetBool("METRICS_ENABLED", true);
 var metricsPort = GetInt("METRICS_PORT", 9090);
 var dashboardEnabled = GetBool("DASHBOARD_ENABLED", true);
@@ -99,11 +101,17 @@ services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
 services.AddSingleton<IEthAddressAccessor, AsyncLocalEthAddressAccessor>();
 IReadinessProbe readinessProbe;
 IShardHealthProvider? shardHealthProvider = null;
+IBackendStatusProvider? backendStatusProvider = null;
 var ownedResources = new List<IDisposable>();
 ISwarmClient? snapshotSwarmClient = null;
 
 if (shardingOptions.Enabled)
 {
+    if (backend is "ipfs" or "hybrid")
+    {
+        throw new InvalidOperationException("Sharding currently supports only local/swarm backends.");
+    }
+
     var shardStores = new List<ShardStore>();
     var shardReadiness = new List<ShardReadinessRegistration>();
     for (var i = 0; i < shardingOptions.Nodes.Count; i++)
@@ -116,7 +124,9 @@ if (shardingOptions.Enabled)
         var shardIndex = new FileKeyIndex(Path.Combine(shardDataDir, "index.json"));
         ISwarmClient shardClient;
         IReadinessProbe shardProbe;
-        if (backend.Equals("bee", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrWhiteSpace(node.BeeUrl))
+        if (backend.Equals("bee", StringComparison.OrdinalIgnoreCase) ||
+            backend.Equals("swarm", StringComparison.OrdinalIgnoreCase) ||
+            !string.IsNullOrWhiteSpace(node.BeeUrl))
         {
             var beeUrl = new Uri(node.BeeUrl ?? GetString("BEE_URL", "http://localhost:1633/"));
             var batchId = node.PostageBatchId
@@ -144,6 +154,10 @@ if (shardingOptions.Enabled)
     var compositeProbe = new CompositeShardReadinessProbe(shardReadiness);
     readinessProbe = compositeProbe;
     shardHealthProvider = compositeProbe;
+    backendStatusProvider = new CompositeBackendStatusProvider(
+    [
+        ("swarm", new AnyReadyProbe(shardReadiness.Select(static registration => (registration.Shard, registration.Probe)).ToArray()))
+    ]);
     services.AddSwarmKeyDbStore(_ => new ShardingRouter(
         shardStores,
         shardingOptions.ShardCount,
@@ -152,26 +166,85 @@ if (shardingOptions.Enabled)
 else
 {
     var index = new FileKeyIndex(Path.Combine(dataDir, "index.json"));
-    ISwarmClient swarmClient;
-    if (backend.Equals("bee", StringComparison.OrdinalIgnoreCase))
+    var backendProbes = new List<(string Name, IReadinessProbe Probe)>();
+    switch (backend)
     {
-        var beeUrl = new Uri(GetString("BEE_URL", "http://localhost:1633/"));
-        var batchId = RequireSetting("BEE_POSTAGE_BATCH_ID");
-        var probe = new BeeReadinessProbe(beeUrl, batchId);
-        readinessProbe = probe;
-        swarmClient = new BeeSwarmClient(beeUrl, batchId);
-        ownedResources.Add(probe);
-        ownedResources.Add((IDisposable)swarmClient);
-    }
-    else
-    {
-        readinessProbe = new AlwaysReadyProbe();
-        swarmClient = new FileSwarmClient(Path.Combine(dataDir, "objects"));
+        case "bee":
+        case "swarm":
+        {
+            var beeUrl = new Uri(GetString("BEE_URL", "http://localhost:1633/"));
+            var batchId = RequireSetting("BEE_POSTAGE_BATCH_ID");
+            var swarmProbe = new BeeReadinessProbe(beeUrl, batchId);
+            var swarmClient = new BeeSwarmClient(beeUrl, batchId);
+            var instrumentedClient = new InstrumentedSwarmClient(swarmClient, monitoringMetrics);
+            snapshotSwarmClient = instrumentedClient;
+            readinessProbe = swarmProbe;
+            backendProbes.Add(("swarm", swarmProbe));
+            ownedResources.Add(swarmProbe);
+            ownedResources.Add((IDisposable)swarmClient);
+            services.AddSwarmKeyDbStore(_ => new SwarmKeyValueStore(instrumentedClient, index, integrityOptions));
+            break;
+        }
+        case "ipfs":
+        {
+            var ipfsProbe = new IpfsReadinessProbe(new Uri(ipfsApiUrl));
+            var ipfsClient = new IpfsSwarmClient(new Uri(ipfsApiUrl), ipfsPinOnWrite);
+            var instrumentedIpfsClient = new InstrumentedSwarmClient(ipfsClient, monitoringMetrics);
+            snapshotSwarmClient = instrumentedIpfsClient;
+            readinessProbe = ipfsProbe;
+            backendProbes.Add(("ipfs", ipfsProbe));
+            ownedResources.Add(ipfsProbe);
+            ownedResources.Add(ipfsClient);
+            services.AddSwarmKeyDbStore(_ => new IpfsStorageBackend(instrumentedIpfsClient, index, integrityOptions));
+            break;
+        }
+        case "hybrid":
+        {
+            ISwarmClient swarmClient;
+            IReadinessProbe swarmProbe;
+            if (!string.IsNullOrWhiteSpace(GetSetting("BEE_POSTAGE_BATCH_ID")))
+            {
+                var beeUrl = new Uri(GetString("BEE_URL", "http://localhost:1633/"));
+                var batchId = RequireSetting("BEE_POSTAGE_BATCH_ID");
+                var beeProbe = new BeeReadinessProbe(beeUrl, batchId);
+                swarmProbe = beeProbe;
+                swarmClient = new BeeSwarmClient(beeUrl, batchId);
+                ownedResources.Add(beeProbe);
+                ownedResources.Add((IDisposable)swarmClient);
+            }
+            else
+            {
+                swarmProbe = new AlwaysReadyProbe();
+                swarmClient = new FileSwarmClient(Path.Combine(dataDir, "objects"));
+            }
+
+            var ipfsProbe = new IpfsReadinessProbe(new Uri(ipfsApiUrl));
+            var ipfsClient = new IpfsSwarmClient(new Uri(ipfsApiUrl), ipfsPinOnWrite);
+            var instrumentedSwarmClient = new InstrumentedSwarmClient(swarmClient, monitoringMetrics);
+            var instrumentedIpfsClient = new InstrumentedSwarmClient(ipfsClient, monitoringMetrics);
+            var hybridClient = new HybridSwarmClient(instrumentedSwarmClient, instrumentedIpfsClient);
+            snapshotSwarmClient = hybridClient;
+            readinessProbe = new AnyReadyProbe([("swarm", swarmProbe), ("ipfs", ipfsProbe)]);
+            backendProbes.Add(("swarm", swarmProbe));
+            backendProbes.Add(("ipfs", ipfsProbe));
+            ownedResources.Add(ipfsProbe);
+            ownedResources.Add(ipfsClient);
+            services.AddSwarmKeyDbStore(_ => new HybridBackend(instrumentedSwarmClient, instrumentedIpfsClient, index, integrityOptions));
+            break;
+        }
+        default:
+        {
+            readinessProbe = new AlwaysReadyProbe();
+            var swarmClient = new FileSwarmClient(Path.Combine(dataDir, "objects"));
+            var instrumentedClient = new InstrumentedSwarmClient(swarmClient, monitoringMetrics);
+            snapshotSwarmClient = instrumentedClient;
+            backendProbes.Add(("local", readinessProbe));
+            services.AddSwarmKeyDbStore(_ => new SwarmKeyValueStore(instrumentedClient, index, integrityOptions));
+            break;
+        }
     }
 
-    var instrumentedClient = new InstrumentedSwarmClient(swarmClient, monitoringMetrics);
-    snapshotSwarmClient = instrumentedClient;
-    services.AddSwarmKeyDbStore(_ => new SwarmKeyValueStore(instrumentedClient, index, integrityOptions));
+    backendStatusProvider = new CompositeBackendStatusProvider(backendProbes);
 }
 
 services.AddSingleton<ISwarmClient>(_ => snapshotSwarmClient ?? throw new InvalidOperationException("No Swarm client is configured."));
@@ -227,7 +300,8 @@ if (dashboardEnabled)
         metricsEnabled: metricsEnabled,
         dashboardEnabled: true,
         provider.GetRequiredService<ILogger<MonitoringHttpServer>>(),
-        shardHealthProvider);
+        shardHealthProvider,
+        backendStatusProvider);
     monitoringServers.Add(dashboardServer);
     monitoringTasks.Add(dashboardServer.RunAsync(cts.Token));
 }
@@ -242,7 +316,8 @@ if (metricsEnabled && (!dashboardEnabled || metricsPort != dashboardPort))
         metricsEnabled: true,
         dashboardEnabled: false,
         provider.GetRequiredService<ILogger<MonitoringHttpServer>>(),
-        shardHealthProvider);
+        shardHealthProvider,
+        backendStatusProvider);
     monitoringServers.Add(metricsServer);
     monitoringTasks.Add(metricsServer.RunAsync(cts.Token));
 }

@@ -7,7 +7,10 @@
 | `SWARM_KEYDB_BIND` | `0.0.0.0` | Bind address for the Redis-compatible TCP server. |
 | `SWARM_KEYDB_PORT` | `6379` | TCP port exposed by the Redis-compatible server. |
 | `SWARM_KEYDB_DATA_DIR` | platform-dependent | Local data directory for index and object storage. |
-| `SWARM_KEYDB_BACKEND` | `local` | Storage backend selection: `local` or `bee`. |
+| `BACKEND` | unset | Preferred backend selector (`swarm`, `ipfs`, `hybrid`); overrides `SWARM_KEYDB_BACKEND` when set. |
+| `SWARM_KEYDB_BACKEND` | `local` | Legacy backend selector (`local`, `bee`, `swarm`, `ipfs`, `hybrid`). |
+| `IPFS_API_URL` | `http://localhost:5001/` | IPFS Kubo HTTP API endpoint used for `ipfs` and `hybrid` backends. |
+| `IPFS_PIN_ON_WRITE` | `true` | Pins IPFS objects on write to avoid GC removal. |
 | `SWARM_KEYDB_CACHE_ENABLED` | `true` | Enables the read-through cache. |
 | `SWARM_KEYDB_CACHE_MAX_ENTRIES` | `1000` | Maximum number of cached entries. |
 | `SWARM_KEYDB_CACHE_DEFAULT_TTL_SECONDS` | unset | Optional upper bound for cache entry lifetime. |
@@ -46,6 +49,13 @@
 
 When sharding is enabled and a shard node omits `postageBatchId`, the global `BEE_POSTAGE_BATCH_ID` fallback is used.
 
+## IPFS integration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `IPFS_API_URL` | `http://localhost:5001/` | IPFS API endpoint (`api/v0/*`) for add/cat/version operations. |
+| `IPFS_PIN_ON_WRITE` | `true` | Whether writes call IPFS add with `pin=true`. |
+
 ## CLI (`skdb`)
 
 The CLI stores its persisted settings in `~/.swarmkeydb/config.json`.
@@ -53,6 +63,8 @@ The CLI stores its persisted settings in `~/.swarmkeydb/config.json`.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SWARMKEYDB_BEE_URL` | `http://localhost:1633/` | Bee API base URL override for CLI commands. |
+| `SWARMKEYDB_IPFS_API_URL` | `http://localhost:5001/` | IPFS API base URL override for CLI commands. |
+| `SWARMKEYDB_BACKEND` | `swarm` | CLI backend mode (`swarm`, `ipfs`, `hybrid`). |
 | `SWARMKEYDB_BATCH_ID` | unset | Postage batch id override for CLI commands. |
 | `SWARMKEYDB_OUTPUT` | `plain` | CLI output format override (`plain`, `json`, `table`). |
 

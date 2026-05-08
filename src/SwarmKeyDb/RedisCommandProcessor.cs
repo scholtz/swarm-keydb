@@ -143,6 +143,7 @@ public sealed class RedisCommandProcessor : IDisposable
                 "BACKUP" => await BackupAsync(args, cancellationToken).ConfigureAwait(false),
                 "RESTOREDB" => await RestoreDbAsync(args, cancellationToken).ConfigureAwait(false),
                 "ROTATEKEY" => await RotateKeyAsync(args, cancellationToken).ConfigureAwait(false),
+                "BACKENDMETA" => await BackendMetaAsync(args, cancellationToken).ConfigureAwait(false),
                 "QUIT" => RespValue.SimpleString("OK"),
                 _ => RespValue.Error($"ERR unknown command '{command}'")
             };
@@ -243,6 +244,23 @@ public sealed class RedisCommandProcessor : IDisposable
 
         var result = await _keyRotationService.RotateAsync(args[1].AsString(), args[2].AsString(), cancellationToken: cancellationToken).ConfigureAwait(false);
         return RespValue.BulkString(result.ManifestReference);
+    }
+
+    private async Task<RespValue> BackendMetaAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        var arityError = RequireArity(args, 2);
+        if (arityError is not null)
+        {
+            return arityError;
+        }
+
+        if (_store is not IBackendMetadataProvider metadataProvider)
+        {
+            return RespValue.Error("ERR BACKENDMETA is not available.");
+        }
+
+        var metadata = await metadataProvider.GetBackendMetadataAsync(args[1].AsString(), cancellationToken).ConfigureAwait(false);
+        return metadata is null ? RespValue.BulkString((string?)null) : RespValue.BulkString(metadata);
     }
 
     private async Task<RespValue> SetAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)

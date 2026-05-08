@@ -39,6 +39,14 @@ dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
 
 Then run the same `SET`/`GET` commands above.
 
+## IPFS-backed quickstart
+
+```bash
+export BACKEND=ipfs
+export IPFS_API_URL=http://localhost:5001/
+dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
+```
+
 ## Verify from C# client
 
 ```bash

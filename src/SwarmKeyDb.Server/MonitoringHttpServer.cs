@@ -14,6 +14,7 @@ public sealed class MonitoringHttpServer : IDisposable
     private readonly bool _dashboardEnabled;
     private readonly ILogger<MonitoringHttpServer> _logger;
     private readonly IShardHealthProvider? _shardHealthProvider;
+    private readonly IBackendStatusProvider? _backendStatusProvider;
 
     public MonitoringHttpServer(
         IPAddress address,
@@ -23,7 +24,8 @@ public sealed class MonitoringHttpServer : IDisposable
         bool metricsEnabled,
         bool dashboardEnabled,
         ILogger<MonitoringHttpServer> logger,
-        IShardHealthProvider? shardHealthProvider = null)
+        IShardHealthProvider? shardHealthProvider = null,
+        IBackendStatusProvider? backendStatusProvider = null)
     {
         _metrics = metrics;
         _readinessProbe = readinessProbe;
@@ -31,6 +33,7 @@ public sealed class MonitoringHttpServer : IDisposable
         _dashboardEnabled = dashboardEnabled;
         _logger = logger;
         _shardHealthProvider = shardHealthProvider;
+        _backendStatusProvider = backendStatusProvider;
         _listener.Prefixes.Add($"http://{(address.Equals(IPAddress.Any) ? "+" : address.ToString())}:{port}/");
     }
 
@@ -139,6 +142,29 @@ public sealed class MonitoringHttpServer : IDisposable
         {
             var count = int.TryParse(context.Request.QueryString["count"], out var parsedCount) ? parsedCount : 100;
             await WriteJsonAsync(context.Response, HttpStatusCode.OK, _metrics.GetRecentLogs(count), cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (path.Equals("/backend", StringComparison.OrdinalIgnoreCase))
+        {
+            var statuses = _backendStatusProvider is null
+                ? []
+                : await _backendStatusProvider.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+            var degraded = statuses.Any(static status => !status.Ready);
+            await WriteJsonAsync(
+                context.Response,
+                degraded ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.OK,
+                new
+                {
+                    status = degraded ? "degraded" : "healthy",
+                    backends = statuses.Select(static backend => new
+                    {
+                        backend = backend.Backend,
+                        status = backend.Ready ? "healthy" : "unreachable",
+                        message = backend.Message
+                    })
+                },
+                cancellationToken).ConfigureAwait(false);
             return;
         }
 

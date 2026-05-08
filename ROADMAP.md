@@ -29,7 +29,7 @@
 - [x] Offer migration tools from traditional databases. (100%: `swarmkeydb-migrate` CLI supports SCAN-based import, prefix filters, dry-run, resumable checkpoints, TTL preservation, validation sampling, and Docker demo)
 
 ## Ecosystem Integration
-- [ ] Integrate with IPFS for hybrid storage options.
+- [x] Integrate with IPFS for hybrid storage options. (100%)
 - [ ] Enable interoperability with Ethereum smart contracts.
 - [ ] Support cross-chain data synchronization.
 - [ ] Add connectors for popular frameworks like React and Node.js.

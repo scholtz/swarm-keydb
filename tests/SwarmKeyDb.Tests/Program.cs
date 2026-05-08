@@ -21,6 +21,9 @@ var tests = new (string Name, Func<Task> Test)[]
     ("batch get detects tampered key", BatchGetDetectsTamperedKeyAsync),
     ("swarm store integrity supports empty and large values", SwarmStoreIntegritySupportsEmptyAndLargeValuesAsync),
     ("bee client parses upload references", BeeClientParsesUploadReferenceAsync),
+    ("ipfs backend supports put get delete list and scan", IpfsBackendSupportsKeyValueOperationsAsync),
+    ("hybrid backend falls back to available storage backend", HybridBackendFallsBackToAvailableStorageAsync),
+    ("redis backendmeta command returns backend metadata", RedisBackendMetaCommandReturnsMetadataAsync),
     ("redis protocol supports set get exists delete", RedisProtocolRoundTripAsync),
     ("redis protocol supports keys and scan", RedisProtocolKeyIterationAsync),
     ("prefix scan returns matching keys", PrefixScanReturnsMatchingKeysAsync),
@@ -118,6 +121,7 @@ var tests = new (string Name, Func<Task> Test)[]
     ("monitoring metrics endpoint exposes operation counters and cache ratio", MonitoringMetricsEndpointExposesCountersAsync),
     ("monitoring health and readiness endpoints return expected status codes", MonitoringHealthAndReadinessEndpointsAsync),
     ("monitoring health endpoint reports degraded for unhealthy shard", MonitoringHealthEndpointReportsDegradedForUnhealthyShardAsync),
+    ("monitoring backend endpoint reports backend connectivity", MonitoringBackendEndpointReportsBackendConnectivityAsync),
     ("redis command logging includes correlation ids", RedisCommandLoggingIncludesCorrelationIdsAsync),
     ("redis management commands backup restore and rotate", RedisManagementCommandsBackupRestoreAndRotateAsync),
     ("migrate scan pattern applies prefix filter", MigrateScanPatternAppliesPrefixFilterAsync),
@@ -298,6 +302,110 @@ static async Task BeeClientParsesUploadReferenceAsync()
     var client = new BeeSwarmClient(httpClient, "batch-id");
 
     AssertEqual("abc123", await client.UploadAsync(new byte[] { 1, 2, 3 }));
+}
+
+static async Task IpfsBackendSupportsKeyValueOperationsAsync()
+{
+    var catPayload = Encoding.UTF8.GetBytes("downloaded");
+    var sawPinnedAddCall = false;
+    var sawUnpinnedAddCall = false;
+    var handler = new StubHttpMessageHandler(request =>
+    {
+        if (request.RequestUri?.AbsolutePath.EndsWith("/api/v0/add", StringComparison.Ordinal) == true)
+        {
+            sawPinnedAddCall = request.RequestUri.Query.Contains("pin=true", StringComparison.Ordinal);
+            sawUnpinnedAddCall = request.RequestUri.Query.Contains("pin=false", StringComparison.Ordinal);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"Hash\":\"bafytestcid\"}")
+            };
+        }
+
+        if (request.RequestUri?.AbsolutePath.EndsWith("/api/v0/cat", StringComparison.Ordinal) == true)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(catPayload)
+            };
+        }
+
+        return new HttpResponseMessage(HttpStatusCode.NotFound);
+    });
+
+    using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("http://localhost:5001/") };
+    using var ipfsClient = new IpfsSwarmClient(httpClient, pinOnWrite: true);
+    AssertEqual("bafytestcid", await ipfsClient.UploadAsync(Encoding.UTF8.GetBytes("upload")));
+    Assert(sawPinnedAddCall, "IPFS uploads should set pin=true.");
+    AssertSequenceEqual(catPayload, await ipfsClient.DownloadAsync("bafytestcid"));
+    using var ipfsClientWithoutPinning = new IpfsSwarmClient(httpClient, pinOnWrite: false);
+    AssertEqual("bafytestcid", await ipfsClientWithoutPinning.UploadAsync(Encoding.UTF8.GetBytes("upload")));
+    Assert(sawUnpinnedAddCall, "IPFS uploads should set pin=false when pinning is disabled.");
+
+    var store = new IpfsStorageBackend(new MutableSwarmClient(), new InMemoryKeyIndex());
+    var processor = new RedisCommandProcessor(store);
+
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "ipfs:key", "value") +
+        RespCommand("GET", "ipfs:key") +
+        RespCommand("KEYS", "*") +
+        RespCommand("SCAN", "0", "COUNT", "10") +
+        RespCommand("DEL", "ipfs:key") +
+        RespCommand("GET", "ipfs:key"));
+
+    Assert(response.Contains("+OK\r\n$5\r\nvalue\r\n", StringComparison.Ordinal), "IPFS backend should round-trip set/get.");
+    Assert(response.Contains("*1\r\n$8\r\nipfs:key\r\n", StringComparison.Ordinal), "IPFS backend should list keys.");
+    Assert(response.Contains(":1\r\n$-1\r\n", StringComparison.Ordinal), "IPFS backend should delete keys.");
+}
+
+static async Task HybridBackendFallsBackToAvailableStorageAsync()
+{
+    var swarm = new MutableSwarmClient();
+    var ipfs = new MutableSwarmClient();
+    var index = new InMemoryKeyIndex();
+    var store = new HybridBackend(swarm, ipfs, index);
+
+    await store.PutAsync("hybrid:key", Encoding.UTF8.GetBytes("value"));
+    var metadata = await ((IBackendMetadataProvider)store).GetBackendMetadataAsync("hybrid:key");
+    Assert(metadata is not null, "Hybrid metadata should be available.");
+    using var metadataDocument = JsonDocument.Parse(metadata!);
+    Assert(!string.IsNullOrWhiteSpace(metadataDocument.RootElement.GetProperty("ipfsCid").GetString()), "Hybrid metadata should include IPFS CID.");
+    Assert(!string.IsNullOrWhiteSpace(metadataDocument.RootElement.GetProperty("swarmReference").GetString()), "Hybrid metadata should include swarm reference.");
+
+    var reference = await index.GetReferenceAsync("hybrid:key");
+    if (reference is null || !HybridReferenceCodec.TryDecode(reference, out var decoded))
+    {
+        throw new Exception("Hybrid reference should be encoded.");
+    }
+
+    Assert(!string.IsNullOrWhiteSpace(decoded.SwarmReference), "Hybrid reference should include swarm hash.");
+    Assert(!string.IsNullOrWhiteSpace(decoded.IpfsCid), "Hybrid reference should include IPFS CID.");
+
+    swarm.Remove(decoded.SwarmReference!);
+    AssertEqual("value", Encoding.UTF8.GetString((await store.GetAsync("hybrid:key"))!));
+
+    ipfs.Remove(decoded.IpfsCid!);
+    var threw = false;
+    try
+    {
+        _ = await store.GetAsync("hybrid:key");
+    }
+    catch (KeyNotFoundException)
+    {
+        threw = true;
+    }
+
+    Assert(threw, "Expected error when all hybrid backends are unavailable.");
+}
+
+static async Task RedisBackendMetaCommandReturnsMetadataAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    var processor = new RedisCommandProcessor(store);
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "meta:key", "1") +
+        RespCommand("BACKENDMETA", "meta:key"));
+
+    Assert(response.Contains("\"swarmReference\":", StringComparison.Ordinal), "BACKENDMETA should include backend metadata.");
 }
 
 static async Task RedisProtocolRoundTripAsync()
@@ -1261,6 +1369,38 @@ static async Task MonitoringHealthEndpointReportsDegradedForUnhealthyShardAsync(
     var metricsPayload = await client.GetStringAsync($"http://127.0.0.1:{port}/metrics");
     Assert(metricsPayload.Contains("swarmkeydb_shard_up{shard=\"shard-a\"} 1", StringComparison.Ordinal), "Expected shard-up metric for healthy shard.");
     Assert(metricsPayload.Contains("swarmkeydb_shard_up{shard=\"shard-b\"} 0", StringComparison.Ordinal), "Expected shard-up metric for unhealthy shard.");
+
+    cts.Cancel();
+    await runTask;
+    server.Dispose();
+}
+
+static async Task MonitoringBackendEndpointReportsBackendConnectivityAsync()
+{
+    var metrics = new MonitoringMetrics(() => NoOpCacheStats.Instance);
+    var port = TestNetHelpers.GetFreePort();
+    var server = new MonitoringHttpServer(
+        IPAddress.Loopback,
+        port,
+        metrics,
+        new StaticReadinessProbe(ready: true, message: "ready"),
+        metricsEnabled: true,
+        dashboardEnabled: false,
+        NullLogger<MonitoringHttpServer>.Instance,
+        backendStatusProvider: new StaticBackendStatusProvider(
+        [
+            new BackendStatus("swarm", true, "ok"),
+            new BackendStatus("ipfs", false, "timeout")
+        ]));
+    using var cts = new CancellationTokenSource();
+    var runTask = server.RunAsync(cts.Token);
+    using var client = new HttpClient();
+
+    var backend = await client.GetAsync($"http://127.0.0.1:{port}/backend");
+    AssertEqual(HttpStatusCode.ServiceUnavailable, backend.StatusCode);
+    var payload = await backend.Content.ReadAsStringAsync();
+    Assert(payload.Contains("\"backend\":\"swarm\"", StringComparison.Ordinal), "Expected swarm backend in payload.");
+    Assert(payload.Contains("\"backend\":\"ipfs\"", StringComparison.Ordinal), "Expected ipfs backend in payload.");
 
     cts.Cancel();
     await runTask;
@@ -2532,6 +2672,12 @@ internal sealed class MutableSwarmClient : ISwarmClient
 
         _objects[reference] = mutator(data.ToArray());
     }
+
+    public void Remove(string reference)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reference);
+        _objects.Remove(reference);
+    }
 }
 
 internal sealed class CountingKeyValueStore : IKeyValueStore
@@ -2732,6 +2878,19 @@ internal sealed class StaticShardHealthProvider : IShardHealthProvider
     }
 
     public Task<IReadOnlyList<ShardHealthStatus>> GetShardHealthAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult(_statuses);
+}
+
+internal sealed class StaticBackendStatusProvider : IBackendStatusProvider
+{
+    private readonly IReadOnlyList<BackendStatus> _statuses;
+
+    public StaticBackendStatusProvider(IReadOnlyList<BackendStatus> statuses)
+    {
+        _statuses = statuses;
+    }
+
+    public Task<IReadOnlyList<BackendStatus>> GetStatusAsync(CancellationToken cancellationToken = default) =>
         Task.FromResult(_statuses);
 }
 
