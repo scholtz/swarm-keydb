@@ -28,7 +28,13 @@ var tests = new (string Name, Func<Task> Test)[]
     ("caching store put invalidates cache", CachingKeyValueStorePutInvalidatesCacheAsync),
     ("caching store delete invalidates cache", CachingKeyValueStoreDeleteInvalidatesCacheAsync),
     ("caching store respects key ttl", CachingKeyValueStoreRespectsKeyTtlAsync),
-    ("caching store max entries evicts lru", CachingKeyValueStoreMaxEntriesEvictsLruAsync)
+    ("caching store max entries evicts lru", CachingKeyValueStoreMaxEntriesEvictsLruAsync),
+    ("compressing store put stores compressed value", CompressingKeyValueStorePutStoresCompressedValueAsync),
+    ("compressing store get returns decompressed value", CompressingKeyValueStoreGetReturnsDecompressedValueAsync),
+    ("compressing store skips compression below min size", CompressingKeyValueStoreSkipsCompressionBelowMinSizeAsync),
+    ("compressing store handles legacy uncompressed data", CompressingKeyValueStoreHandlesLegacyUncompressedDataAsync),
+    ("compressing store brotli compress and decompress", CompressingKeyValueStoreBrotliCompressAndDecompressAsync),
+    ("compressing store delete and ttl pass through", CompressingKeyValueStoreDeleteAndTtlPassThroughAsync)
 };
 
 foreach (var (name, test) in tests)
@@ -332,6 +338,111 @@ static CachingKeyValueStore CreateCachingStore(CountingKeyValueStore inner, int 
     });
     var cache = new MemoryCache(new MemoryCacheOptions());
     return new CachingKeyValueStore(inner, cache, options, NullLogger<CachingKeyValueStore>.Instance);
+}
+
+static CompressingKeyValueStore CreateCompressingStore(IKeyValueStore inner, bool enabled = true, CompressionAlgorithm algorithm = CompressionAlgorithm.GZip, int minSizeBytes = 0)
+{
+    var options = Options.Create(new CompressionOptions
+    {
+        Enabled = enabled,
+        Algorithm = algorithm,
+        MinSizeBytes = minSizeBytes
+    });
+    return new CompressingKeyValueStore(inner, options, NullLogger<CompressingKeyValueStore>.Instance);
+}
+
+static async Task CompressingKeyValueStorePutStoresCompressedValueAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var store = CreateCompressingStore(inner, minSizeBytes: 0);
+    var original = Encoding.UTF8.GetBytes(new string('x', 200));
+
+    await store.PutAsync("compressed:key", original);
+
+    var stored = await inner.GetAsync("compressed:key");
+    Assert(stored is not null, "Inner store should have data.");
+    Assert(!stored!.SequenceEqual(original), "Stored bytes should be compressed (different from original).");
+    // GZip magic
+    Assert(stored[0] == 0x1F && stored[1] == 0x8B, "Stored data should start with GZip magic bytes.");
+}
+
+static async Task CompressingKeyValueStoreGetReturnsDecompressedValueAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var store = CreateCompressingStore(inner, minSizeBytes: 0);
+    var original = Encoding.UTF8.GetBytes(new string('y', 200));
+
+    await store.PutAsync("roundtrip:key", original);
+    var retrieved = await store.GetAsync("roundtrip:key");
+
+    Assert(retrieved is not null, "Retrieved value should not be null.");
+    Assert(retrieved!.SequenceEqual(original), "Retrieved value should equal the original.");
+}
+
+static async Task CompressingKeyValueStoreSkipsCompressionBelowMinSizeAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var store = CreateCompressingStore(inner, minSizeBytes: 100);
+    var small = Encoding.UTF8.GetBytes("tiny");
+
+    await store.PutAsync("small:key", small);
+
+    var stored = await inner.GetAsync("small:key");
+    Assert(stored is not null, "Inner store should have data.");
+    Assert(stored!.SequenceEqual(small), "Small value should be stored uncompressed.");
+}
+
+static async Task CompressingKeyValueStoreHandlesLegacyUncompressedDataAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var legacy = Encoding.UTF8.GetBytes("legacy-plain-text-value");
+    // Directly put uncompressed data into the inner store (simulates old data)
+    await inner.PutAsync("legacy:key", legacy);
+
+    var store = CreateCompressingStore(inner, minSizeBytes: 0);
+    var retrieved = await store.GetAsync("legacy:key");
+
+    Assert(retrieved is not null, "Legacy value should be readable.");
+    Assert(retrieved!.SequenceEqual(legacy), "Legacy uncompressed value should be returned as-is.");
+}
+
+static async Task CompressingKeyValueStoreBrotliCompressAndDecompressAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var store = CreateCompressingStore(inner, algorithm: CompressionAlgorithm.Brotli, minSizeBytes: 0);
+    var original = Encoding.UTF8.GetBytes(new string('z', 200));
+
+    await store.PutAsync("brotli:key", original);
+    var stored = await inner.GetAsync("brotli:key");
+
+    Assert(stored is not null, "Inner store should have data.");
+    Assert(!stored!.SequenceEqual(original), "Stored bytes should be compressed.");
+    // Custom magic prefix 0xCE 0xB8 (SwarmKeyDb-specific Brotli wrapper)
+    Assert(stored[0] == 0xCE && stored[1] == 0xB8, "Stored data should start with custom Brotli magic bytes.");
+
+    var retrieved = await store.GetAsync("brotli:key");
+    Assert(retrieved is not null, "Retrieved value should not be null.");
+    Assert(retrieved!.SequenceEqual(original), "Brotli roundtrip should return original value.");
+}
+
+static async Task CompressingKeyValueStoreDeleteAndTtlPassThroughAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var store = CreateCompressingStore(inner, minSizeBytes: 0);
+    var value = Encoding.UTF8.GetBytes("hello");
+
+    await store.PutAsync("pass:key", value);
+    Assert(await store.SetTtlAsync("pass:key", TimeSpan.FromMinutes(1)), "SetTtlAsync should pass through.");
+
+    var (exists, ttl) = await store.GetTtlAsync("pass:key");
+    Assert(exists, "GetTtlAsync should show key exists.");
+    Assert(ttl is not null, "GetTtlAsync should return a TTL.");
+
+    Assert(await store.RemoveTtlAsync("pass:key"), "RemoveTtlAsync should pass through.");
+    Assert(await store.DeleteAsync("pass:key"), "DeleteAsync should pass through.");
+
+    var keys = await store.ListKeysAsync();
+    Assert(!keys.Contains("pass:key"), "ListKeysAsync should show key deleted.");
 }
 
 static async Task<string> ExecuteAsync(RedisCommandProcessor processor, string commands)
