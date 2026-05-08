@@ -5,6 +5,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 ## Features
 
 - Redis-compatible commands for `PING`, `SET`, `SETEX`, `PSETEX`, `GET`, `MGET`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXISTS`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `KEYS`, `SCAN`, `TYPE`, and `QUIT`.
+- Connection-scoped Ethereum-address ACL enforcement via `AUTHADDR` for shared databases.
 - String, JSON, and binary value helpers in the `SwarmKeyDbClient` library.
 - Key listing and cursor-based iteration.
 - Bee HTTP API storage with postage batch configuration handled by environment variables.
@@ -142,6 +143,65 @@ redis-cli -p 6379 SET profile:name Ada
 # Value is stored as AES-256-GCM ciphertext in Swarm; raw Swarm bytes are unreadable.
 redis-cli -p 6379 GET profile:name
 # Returns: "Ada"  (decrypted transparently by the server)
+```
+
+### Access control lists (ACLs)
+
+The server supports Ethereum-address-based access control for shared databases. When ACLs are enabled, reads (`GET`, `MGET`, `KEYS`, `SCAN`, `TYPE`, `TTL`, `PTTL`) require read permission, and writes (`SET`, `SETEX`, `PSETEX`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PERSIST`) require write permission. `admin` grants both.
+
+Configure it with:
+
+- `SWARM_KEYDB_ACL_ENABLED` (`true`/`false`, default `false`)
+- `SWARM_KEYDB_ACL_MODE` (`allowlist` or `denylist`, default `allowlist`)
+- `SWARM_KEYDB_ACL_ENTRIES` — JSON array of ACL entries such as `[{"address":"0x1111111111111111111111111111111111111111","permission":"admin"}]`
+
+**Modes:**
+
+- `allowlist`: only listed addresses may access the database, with the permissions granted in `SWARM_KEYDB_ACL_ENTRIES`
+- `denylist`: all addresses are allowed except listed addresses, which are denied for the listed permission (`read`, `write`, or `admin`)
+
+**Startup behaviour:** If `SWARM_KEYDB_ACL_ENABLED=true` and `SWARM_KEYDB_ACL_ENTRIES` is empty or invalid, the server fails fast with a descriptive error.
+
+**Layer ordering:** ACL checks run before encryption and compression (Swarm → ACL → Encrypt → Compress → Cache).
+
+**Supplying caller identity:** SwarmKeyDb currently speaks Redis RESP over TCP, so there is no HTTP header transport on the wire. For the Redis server, identify the caller once per connection with `AUTHADDR <0x-address>`. HTTP adapters can map the same identity to an `X-Eth-Address` header and translate `AccessDeniedException` to HTTP `403`.
+
+**Example (allowlist):**
+
+```bash
+export SWARM_KEYDB_ACL_ENABLED=true
+export SWARM_KEYDB_ACL_MODE=allowlist
+export SWARM_KEYDB_ACL_ENTRIES='[
+  {"address":"0x1111111111111111111111111111111111111111","permission":"admin"},
+  {"address":"0x2222222222222222222222222222222222222222","permission":"read"}
+]'
+dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
+```
+
+Then, from a Redis client session:
+
+```text
+AUTHADDR 0x1111111111111111111111111111111111111111 -> +OK
+SET shared:doc hello                               -> +OK
+GET shared:doc                                     -> $5\r\nhello
+```
+
+An unauthorized caller receives a stable protocol-visible error:
+
+```text
+AUTHADDR 0x9999999999999999999999999999999999999999 -> +OK
+GET shared:doc                                     -> -ERR Access denied: address 0x9999999999999999999999999999999999999999 does not have read permission.
+```
+
+**Example (denylist):**
+
+```bash
+export SWARM_KEYDB_ACL_ENABLED=true
+export SWARM_KEYDB_ACL_MODE=denylist
+export SWARM_KEYDB_ACL_ENTRIES='[
+  {"address":"0x3333333333333333333333333333333333333333","permission":"admin"}
+]'
+dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
 ```
 
 ## Docker

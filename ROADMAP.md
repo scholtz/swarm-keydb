@@ -16,7 +16,7 @@
 
 ## Security and Privacy
 - [x] Integrate end-to-end encryption using user-provided keys. (100%)
-- [ ] Implement access control lists for multi-user shared databases.
+- [x] Implement access control lists for multi-user shared databases. (100%)
 - [ ] Add data integrity verification with cryptographic hashes.
 - [ ] Support for secure key rotation and backup mechanisms.
 - [ ] Enable privacy-preserving queries without revealing data.

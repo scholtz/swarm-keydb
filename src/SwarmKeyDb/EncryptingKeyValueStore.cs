@@ -11,7 +11,7 @@ namespace SwarmKeyDb;
 /// followed by a 12-byte random nonce and a 16-byte GCM authentication tag, then the
 /// ciphertext. Legacy values without the magic header are returned as-is.
 /// </summary>
-public sealed class EncryptingKeyValueStore : IKeyValueStore
+public sealed class EncryptingKeyValueStore : IKeyValueStore, IAccessControlVerifier
 {
     // Magic bytes that identify an encrypted blob stored by this class.
     private static readonly byte[] Magic = [0xAE, 0x73];
@@ -77,6 +77,22 @@ public sealed class EncryptingKeyValueStore : IKeyValueStore
 
     public Task<bool> RemoveTtlAsync(string key, CancellationToken cancellationToken = default) =>
         _inner.RemoveTtlAsync(key, cancellationToken);
+
+    public void EnsureReadAccess()
+    {
+        if (_inner is IAccessControlVerifier verifier)
+        {
+            verifier.EnsureReadAccess();
+        }
+    }
+
+    public void EnsureWriteAccess()
+    {
+        if (_inner is IAccessControlVerifier verifier)
+        {
+            verifier.EnsureWriteAccess();
+        }
+    }
 
     private static byte[] Encrypt(ReadOnlySpan<byte> plaintext, byte[] key)
     {
