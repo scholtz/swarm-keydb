@@ -128,6 +128,12 @@ var tests = new (string Name, Func<Task> Test)[]
     ("migrate checkpoint store saves and loads", MigrateCheckpointStoreSavesAndLoadsAsync),
     ("migrate dry run does not write to destination", MigrateDryRunDoesNotWriteToDestinationAsync),
     ("migrate preserves ttl on write", MigratePreservesTtlOnWriteAsync),
+    ("keccak256 produces correct hash for known vectors", Keccak256ProducesCorrectHashForKnownVectorsAsync),
+    ("ethereum bridge options disabled by default", EthereumBridgeOptionsDisabledByDefaultAsync),
+    ("ethereum abi decodes data write requested event", EthereumAbiDecodesDataWriteRequestedEventAsync),
+    ("ethereum abi decodes data read requested event", EthereumAbiDecodesDataReadRequestedEventAsync),
+    ("ethereum bridge monitoring endpoint returns bridge state", EthereumBridgeMonitoringEndpointReturnsBridgeStateAsync),
+    ("ethereum bridge service handles data write event and writes to store", EthereumBridgeServiceHandlesDataWriteEventAndWritesToStoreAsync),
 };
 
 foreach (var (name, test) in tests)
@@ -2620,6 +2626,256 @@ static async Task SwarmStoreWithBTreeIndexPrefixScanAsync()
     var keys = await store.GetKeysWithPrefixAsync("tag:");
     AssertSequenceEqual(new[] { "tag:alpha", "tag:beta" }, keys);
 }
+
+// ── Ethereum bridge tests ────────────────────────────────────────────────────
+
+static Task Keccak256ProducesCorrectHashForKnownVectorsAsync()
+{
+    // Known Keccak-256 test vectors (Ethereum's hash, NOT NIST SHA3-256)
+    AssertEqual(
+        "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        KeccakHash.ComputeHex(""));
+
+    AssertEqual(
+        "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45",
+        KeccakHash.ComputeHex("abc"));
+
+    AssertEqual(
+        "47173285a8d7341e5e972fc677286384f802f8ef42a5ec5f03bbfa254cb01fad",
+        KeccakHash.ComputeHex("hello world"));
+
+    // Verify the event selector topic hashes used by the bridge
+    var writeHash = KeccakHash.ComputeHex("DataWriteRequested(address,string,bytes)");
+    var readHash = KeccakHash.ComputeHex("DataReadRequested(address,string)");
+    Assert(writeHash.Length == 64, "Event topic hash should be 32 bytes (64 hex chars).");
+    Assert(readHash.Length == 64, "Event topic hash should be 32 bytes (64 hex chars).");
+    Assert(writeHash != readHash, "Write and read event hashes should differ.");
+
+    return Task.CompletedTask;
+}
+
+static Task EthereumBridgeOptionsDisabledByDefaultAsync()
+{
+    var options = new EthereumBridgeOptions();
+    Assert(!options.Enabled, "Bridge should be disabled by default.");
+    Assert(options.RpcUrl is null, "RpcUrl should be null by default.");
+    Assert(options.ContractAddress is null, "ContractAddress should be null by default.");
+    Assert(options.PrivateKeyHex is null, "PrivateKeyHex should be null by default.");
+    AssertEqual(5, options.PollIntervalSeconds);
+    AssertEqual(5, options.ReconnectDelaySeconds);
+    return Task.CompletedTask;
+}
+
+static Task EthereumAbiDecodesDataWriteRequestedEventAsync()
+{
+    // ABI encoding of (string key="hello:world", bytes value="alice")
+    // Word 0: offset to key   = 0x40 (64)
+    // Word 1: offset to value = 0x80 (128)
+    // Word 2: key length      = 0x0b (11)
+    // Word 3: key bytes "hello:world" padded to 32
+    // Word 4: value length    = 0x05 (5)
+    // Word 5: value bytes "alice" padded to 32
+    const string hexData =
+        "0x" +
+        "0000000000000000000000000000000000000000000000000000000000000040" +
+        "0000000000000000000000000000000000000000000000000000000000000080" +
+        "000000000000000000000000000000000000000000000000000000000000000b" +
+        "68656c6c6f3a776f726c64000000000000000000000000000000000000000000" +
+        "0000000000000000000000000000000000000000000000000000000000000005" +
+        "616c696365000000000000000000000000000000000000000000000000000000";
+
+    var (key, value) = EthereumBridgeService.DecodeStringBytesAbi(hexData);
+
+    AssertEqual("hello:world", key);
+    AssertSequenceEqual(Encoding.UTF8.GetBytes("alice"), value);
+    return Task.CompletedTask;
+}
+
+static Task EthereumAbiDecodesDataReadRequestedEventAsync()
+{
+    // ABI encoding of (string key="mykey")
+    // Word 0: offset to key = 0x20 (32)
+    // Word 1: key length    = 0x05 (5)
+    // Word 2: key bytes "mykey" padded to 32
+    const string hexData32 =
+        "0x" +
+        "0000000000000000000000000000000000000000000000000000000000000020" +
+        "0000000000000000000000000000000000000000000000000000000000000005" +
+        "6d796b6579000000000000000000000000000000000000000000000000000000";
+
+    var key = EthereumBridgeService.DecodeStringAbi(hexData32);
+    AssertEqual("mykey", key);
+    return Task.CompletedTask;
+}
+
+static async Task EthereumBridgeMonitoringEndpointReturnsBridgeStateAsync()
+{
+    // Bridge disabled — no real Ethereum node needed
+    var bridgeOptions = new EthereumBridgeOptions { Enabled = false };
+    var bridge = new EthereumBridgeService(
+        new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()),
+        bridgeOptions,
+        NullLogger<EthereumBridgeService>.Instance);
+
+    var metrics = new MonitoringMetrics(() => NoOpCacheStats.Instance);
+    var port = TestNetHelpers.GetFreePort();
+    var server = new MonitoringHttpServer(
+        IPAddress.Loopback,
+        port,
+        metrics,
+        new AlwaysReadyProbe(),
+        metricsEnabled: true,
+        dashboardEnabled: false,
+        NullLogger<MonitoringHttpServer>.Instance,
+        ethereumBridge: bridge);
+
+    using var cts = new CancellationTokenSource();
+    var runTask = server.RunAsync(cts.Token);
+
+    using var client = new HttpClient();
+    var response = await client.GetAsync($"http://127.0.0.1:{port}/ethereum/bridge");
+    var payload = await response.Content.ReadAsStringAsync();
+
+    Assert(payload.Contains("\"status\":\"disabled\"", StringComparison.Ordinal),
+        $"Expected disabled status in bridge response. Got: {payload}");
+
+    cts.Cancel();
+    await runTask;
+    server.Dispose();
+    await bridge.DisposeAsync();
+}
+
+static async Task EthereumBridgeServiceHandlesDataWriteEventAndWritesToStoreAsync()
+{
+    // Compute the DataWriteRequested event topic
+    var writeRequestedTopic = "0x" + KeccakHash.ComputeHex("DataWriteRequested(address,string,bytes)");
+    const string contractAddress = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+    // ABI-encode (string key="eth:key", bytes value="eth_value")
+    // key="eth:key" (7 bytes), value="eth_value" (9 bytes)
+    var keyBytes = Encoding.UTF8.GetBytes("eth:key");   // 7 bytes = 0x07
+    var valBytes = Encoding.UTF8.GetBytes("eth_value"); // 9 bytes = 0x09
+
+    static string PadTo32Hex(byte[] b)
+    {
+        var padded = new byte[32];
+        Buffer.BlockCopy(b, 0, padded, 0, b.Length);
+        return Convert.ToHexString(padded).ToLowerInvariant();
+    }
+
+    // ABI encoding:
+    // Word 0: key offset = 64 (0x40)
+    // Word 1: value offset = 64 + 32 + 32 = 128 (0x80)  [32 for key-len word + 32 for key data]
+    // Word 2: key length
+    // Word 3: key bytes padded
+    // Word 4: value length
+    // Word 5: value bytes padded
+    var abiHex =
+        "0x" +
+        "0000000000000000000000000000000000000000000000000000000000000040" +
+        "0000000000000000000000000000000000000000000000000000000000000080" +
+        keyBytes.Length.ToString("x").PadLeft(64, '0') +
+        PadTo32Hex(keyBytes) +
+        valBytes.Length.ToString("x").PadLeft(64, '0') +
+        PadTo32Hex(valBytes);
+
+    // Fake user address (topics[1] = address padded to 32 bytes)
+    const string userTopic = "0x000000000000000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    // Set up a fake Ethereum HTTP JSON-RPC server
+    var rpcPort = TestNetHelpers.GetFreePort();
+    var rpcListener = new System.Net.HttpListener();
+    rpcListener.Prefixes.Add($"http://127.0.0.1:{rpcPort}/");
+    rpcListener.Start();
+
+    long blockNumberCall = 0;
+    var fakeRpcTask = Task.Run(async () =>
+    {
+        for (var i = 0; i < 4 && rpcListener.IsListening; i++)
+        {
+            HttpListenerContext ctx;
+            try { ctx = await rpcListener.GetContextAsync(); }
+            catch { break; }
+
+            var body = await new System.IO.StreamReader(ctx.Request.InputStream).ReadToEndAsync();
+            using var doc = JsonDocument.Parse(body);
+            var method = doc.RootElement.GetProperty("method").GetString();
+
+            string responseJson;
+            if (method == "eth_blockNumber")
+            {
+                var blockNum = Interlocked.Increment(ref blockNumberCall);
+                responseJson = $"{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x{blockNum:X}\"}}";
+            }
+            else if (method == "eth_getLogs")
+            {
+                // Return one synthetic DataWriteRequested log on first call
+                if (Interlocked.Read(ref blockNumberCall) == 1)
+                {
+                    responseJson = $@"{{
+                        ""jsonrpc"":""2.0"",""id"":2,""result"":[{{
+                            ""address"":""{contractAddress}"",
+                            ""topics"":[""{writeRequestedTopic}"",""{userTopic}""],
+                            ""data"":""{abiHex}"",
+                            ""blockNumber"":""0x1""
+                        }}]
+                    }}";
+                }
+                else
+                {
+                    responseJson = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":[]}";
+                }
+            }
+            else
+            {
+                responseJson = "{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":null}";
+            }
+
+            var respBytes = Encoding.UTF8.GetBytes(responseJson);
+            ctx.Response.ContentType = "application/json";
+            ctx.Response.ContentLength64 = respBytes.Length;
+            await ctx.Response.OutputStream.WriteAsync(respBytes);
+            ctx.Response.Close();
+        }
+    });
+
+    var innerSwarm = new InMemorySwarmClient();
+    var index = new InMemoryKeyIndex();
+    var store = new SwarmKeyValueStore(innerSwarm, index, new IntegrityOptions { Enabled = false });
+
+    var bridgeOptions = new EthereumBridgeOptions
+    {
+        Enabled = true,
+        RpcUrl = $"http://127.0.0.1:{rpcPort}/",
+        ContractAddress = contractAddress,
+        PollIntervalSeconds = 1,
+        ReconnectDelaySeconds = 1
+    };
+
+    var bridge = new EthereumBridgeService(
+        store,
+        bridgeOptions,
+        NullLogger<EthereumBridgeService>.Instance);
+
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    await bridge.StartAsync(cts.Token);
+
+    // Wait for the key to appear in the store (up to 8 seconds)
+    var found = await WaitUntilValueAsync(
+        async () => await store.GetAsync("eth:key"),
+        v => v is not null,
+        TimeSpan.FromSeconds(8),
+        TimeSpan.FromMilliseconds(200));
+
+    cts.Cancel();
+    await bridge.DisposeAsync();
+    rpcListener.Stop();
+    await fakeRpcTask;
+
+    Assert(found is not null, "Expected eth:key to be written by bridge.");
+    AssertEqual("eth_value", Encoding.UTF8.GetString(found!));
+}
+
 
 internal sealed record Settings(bool Enabled, int Count);
 

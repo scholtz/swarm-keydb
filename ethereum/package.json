@@ -1,0 +1,15 @@
+{
+  "name": "swarm-keydb-ethereum",
+  "version": "1.0.0",
+  "description": "Hardhat project for SwarmKeyDbOracle smart contracts",
+  "scripts": {
+    "compile": "npx hardhat compile",
+    "test": "npx hardhat test",
+    "node": "npx hardhat node",
+    "deploy:local": "npx hardhat run scripts/deploy.js --network localhost"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.0"
+  }
+}
