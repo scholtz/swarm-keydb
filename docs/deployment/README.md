@@ -35,3 +35,42 @@ kubectl apply -f deploy/k8s/swarm-keydb.yaml
 ```
 
 Bee API traffic stays internal to the cluster by default. If you need internet-reachable P2P connectivity, set a public `BEE_NAT_ADDR` and adjust the `swarm-bee-p2p` service for your cluster networking model.
+
+## Monitoring
+
+SwarmKeyDb exposes:
+
+- `/metrics` (Prometheus)
+- `/health` (liveness)
+- `/ready` (readiness)
+- `/dashboard` (HTML dashboard)
+
+Default ports:
+
+- `METRICS_PORT=9090`
+- `DASHBOARD_PORT=8080`
+
+Example Prometheus scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: swarm-keydb
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['swarm-keydb.default.svc.cluster.local:9090']
+```
+
+Example Grafana panel JSON:
+
+```json
+{
+  "title": "SwarmKeyDb error rate",
+  "type": "timeseries",
+  "targets": [
+    {
+      "expr": "rate(swarmkeydb_operations_total{status=\"error\"}[5m])",
+      "legendFormat": "errors/sec"
+    }
+  ]
+}
+```

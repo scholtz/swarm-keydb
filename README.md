@@ -158,6 +158,60 @@ The server can process write operations asynchronously through an internal queue
 - `SWARM_KEYDB_WRITE_BATCH_SIZE` (default `64`)
 - `SWARM_KEYDB_BATCH_FLUSH_INTERVAL_MS` (default `100`)
 
+### Monitoring and observability
+
+SwarmKeyDb now exposes production observability endpoints:
+
+- `GET /metrics` (Prometheus text format, default port `9090`)
+- `GET /health` (liveness)
+- `GET /ready` (Bee connectivity + postage batch validation when using `SWARM_KEYDB_BACKEND=bee`)
+- `GET /dashboard` (lightweight HTML dashboard, default port `8080`)
+- `GET /logs` (recent structured command logs with correlation IDs)
+
+Configuration (environment variables override `appsettings.json`):
+
+- `METRICS_ENABLED` (`true`/`false`, default `true`)
+- `METRICS_PORT` (default `9090`)
+- `DASHBOARD_ENABLED` (`true`/`false`, default `true`)
+- `DASHBOARD_PORT` (default `8080`)
+- `LOG_LEVEL` (`Debug`, `Information`, `Warning`, `Error`; default `Information`)
+
+Monitoring endpoints bind to the same host as Redis (`SWARM_KEYDB_BIND`, default `0.0.0.0`). For local-only exposure, set `SWARM_KEYDB_BIND=127.0.0.1`.
+
+Quick check:
+
+```bash
+curl http://localhost:9090/metrics
+curl http://localhost:8080/health
+curl http://localhost:8080/ready
+open http://localhost:8080/dashboard
+```
+
+Prometheus scrape example:
+
+```yaml
+scrape_configs:
+  - job_name: swarm-keydb
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['swarm-keydb:9090']
+```
+
+Grafana panel JSON example (import into a dashboard panel):
+
+```json
+{
+  "title": "SwarmKeyDb GET ops/sec",
+  "type": "timeseries",
+  "targets": [
+    {
+      "expr": "rate(swarmkeydb_operations_total{operation=\"get\",status=\"success\"}[1m])",
+      "legendFormat": "GET ops/sec"
+    }
+  ]
+}
+```
+
 ### Compression
 
 The server supports transparent value compression to reduce Swarm storage costs and improve transfer latency. Configure it with:

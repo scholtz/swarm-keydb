@@ -1,4 +1,7 @@
+using System.Diagnostics;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace SwarmKeyDb;
 
@@ -6,12 +9,20 @@ public sealed class RedisCommandProcessor : IDisposable
 {
     private readonly IKeyValueStore _store;
     private readonly IEthAddressAccessor? _ethAddressAccessor;
+    private readonly IRedisCommandObserver? _observer;
+    private readonly ILogger<RedisCommandProcessor> _logger;
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
 
-    public RedisCommandProcessor(IKeyValueStore store, IEthAddressAccessor? ethAddressAccessor = null)
+    public RedisCommandProcessor(
+        IKeyValueStore store,
+        IEthAddressAccessor? ethAddressAccessor = null,
+        IRedisCommandObserver? observer = null,
+        ILogger<RedisCommandProcessor>? logger = null)
     {
         _store = store;
         _ethAddressAccessor = ethAddressAccessor;
+        _observer = observer;
+        _logger = logger ?? NullLogger<RedisCommandProcessor>.Instance;
     }
 
     public async Task ProcessAsync(Stream input, Stream output, CancellationToken cancellationToken = default)
@@ -71,16 +82,32 @@ public sealed class RedisCommandProcessor : IDisposable
 
     public async Task<RespValue> ExecuteAsync(RespValue request, CancellationToken cancellationToken = default)
     {
+        var correlationId = Guid.NewGuid().ToString("N");
+        var stopwatch = Stopwatch.StartNew();
+        var command = request.Type == RespType.Array && request.Items is { Count: > 0 }
+            ? request.Items[0].AsString().ToUpperInvariant()
+            : "INVALID";
+        RespValue response;
+
+        using var scope = _logger.BeginScope(new Dictionary<string, object>
+        {
+            ["correlationId"] = correlationId,
+            ["command"] = command
+        });
+
         if (request.Type != RespType.Array || request.Items is null || request.Items.Count == 0)
         {
-            return RespValue.Error("ERR expected command array");
+            response = RespValue.Error("ERR expected command array");
+            _logger.LogWarning("Command rejected because request was not a RESP command array.");
+            RecordCommand(command, response, stopwatch.Elapsed, correlationId);
+            return response;
         }
 
         var args = request.Items;
-        var command = args[0].AsString().ToUpperInvariant();
+        command = args[0].AsString().ToUpperInvariant();
         try
         {
-            return command switch
+            response = command switch
             {
                 "PING" => args.Count > 1 ? RespValue.BulkString(args[1].Bytes) : RespValue.SimpleString("PONG"),
                 "ECHO" => RequireArity(args, 2) ?? RespValue.BulkString(args[1].Bytes),
@@ -110,20 +137,32 @@ public sealed class RedisCommandProcessor : IDisposable
         }
         catch (AccessDeniedException ex)
         {
-            return RespValue.Error("ERR " + ex.Message);
+            response = RespValue.Error("ERR " + ex.Message);
         }
         catch (ArgumentException ex)
         {
-            return RespValue.Error("ERR " + ex.Message);
+            response = RespValue.Error("ERR " + ex.Message);
         }
         catch (InvalidOperationException ex)
         {
-            return RespValue.Error("ERR " + ex.Message);
+            response = RespValue.Error("ERR " + ex.Message);
         }
         catch (OverflowException)
         {
-            return RespValue.Error("ERR value is not an integer or out of range");
+            response = RespValue.Error("ERR value is not an integer or out of range");
         }
+
+        if (response.Type == RespType.Error)
+        {
+            _logger.LogWarning("Command {Command} failed with protocol error: {Error}.", command, response.Text);
+        }
+        else
+        {
+            _logger.LogDebug("Command {Command} completed successfully.", command);
+        }
+
+        RecordCommand(command, response, stopwatch.Elapsed, correlationId);
+        return response;
     }
 
     private RespValue SetCallerAddress(IReadOnlyList<RespValue> args)
@@ -618,5 +657,37 @@ public sealed class RedisCommandProcessor : IDisposable
     public void Dispose()
     {
         _mutationGate.Dispose();
+    }
+
+    private void RecordCommand(string command, RespValue response, TimeSpan elapsed, string correlationId)
+    {
+        var operation = MapCommandToOperation(command);
+        var succeeded = response.Type != RespType.Error;
+        var errorType = succeeded ? null : ClassifyError(response.Text);
+        _observer?.OnCommandCompleted(command, operation, succeeded, errorType, elapsed, correlationId);
+    }
+
+    private static string MapCommandToOperation(string command) => command switch
+    {
+        "GET" => "get",
+        "SET" or "SETEX" or "PSETEX" => "put",
+        "DEL" => "delete",
+        "KEYS" or "SCAN" => "list",
+        "MGET" or "MSET" or "MSETNX" or "MDEL" => "batch",
+        _ => "other"
+    };
+
+    private static string ClassifyError(string? errorText)
+    {
+        if (string.IsNullOrWhiteSpace(errorText))
+        {
+            return "unknown";
+        }
+
+        var normalized = errorText.StartsWith("ERR ", StringComparison.OrdinalIgnoreCase)
+            ? errorText[4..]
+            : errorText;
+        var token = normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
+        return string.IsNullOrWhiteSpace(token) ? "unknown" : token.ToLowerInvariant();
     }
 }

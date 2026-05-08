@@ -23,6 +23,12 @@
 | `SWARM_KEYDB_WRITE_BATCH_SIZE` | `64` | Maximum number of queued writes drained per batch. |
 | `SWARM_KEYDB_BATCH_FLUSH_INTERVAL_MS` | `100` | Time window used to coalesce queued writes into a batch. |
 | `SWARM_KEYDB_LOG_LEVEL` | `Information` | Minimum console log level. |
+| `LOG_LEVEL` | `Information` | Preferred log level override (`Debug`, `Information`, `Warning`, `Error`). |
+| `JSON_LOGS` | auto (`true` outside Development) | Forces JSON (`true`) or simple console (`false`) formatting. |
+| `METRICS_ENABLED` | `true` | Enables `/metrics` endpoint. |
+| `METRICS_PORT` | `9090` | HTTP port used for Prometheus metrics exposure. |
+| `DASHBOARD_ENABLED` | `true` | Enables `/dashboard`, `/health`, `/ready`, and `/logs` endpoints. |
+| `DASHBOARD_PORT` | `8080` | HTTP port used by dashboard and health endpoints. |
 
 ## Bee client integration
 
