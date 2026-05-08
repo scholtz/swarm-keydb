@@ -1,0 +1,10 @@
+README.md
+pyproject.toml
+swarm_keydb/__init__.py
+swarm_keydb/client.py
+swarm_keydb.egg-info/PKG-INFO
+swarm_keydb.egg-info/SOURCES.txt
+swarm_keydb.egg-info/dependency_links.txt
+swarm_keydb.egg-info/requires.txt
+swarm_keydb.egg-info/top_level.txt
+tests/test_client.py

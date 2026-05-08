@@ -31,3 +31,41 @@ jobs:
 
     - name: Run tests
       run: dotnet run --project tests/SwarmKeyDb.Tests/SwarmKeyDb.Tests.csproj
+
+  sdk-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: JavaScript SDK tests
+      run: |
+        cd swarm-keydb-js
+        npm ci
+        npm test
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Python SDK tests
+      run: |
+        cd swarm-keydb-py
+        pip install .
+        python -m unittest discover -s tests -v
+
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: "1.22"
+
+    - name: Go SDK tests
+      run: |
+        cd swarm-keydb-go
+        go test ./...

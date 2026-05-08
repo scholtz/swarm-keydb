@@ -6,3 +6,5 @@ obj/
 TestResults/
 .swarm-keydb/
 data/
+node_modules/
+__pycache__/

@@ -9,6 +9,7 @@ This folder is the entrypoint for project documentation.
 - `deployment/` covers Docker Compose and Kubernetes deployment assets.
 - `reference/` documents configuration and environment variables.
 - `../examples/RangeScanExample/` contains a runnable C# example for prefix, range, and cursor scans.
+- `../swarm-keydb-js/`, `../swarm-keydb-py/`, and `../swarm-keydb-go/` contain language SDKs with examples and tests.
 
 ## Quick links
 
