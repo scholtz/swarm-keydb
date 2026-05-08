@@ -91,6 +91,59 @@ docker run --rm -p 6379:6379 \
   swarm-keydb
 ```
 
+### Encryption
+
+The server supports transparent end-to-end encryption (AES-256-GCM) for all values stored in Swarm. Only a client holding the correct key can read the data — Swarm node operators and network observers see only ciphertext.
+
+Configure it with:
+
+- `SWARM_KEYDB_ENCRYPTION_ENABLED` (`true`/`false`, default `false`)
+- `SWARM_KEYDB_ENCRYPTION_KEY` — 32-byte AES-256 key as a 64-character hex string (preferred for server deployments)
+- `SWARM_KEYDB_ENCRYPTION_ETH_KEY` — Ethereum private key as a 64-character hex string; the AES key is derived from it using HKDF-SHA256 (convenient for dApps where the user's wallet is the identity)
+
+**Security model:**
+
+- Each write generates a fresh random 12-byte nonce — identical values produce different ciphertext on every write.
+- The GCM authentication tag (16 bytes) provides integrity protection; tampered ciphertext causes a `CryptographicException` on read.
+- Encrypted blobs are identified by a 2-byte magic header (`0xAE 0x73`); unencrypted legacy values are returned unchanged for backward compatibility.
+- Key names (Redis keys) are **not** encrypted in this release — only values.
+
+**Startup behaviour:** If `SWARM_KEYDB_ENCRYPTION_ENABLED=true` but neither `SWARM_KEYDB_ENCRYPTION_KEY` nor `SWARM_KEYDB_ENCRYPTION_ETH_KEY` is set, the server fails fast with a descriptive error — it will never silently store plaintext when encryption is expected.
+
+**Layer ordering:** Encryption sits between Swarm storage and the compression layer (Swarm → Encrypt → Compress → Cache), so compressed data is stored encrypted.
+
+**Example (Docker):**
+
+```bash
+# Generate a random 32-byte key:
+openssl rand -hex 32
+
+docker run --rm -p 6379:6379 \
+  -e SWARM_KEYDB_ENCRYPTION_ENABLED=true \
+  -e SWARM_KEYDB_ENCRYPTION_KEY=<64-char-hex-key> \
+  -v swarm-keydb-data:/data \
+  swarm-keydb
+```
+
+**Ethereum keypair–derived key (developer-friendly):**
+
+```bash
+docker run --rm -p 6379:6379 \
+  -e SWARM_KEYDB_ENCRYPTION_ENABLED=true \
+  -e SWARM_KEYDB_ENCRYPTION_ETH_KEY=<64-char-hex-ethereum-private-key> \
+  -v swarm-keydb-data:/data \
+  swarm-keydb
+```
+
+**Round-trip example:**
+
+```bash
+redis-cli -p 6379 SET profile:name Ada
+# Value is stored as AES-256-GCM ciphertext in Swarm; raw Swarm bytes are unreadable.
+redis-cli -p 6379 GET profile:name
+# Returns: "Ada"  (decrypted transparently by the server)
+```
+
 ## Docker
 
 ```bash

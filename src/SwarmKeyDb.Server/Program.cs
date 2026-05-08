@@ -31,15 +31,32 @@ var compressionOptions = new CompressionOptions
         : CompressionAlgorithm.GZip,
     MinSizeBytes = GetInt("SWARM_KEYDB_COMPRESSION_MIN_SIZE_BYTES", 64)
 };
+var encryptionOptions = new EncryptionOptions
+{
+    Enabled = GetBool("SWARM_KEYDB_ENCRYPTION_ENABLED", false),
+    Algorithm = Enum.TryParse<EncryptionAlgorithm>(
+        Environment.GetEnvironmentVariable("SWARM_KEYDB_ENCRYPTION_ALGORITHM"), ignoreCase: true, out var encAlgo)
+        ? encAlgo
+        : EncryptionAlgorithm.AesGcm256,
+    KeyHex = Environment.GetEnvironmentVariable("SWARM_KEYDB_ENCRYPTION_KEY"),
+    EthPrivateKeyHex = Environment.GetEnvironmentVariable("SWARM_KEYDB_ENCRYPTION_ETH_KEY")
+};
 var services = new ServiceCollection();
 services.AddLogging(builder => builder.AddSimpleConsole().SetMinimumLevel(GetLogLevel("SWARM_KEYDB_LOG_LEVEL", LogLevel.Information)));
 services.AddOptions();
 services.AddSingleton<IOptions<CacheOptions>>(Options.Create(cacheOptions));
 services.AddSingleton<IOptions<CompressionOptions>>(Options.Create(compressionOptions));
+services.AddSingleton<IOptions<EncryptionOptions>>(Options.Create(encryptionOptions));
 services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
 services.AddSingleton<IKeyValueStore>(sp =>
 {
     IKeyValueStore store = new SwarmKeyValueStore(swarmClient, index);
+    if (encryptionOptions.Enabled)
+    {
+        var encOpts = sp.GetRequiredService<IOptions<EncryptionOptions>>();
+        var encLog = sp.GetRequiredService<ILogger<EncryptingKeyValueStore>>();
+        store = new EncryptingKeyValueStore(store, encOpts, encLog);
+    }
     store = new CompressingKeyValueStore(store, sp.GetRequiredService<IOptions<CompressionOptions>>(), sp.GetRequiredService<ILogger<CompressingKeyValueStore>>());
     store = new CachingKeyValueStore(store, sp.GetRequiredService<IMemoryCache>(), sp.GetRequiredService<IOptions<CacheOptions>>(), sp.GetRequiredService<ILogger<CachingKeyValueStore>>());
     return store;

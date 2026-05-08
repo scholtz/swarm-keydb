@@ -34,7 +34,15 @@ var tests = new (string Name, Func<Task> Test)[]
     ("compressing store skips compression below min size", CompressingKeyValueStoreSkipsCompressionBelowMinSizeAsync),
     ("compressing store handles legacy uncompressed data", CompressingKeyValueStoreHandlesLegacyUncompressedDataAsync),
     ("compressing store brotli compress and decompress", CompressingKeyValueStoreBrotliCompressAndDecompressAsync),
-    ("compressing store delete and ttl pass through", CompressingKeyValueStoreDeleteAndTtlPassThroughAsync)
+    ("compressing store delete and ttl pass through", CompressingKeyValueStoreDeleteAndTtlPassThroughAsync),
+    ("encrypting store put stores encrypted value", EncryptingKeyValueStorePutStoresEncryptedValueAsync),
+    ("encrypting store get returns decrypted value", EncryptingKeyValueStoreGetReturnsDecryptedValueAsync),
+    ("encrypting store nonce is random same value different ciphertext", EncryptingKeyValueStoreNonceIsRandomSameValueDifferentCiphertextAsync),
+    ("encrypting store legacy unencrypted data returned unchanged", EncryptingKeyValueStoreLegacyUnencryptedDataReturnedUnchangedAsync),
+    ("encrypting store tampered ciphertext throws cryptographic exception", EncryptingKeyValueStoreTamperedCiphertextThrowsCryptographicExceptionAsync),
+    ("encrypting store delete and ttl pass through", EncryptingKeyValueStoreDeleteAndTtlPassThroughAsync),
+    ("encrypting store ethereum key derivation produces consistent key", EncryptingKeyValueStoreEthereumKeyDerivationProducesConsistentKeyAsync),
+    ("encrypting store startup fails when enabled with no key", EncryptingKeyValueStoreStartupFailsWhenEnabledWithNoKeyAsync)
 };
 
 foreach (var (name, test) in tests)
@@ -443,6 +451,166 @@ static async Task CompressingKeyValueStoreDeleteAndTtlPassThroughAsync()
 
     var keys = await store.ListKeysAsync();
     Assert(!keys.Contains("pass:key"), "ListKeysAsync should show key deleted.");
+}
+
+static EncryptingKeyValueStore CreateEncryptingStore(IKeyValueStore inner, string? keyHex = null, string? ethPrivKeyHex = null, bool enabled = true)
+{
+    var options = Options.Create(new EncryptionOptions
+    {
+        Enabled = enabled,
+        KeyHex = keyHex,
+        EthPrivateKeyHex = ethPrivKeyHex
+    });
+    return new EncryptingKeyValueStore(inner, options, NullLogger<EncryptingKeyValueStore>.Instance);
+}
+
+static string MakeKeyHex() => Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+
+static async Task EncryptingKeyValueStorePutStoresEncryptedValueAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var keyHex = MakeKeyHex();
+    var store = CreateEncryptingStore(inner, keyHex: keyHex);
+    var original = System.Text.Encoding.UTF8.GetBytes("secret value");
+
+    await store.PutAsync("enc:key", original);
+
+    var stored = await inner.GetAsync("enc:key");
+    Assert(stored is not null, "Inner store should have data.");
+    Assert(!stored!.SequenceEqual(original), "Stored bytes should be encrypted (different from original).");
+    // Magic bytes 0xAE 0x73
+    Assert(stored[0] == 0xAE && stored[1] == 0x73, "Stored data should start with encryption magic bytes 0xAE 0x73.");
+}
+
+static async Task EncryptingKeyValueStoreGetReturnsDecryptedValueAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var keyHex = MakeKeyHex();
+    var store = CreateEncryptingStore(inner, keyHex: keyHex);
+    var original = System.Text.Encoding.UTF8.GetBytes("another secret");
+
+    await store.PutAsync("dec:key", original);
+    var retrieved = await store.GetAsync("dec:key");
+
+    Assert(retrieved is not null, "Retrieved value should not be null.");
+    Assert(retrieved!.SequenceEqual(original), "Decrypted value should equal the original plaintext.");
+}
+
+static async Task EncryptingKeyValueStoreNonceIsRandomSameValueDifferentCiphertextAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var keyHex = MakeKeyHex();
+    var store = CreateEncryptingStore(inner, keyHex: keyHex);
+    var original = System.Text.Encoding.UTF8.GetBytes("determinism test");
+
+    await store.PutAsync("nonce:key", original);
+    var first = (await inner.GetAsync("nonce:key"))!.ToArray();
+
+    await store.PutAsync("nonce:key", original);
+    var second = (await inner.GetAsync("nonce:key"))!.ToArray();
+
+    Assert(!first.SequenceEqual(second), "Two encryptions of the same value must produce different ciphertext (random nonce).");
+}
+
+static async Task EncryptingKeyValueStoreLegacyUnencryptedDataReturnedUnchangedAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var keyHex = MakeKeyHex();
+    var legacy = System.Text.Encoding.UTF8.GetBytes("old plaintext value");
+    // Store raw bytes directly in the inner store (no magic bytes).
+    await inner.PutAsync("legacy:key", legacy);
+
+    var store = CreateEncryptingStore(inner, keyHex: keyHex);
+    var retrieved = await store.GetAsync("legacy:key");
+
+    Assert(retrieved is not null, "Legacy value should be readable.");
+    Assert(retrieved!.SequenceEqual(legacy), "Legacy unencrypted value should be returned as-is.");
+}
+
+static async Task EncryptingKeyValueStoreTamperedCiphertextThrowsCryptographicExceptionAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var keyHex = MakeKeyHex();
+    var store = CreateEncryptingStore(inner, keyHex: keyHex);
+    var original = System.Text.Encoding.UTF8.GetBytes("tamper test");
+
+    await store.PutAsync("tamper:key", original);
+
+    // Flip a bit in the stored ciphertext (after the 30-byte header).
+    var stored = (await inner.GetAsync("tamper:key"))!;
+    stored[stored.Length - 1] ^= 0xFF;
+    await inner.PutAsync("tamper:key", stored);
+
+    var threw = false;
+    try
+    {
+        await store.GetAsync("tamper:key");
+    }
+    catch (System.Security.Cryptography.CryptographicException)
+    {
+        threw = true;
+    }
+
+    Assert(threw, "Tampered ciphertext must throw CryptographicException (GCM tag verification failure).");
+}
+
+static async Task EncryptingKeyValueStoreDeleteAndTtlPassThroughAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var keyHex = MakeKeyHex();
+    var store = CreateEncryptingStore(inner, keyHex: keyHex);
+    var value = System.Text.Encoding.UTF8.GetBytes("ttl test");
+
+    await store.PutAsync("pass:key", value);
+    Assert(await store.SetTtlAsync("pass:key", TimeSpan.FromMinutes(1)), "SetTtlAsync should pass through.");
+
+    var (exists, ttl) = await store.GetTtlAsync("pass:key");
+    Assert(exists, "GetTtlAsync should show key exists.");
+    Assert(ttl is not null, "GetTtlAsync should return a TTL.");
+
+    Assert(await store.RemoveTtlAsync("pass:key"), "RemoveTtlAsync should pass through.");
+    Assert(await store.DeleteAsync("pass:key"), "DeleteAsync should pass through.");
+
+    var keys = await store.ListKeysAsync();
+    Assert(!keys.Contains("pass:key"), "ListKeysAsync should show key deleted.");
+}
+
+static Task EncryptingKeyValueStoreEthereumKeyDerivationProducesConsistentKeyAsync()
+{
+    // A well-known Ethereum private key (test vector, NOT for production use).
+    var ethPrivKeyHex = "4c0883a69102937d6231471b5dbb6e538eba2ef45d64b07157e4bcef88d9bdba";
+
+    var key1 = EncryptingKeyValueStore.DeriveKeyFromEthPrivateKey(ethPrivKeyHex);
+    var key2 = EncryptingKeyValueStore.DeriveKeyFromEthPrivateKey(ethPrivKeyHex);
+
+    Assert(key1.Length == 32, "Derived key should be 32 bytes.");
+    Assert(key1.SequenceEqual(key2), "Same Ethereum private key must always derive the same AES key.");
+
+    // Different Ethereum key must produce a different AES key.
+    var differentEthKey = "1c0883a69102937d6231471b5dbb6e538eba2ef45d64b07157e4bcef88d9bdba";
+    var key3 = EncryptingKeyValueStore.DeriveKeyFromEthPrivateKey(differentEthKey);
+    Assert(!key1.SequenceEqual(key3), "Different Ethereum keys must derive different AES keys.");
+
+    return Task.CompletedTask;
+}
+
+static Task EncryptingKeyValueStoreStartupFailsWhenEnabledWithNoKeyAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var options = Options.Create(new EncryptionOptions { Enabled = true, KeyHex = null, EthPrivateKeyHex = null });
+
+    var threw = false;
+    try
+    {
+        _ = new EncryptingKeyValueStore(inner, options, NullLogger<EncryptingKeyValueStore>.Instance);
+    }
+    catch (InvalidOperationException ex) when (ex.Message.Contains("no key is configured"))
+    {
+        threw = true;
+    }
+
+    Assert(threw, "Constructor must throw InvalidOperationException when encryption is enabled but no key is configured.");
+    return Task.CompletedTask;
 }
 
 static async Task<string> ExecuteAsync(RedisCommandProcessor processor, string commands)
