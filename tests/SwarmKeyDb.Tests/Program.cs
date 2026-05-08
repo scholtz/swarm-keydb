@@ -31,6 +31,11 @@ var tests = new (string Name, Func<Task> Test)[]
     ("ttl returns negative two for missing key", TtlReturnsNegativeTwoForMissingKeyAsync),
     ("set with ex option sets expiry", SetWithExOptionSetsExpiryAsync),
     ("batch operations resp format", BatchOperationsRespFormatAsync),
+    ("async batch get and put round trip", AsyncBatchGetAndPutRoundTripAsync),
+    ("async flush waits for queued fire and forget writes", AsyncFlushWaitsForQueuedFireAndForgetWritesAsync),
+    ("async fire and forget captures and logs errors", AsyncFireAndForgetCapturesAndLogsErrorsAsync),
+    ("async write queue respects configured max concurrency", AsyncWriteQueueRespectsConfiguredMaxConcurrencyAsync),
+    ("async batch throughput is at least 2x sequential baseline", AsyncBatchThroughputIsAtLeastTwoXSequentialBaselineAsync),
     ("setex rejects non positive ttl", SetExRejectsNonPositiveTtlAsync),
     ("msetnx does not partially write when blocked", MSetNxDoesNotPartiallyWriteWhenBlockedAsync),
     ("pexpire and pttl round trip", PExpireAndPttlRoundTripAsync),
@@ -472,6 +477,103 @@ static async Task BatchOperationsRespFormatAsync()
     AssertEqual("+OK\r\n*3\r\n$1\r\n1\r\n$-1\r\n$1\r\n2\r\n:0\r\n:1\r\n:2\r\n", response);
 }
 
+static async Task AsyncBatchGetAndPutRoundTripAsync()
+{
+    var client = new SwarmKeyDbClient(CreateAsyncQueuedStore(new CountingKeyValueStore(), maxConcurrentWrites: 4));
+    await client.BatchPutAsync(new[]
+    {
+        new KeyValuePair<string, ReadOnlyMemory<byte>>("batch:a", Encoding.UTF8.GetBytes("1")),
+        new KeyValuePair<string, ReadOnlyMemory<byte>>("batch:b", Encoding.UTF8.GetBytes("2")),
+        new KeyValuePair<string, ReadOnlyMemory<byte>>("batch:c", Encoding.UTF8.GetBytes("3"))
+    });
+
+    var values = await client.BatchGetAsync(new[] { "batch:a", "missing", "batch:c" });
+    AssertEqual("1", Encoding.UTF8.GetString(values[0]!));
+    AssertEqual(null, values[1]);
+    AssertEqual("3", Encoding.UTF8.GetString(values[2]!));
+}
+
+static async Task AsyncFlushWaitsForQueuedFireAndForgetWritesAsync()
+{
+    var inner = new DelayedWriteKeyValueStore(writeDelayMs: 30);
+    var client = new SwarmKeyDbClient(CreateAsyncQueuedStore(inner, maxConcurrentWrites: 4, batchSize: 50, flushIntervalMs: 10));
+
+    for (var i = 0; i < 30; i++)
+    {
+        var key = $"flush:{i:D2}";
+        client.FireAndForget(() => client.PutStringAsync(key, "value"), operationName: $"put-{i}");
+    }
+
+    await client.FlushAsync();
+    var keys = await client.GetKeysWithPrefixAsync("flush:");
+    AssertEqual(30, keys.Count);
+}
+
+static async Task AsyncFireAndForgetCapturesAndLogsErrorsAsync()
+{
+    var logger = new TestLogger<AsyncQueuedKeyValueStore>();
+    var store = new AsyncQueuedKeyValueStore(new CountingKeyValueStore(), new AsyncProcessingOptions(), logger);
+
+    store.FireAndForget(() => throw new InvalidOperationException("boom"), "exploding-write");
+
+    var captured = await WaitUntilValueAsync(
+        action: () => Task.FromResult(logger.Messages.Count),
+        predicate: count => count > 0,
+        timeout: TimeSpan.FromSeconds(2),
+        pollInterval: TimeSpan.FromMilliseconds(25));
+
+    Assert(captured > 0, "Expected fire-and-forget logger to capture the exception.");
+    Assert(logger.Messages.Any(message => message.Contains("exploding-write", StringComparison.Ordinal)), "Expected operation name in structured log message.");
+}
+
+static async Task AsyncWriteQueueRespectsConfiguredMaxConcurrencyAsync()
+{
+    var inner = new DelayedWriteKeyValueStore(writeDelayMs: 40);
+    var client = new SwarmKeyDbClient(CreateAsyncQueuedStore(inner, maxConcurrentWrites: 2, batchSize: 100, flushIntervalMs: 5));
+
+    var entries = Enumerable.Range(0, 20)
+        .Select(i => new KeyValuePair<string, ReadOnlyMemory<byte>>($"concurrency:{i}", Encoding.UTF8.GetBytes("v")))
+        .ToArray();
+
+    await client.BatchPutAsync(entries);
+    await client.FlushAsync();
+
+    Assert(inner.MaxObservedConcurrentWrites <= 2, "Write queue should never exceed max concurrent writes.");
+    Assert(inner.MaxObservedConcurrentWrites >= 2, "Write queue should process at least two writes in parallel when configured.");
+}
+
+static async Task AsyncBatchThroughputIsAtLeastTwoXSequentialBaselineAsync()
+{
+    const int operationCount = 120;
+    const int writeDelayMs = 20;
+
+    var baselineStore = new DelayedWriteKeyValueStore(writeDelayMs);
+    var baselineWatch = System.Diagnostics.Stopwatch.StartNew();
+    for (var i = 0; i < operationCount; i++)
+    {
+        await baselineStore.PutAsync($"baseline:{i}", Encoding.UTF8.GetBytes("v"));
+    }
+    baselineWatch.Stop();
+
+    var asyncClient = new SwarmKeyDbClient(CreateAsyncQueuedStore(
+        new DelayedWriteKeyValueStore(writeDelayMs),
+        maxConcurrentWrites: 8,
+        batchSize: operationCount,
+        flushIntervalMs: 1));
+    var payload = Enumerable.Range(0, operationCount)
+        .Select(i => new KeyValuePair<string, ReadOnlyMemory<byte>>($"async:{i}", Encoding.UTF8.GetBytes("v")))
+        .ToArray();
+
+    var asyncWatch = System.Diagnostics.Stopwatch.StartNew();
+    await asyncClient.BatchPutAsync(payload);
+    await asyncClient.FlushAsync();
+    asyncWatch.Stop();
+
+    var improvedAtLeastTwoX = asyncWatch.Elapsed.TotalMilliseconds * 2 <= baselineWatch.Elapsed.TotalMilliseconds;
+    Assert(improvedAtLeastTwoX,
+        $"Expected >=2x throughput improvement. Baseline: {baselineWatch.Elapsed.TotalMilliseconds:F2} ms, Async: {asyncWatch.Elapsed.TotalMilliseconds:F2} ms.");
+}
+
 static async Task SetExRejectsNonPositiveTtlAsync()
 {
     var processor = CreateProcessor();
@@ -718,6 +820,22 @@ static CachingKeyValueStore CreateCachingStore(CountingKeyValueStore inner, int 
     var cache = new MemoryCache(new MemoryCacheOptions());
     return new CachingKeyValueStore(inner, cache, options, NullLogger<CachingKeyValueStore>.Instance);
 }
+
+static AsyncQueuedKeyValueStore CreateAsyncQueuedStore(
+    IKeyValueStore inner,
+    int maxConcurrentWrites,
+    int batchSize = 64,
+    int flushIntervalMs = 5) =>
+    new(
+        inner,
+        new AsyncProcessingOptions
+        {
+            Enabled = true,
+            MaxConcurrentWrites = maxConcurrentWrites,
+            WriteBatchSize = batchSize,
+            BatchFlushIntervalMs = flushIntervalMs
+        },
+        NullLogger<AsyncQueuedKeyValueStore>.Instance);
 
 static CompressingKeyValueStore CreateCompressingStore(IKeyValueStore inner, bool enabled = true, CompressionAlgorithm algorithm = CompressionAlgorithm.GZip, int minSizeBytes = 0)
 {
@@ -1739,4 +1857,102 @@ internal sealed class CountingKeyValueStore : IKeyValueStore
         Task.FromResult(_expiries.Remove(key));
 
     public int GetCallCount(string key) => _getCalls.TryGetValue(key, out var count) ? count : 0;
+}
+
+internal sealed class DelayedWriteKeyValueStore : IKeyValueStore
+{
+    private readonly int _writeDelayMs;
+    private readonly Dictionary<string, byte[]> _values = new(StringComparer.Ordinal);
+    private readonly object _sync = new();
+    private int _activeWrites;
+    private int _maxObservedConcurrentWrites;
+
+    public DelayedWriteKeyValueStore(int writeDelayMs)
+    {
+        _writeDelayMs = writeDelayMs;
+    }
+
+    public int MaxObservedConcurrentWrites => Volatile.Read(ref _maxObservedConcurrentWrites);
+
+    public async Task PutAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default)
+    {
+        var active = Interlocked.Increment(ref _activeWrites);
+        while (true)
+        {
+            var currentMax = Volatile.Read(ref _maxObservedConcurrentWrites);
+            if (active <= currentMax)
+            {
+                break;
+            }
+
+            if (Interlocked.CompareExchange(ref _maxObservedConcurrentWrites, active, currentMax) == currentMax)
+            {
+                break;
+            }
+        }
+
+        try
+        {
+            await Task.Delay(_writeDelayMs, cancellationToken);
+            lock (_sync)
+            {
+                _values[key] = value.ToArray();
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _activeWrites);
+        }
+    }
+
+    public Task<byte[]?> GetAsync(string key, CancellationToken cancellationToken = default) =>
+        Task.FromResult(GetValueCopy(key));
+
+    public Task<bool> DeleteAsync(string key, CancellationToken cancellationToken = default) =>
+        Task.FromResult(DeleteKey(key));
+
+    public Task<IReadOnlyList<string>> ListKeysAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<string>>(ListKeysSnapshot());
+
+    private byte[]? GetValueCopy(string key)
+    {
+        lock (_sync)
+        {
+            return _values.TryGetValue(key, out var value) ? value.ToArray() : null;
+        }
+    }
+
+    private bool DeleteKey(string key)
+    {
+        lock (_sync)
+        {
+            return _values.Remove(key);
+        }
+    }
+
+    private IReadOnlyList<string> ListKeysSnapshot()
+    {
+        lock (_sync)
+        {
+            return _values.Keys.OrderBy(static key => key, StringComparer.Ordinal).ToArray();
+        }
+    }
+}
+
+internal sealed class TestLogger<T> : Microsoft.Extensions.Logging.ILogger<T>
+{
+    public List<string> Messages { get; } = [];
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+    public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+    public void Log<TState>(
+        Microsoft.Extensions.Logging.LogLevel logLevel,
+        Microsoft.Extensions.Logging.EventId eventId,
+        TState state,
+        Exception? exception,
+        Func<TState, Exception?, string> formatter)
+    {
+        Messages.Add(formatter(state, exception));
+    }
 }

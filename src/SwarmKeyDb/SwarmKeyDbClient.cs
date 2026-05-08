@@ -15,6 +15,9 @@ public sealed class SwarmKeyDbClient
     public Task PutBytesAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default) =>
         _store.PutAsync(key, value, cancellationToken);
 
+    public Task PutAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default) =>
+        PutBytesAsync(key, value, cancellationToken);
+
     /// <summary>
     /// Stores a value using an explicit merge strategy for this write.
     /// </summary>
@@ -40,6 +43,9 @@ public sealed class SwarmKeyDbClient
     public Task<byte[]?> GetBytesAsync(string key, CancellationToken cancellationToken = default) =>
         _store.GetAsync(key, cancellationToken);
 
+    public Task<byte[]?> GetAsync(string key, CancellationToken cancellationToken = default) =>
+        GetBytesAsync(key, cancellationToken);
+
     public Task PutStringAsync(string key, string value, CancellationToken cancellationToken = default) =>
         _store.PutAsync(key, Encoding.UTF8.GetBytes(value), cancellationToken);
 
@@ -63,6 +69,22 @@ public sealed class SwarmKeyDbClient
 
     public Task<bool> DeleteAsync(string key, CancellationToken cancellationToken = default) =>
         _store.DeleteAsync(key, cancellationToken);
+
+    public async Task<IReadOnlyList<byte[]?>> BatchGetAsync(IEnumerable<string> keys, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(keys);
+        var tasks = keys.Select(key => _store.GetAsync(key, cancellationToken)).ToArray();
+        return await Task.WhenAll(tasks).ConfigureAwait(false);
+    }
+
+    public async Task BatchPutAsync(
+        IEnumerable<KeyValuePair<string, ReadOnlyMemory<byte>>> values,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        var tasks = values.Select(entry => _store.PutAsync(entry.Key, entry.Value, cancellationToken)).ToArray();
+        await Task.WhenAll(tasks).ConfigureAwait(false);
+    }
 
     public Task<IReadOnlyList<string>> KeysAsync(CancellationToken cancellationToken = default) =>
         _store.ListKeysAsync(cancellationToken);
@@ -106,4 +128,57 @@ public sealed class SwarmKeyDbClient
     /// </summary>
     public Task<int> DeleteNamespaceAsync(string prefix, CancellationToken cancellationToken = default) =>
         _store.DeleteNamespaceAsync(prefix, cancellationToken);
+
+    public Task FlushAsync(CancellationToken cancellationToken = default) =>
+        _store is IAsyncProcessingStore asyncStore
+            ? asyncStore.FlushAsync(cancellationToken)
+            : Task.CompletedTask;
+
+    public void FireAndForget(Func<Task> operation, string operationName = "fire-and-forget")
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+
+        if (_store is IAsyncProcessingStore asyncStore)
+        {
+            asyncStore.FireAndForget(operation, operationName);
+            return;
+        }
+
+        try
+        {
+            var task = operation();
+            if (task.IsCompleted)
+            {
+                if (task.IsFaulted)
+                {
+                    Console.Error.WriteLine($"[SwarmKeyDb] Fire-and-forget operation '{operationName}' failed: {task.Exception?.GetBaseException().Message}");
+                }
+
+                return;
+            }
+
+            _ = task.ContinueWith(
+                continuationTask =>
+                {
+                    Console.Error.WriteLine($"[SwarmKeyDb] Fire-and-forget operation '{operationName}' failed: {continuationTask.Exception?.GetBaseException().Message}");
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted,
+                TaskScheduler.Default);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[SwarmKeyDb] Fire-and-forget operation '{operationName}' failed: {ex.Message}");
+        }
+    }
+
+    public void FireAndForget(Action operation, string operationName = "fire-and-forget")
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        FireAndForget(() =>
+        {
+            operation();
+            return Task.CompletedTask;
+        }, operationName);
+    }
 }

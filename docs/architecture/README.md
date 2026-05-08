@@ -13,7 +13,7 @@ SwarmKeyDb exposes a Redis-compatible RESP server backed by a key index and a Sw
 1. The Redis command processor translates RESP commands into `IKeyValueStore` operations.
 2. The key index tracks metadata such as keys, references, and TTL state.
 3. Values are stored locally for development or uploaded through Bee for Swarm-backed deployments.
-4. Optional compression, encryption, and caching are layered around the core store in the server host.
+4. Optional compression, encryption, caching, and asynchronous write queueing are layered around the core store in the server host.
 
 ## Deployment model
 
