@@ -41,8 +41,6 @@ export class SwarmKeyDb {
     this.tokenToPlain = new Map();
     this.didMode = options.didMode ?? DidAuthMode.None;
     this._currentDid = null;
-    this._currentProofMessage = null;
-    this._currentProofSignature = null;
   }
 
   async connect() {
@@ -88,8 +86,6 @@ export class SwarmKeyDb {
    */
   async setDid(did, proofMessage, proofSignature) {
     this._currentDid = did;
-    this._currentProofMessage = proofMessage ?? null;
-    this._currentProofSignature = proofSignature ?? null;
 
     const args = ['AUTHDID', did];
     if (proofMessage && proofSignature) {
@@ -103,8 +99,6 @@ export class SwarmKeyDb {
    */
   clearDid() {
     this._currentDid = null;
-    this._currentProofMessage = null;
-    this._currentProofSignature = null;
   }
 
   async get(key) {
