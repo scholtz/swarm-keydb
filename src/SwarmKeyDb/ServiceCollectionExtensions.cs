@@ -10,12 +10,23 @@ public static class ServiceCollectionExtensions
 {
     public static IServiceCollection AddSwarmKeyDbStore(this IServiceCollection services, ISwarmClient swarmClient, IKeyIndex index)
     {
-        services.AddSingleton<IKeyValueStore>(sp =>
-        {
-            IKeyValueStore store = new SwarmKeyValueStore(
+        ArgumentNullException.ThrowIfNull(swarmClient);
+        ArgumentNullException.ThrowIfNull(index);
+        return services.AddSwarmKeyDbStore(
+            sp => new SwarmKeyValueStore(
                 swarmClient,
                 index,
-                sp.GetService<IOptions<IntegrityOptions>>()?.Value);
+                sp.GetService<IOptions<IntegrityOptions>>()?.Value));
+    }
+
+    public static IServiceCollection AddSwarmKeyDbStore(
+        this IServiceCollection services,
+        Func<IServiceProvider, IKeyValueStore> baseStoreFactory)
+    {
+        ArgumentNullException.ThrowIfNull(baseStoreFactory);
+        services.AddSingleton<IKeyValueStore>(sp =>
+        {
+            IKeyValueStore store = baseStoreFactory(sp);
 
             if (sp.GetRequiredService<IOptions<AclOptions>>().Value.Enabled)
             {

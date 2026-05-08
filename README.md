@@ -11,6 +11,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 - CRDT-backed conflict resolution (LWW register by default, with OR-Set and PN-counter strategies available).
 - Prefix scans, lexicographic range scans, predicate queries, and cursor-based iteration.
 - Bee HTTP API storage with postage batch configuration handled by environment variables.
+- Optional sharding router with consistent hashing across up to 64 shards.
 - Local file storage backend for development and tests.
 - `skdb` CLI for database management and debugging from the terminal.
 - `swarmkeydb-migrate` CLI for Redis-to-SwarmKeyDb migrations with dry-run, prefix filters, resumable checkpoints, and validation sampling.
@@ -180,6 +181,41 @@ The checked-in Docker Compose and Kubernetes manifests default to a Bee Sepolia 
 
 The key index is persisted in `SWARM_KEYDB_DATA_DIR/index.json` and values are fetched from the Swarm references stored there.
 
+### Scaling to multiple nodes (sharding)
+
+Enable sharding with a single config block:
+
+```json
+{
+  "Sharding": {
+    "Enabled": true,
+    "ShardCount": 3,
+    "VirtualNodesPerNode": 128,
+    "Nodes": [
+      { "name": "shard-a", "beeUrl": "http://bee-a:1633/", "postageBatchId": "..." },
+      { "name": "shard-b", "beeUrl": "http://bee-b:1633/", "postageBatchId": "..." },
+      { "name": "shard-c", "beeUrl": "http://bee-c:1633/", "postageBatchId": "..." }
+    ]
+  }
+}
+```
+
+Environment variable equivalents:
+
+- `SWARM_KEYDB_SHARDING_ENABLED=true`
+- `SWARM_KEYDB_SHARDING_SHARD_COUNT=3`
+- `SWARM_KEYDB_SHARDING_VIRTUAL_NODES=128`
+- `SWARM_KEYDB_SHARDING_NODES='[{"name":"shard-a","beeUrl":"http://bee-a:1633/"},...]'`
+
+If `SWARM_KEYDB_SHARDING_SHARD_COUNT` is omitted, SwarmKeyDb defaults it to the number of configured shard nodes.
+
+Manual rebalancing in v1 is operator-driven: deploy the new topology, copy keys via `SCAN` + rewrite (`GET`/`SET`) through the new router, verify shard health, then retire old nodes.
+
+Copy-pasteable 3-shard Docker Compose example:
+
+- `examples/sharding/docker-compose.yml`
+- `examples/sharding/README.md`
+
 ### In-memory read cache
 
 The server enables an in-memory read-through cache by default for hot keys. Configure it with:
@@ -216,6 +252,11 @@ Configuration (environment variables override `appsettings.json`):
 - `DASHBOARD_ENABLED` (`true`/`false`, default `true`)
 - `DASHBOARD_PORT` (default `8080`)
 - `LOG_LEVEL` (`Debug`, `Information`, `Warning`, `Error`; default `Information`)
+
+When sharding is enabled, `/health` and `/ready` include per-shard state and `/metrics` exposes:
+
+- `swarmkeydb_shard_up{shard="..."}`
+- `swarmkeydb_shard_key_count{shard="..."}`
 
 Monitoring endpoints bind to the same host as Redis (`SWARM_KEYDB_BIND`, default `0.0.0.0`). For local-only exposure, set `SWARM_KEYDB_BIND=127.0.0.1`.
 

@@ -11,7 +11,7 @@
 - [x] Add in-memory caching layer for frequently accessed keys. (100%)
 - [x] Implement data compression to reduce storage costs on Swarm. (100%)
 - [x] Optimize indexing for faster key lookups and iterations. (100%)
-- [ ] Enable horizontal scaling with sharding across multiple Swarm nodes.
+- [x] Enable horizontal scaling with sharding across multiple Swarm nodes. (100%)
 - [x] Add asynchronous processing for high-throughput operations. (100%)
 
 ## Security and Privacy

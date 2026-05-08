@@ -23,6 +23,12 @@
 | `SWARM_KEYDB_MAX_CONCURRENT_WRITES` | `4` | Maximum number of queued write operations processed in parallel. |
 | `SWARM_KEYDB_WRITE_BATCH_SIZE` | `64` | Maximum number of queued writes drained per batch. |
 | `SWARM_KEYDB_BATCH_FLUSH_INTERVAL_MS` | `100` | Time window used to coalesce queued writes into a batch. |
+| `SWARM_KEYDB_SHARDING_ENABLED` | `false` | Enables shard-aware routing with consistent hashing. |
+| `SWARM_KEYDB_SHARDING_SHARD_COUNT` | derived from configured nodes (min `1`, max `64`) | Number of hash buckets used for key routing. |
+| `SWARM_KEYDB_SHARDING_VIRTUAL_NODES` | `128` | Virtual nodes per shard in the consistent hash ring. |
+| `SWARM_KEYDB_SHARDING_NODES` | unset | JSON array of shard nodes (`name`, optional `beeUrl`, optional `postageBatchId`, optional `dataDir`). |
+
+`SWARM_KEYDB_SHARDING_SHARD_COUNT` defaults to the configured shard node count when not explicitly set.
 | `SWARM_KEYDB_LOG_LEVEL` | `Information` | Minimum console log level. |
 | `LOG_LEVEL` | `Information` | Preferred log level override (`Debug`, `Information`, `Warning`, `Error`). |
 | `JSON_LOGS` | auto (`true` outside Development) | Forces JSON (`true`) or simple console (`false`) formatting. |
@@ -37,6 +43,8 @@
 | --- | --- | --- |
 | `BEE_URL` | `http://localhost:1633/` | Bee API base URL used by the Bee-backed store. |
 | `BEE_POSTAGE_BATCH_ID` | required for `bee` backend | Postage batch id used for uploads. |
+
+When sharding is enabled and a shard node omits `postageBatchId`, the global `BEE_POSTAGE_BATCH_ID` fallback is used.
 
 ## CLI (`skdb`)
 
