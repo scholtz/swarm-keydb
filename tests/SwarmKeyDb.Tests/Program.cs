@@ -134,6 +134,7 @@ var tests = new (string Name, Func<Task> Test)[]
     ("ethereum abi decodes data read requested event", EthereumAbiDecodesDataReadRequestedEventAsync),
     ("ethereum bridge monitoring endpoint returns bridge state", EthereumBridgeMonitoringEndpointReturnsBridgeStateAsync),
     ("ethereum bridge service handles data write event and writes to store", EthereumBridgeServiceHandlesDataWriteEventAndWritesToStoreAsync),
+    ("ethereum bridge service handles data read event and resolves from store", EthereumBridgeServiceHandlesDataReadEventAndResolvesFromStoreAsync),
 };
 
 foreach (var (name, test) in tests)
@@ -2736,6 +2737,8 @@ static async Task EthereumBridgeMonitoringEndpointReturnsBridgeStateAsync()
     var response = await client.GetAsync($"http://127.0.0.1:{port}/ethereum/bridge");
     var payload = await response.Content.ReadAsStringAsync();
 
+    // Disabled bridge should return HTTP 200 (intentional opt-out, not a failure)
+    AssertEqual(HttpStatusCode.OK, response.StatusCode);
     Assert(payload.Contains("\"status\":\"disabled\"", StringComparison.Ordinal),
         $"Expected disabled status in bridge response. Got: {payload}");
 
@@ -2874,6 +2877,123 @@ static async Task EthereumBridgeServiceHandlesDataWriteEventAndWritesToStoreAsyn
 
     Assert(found is not null, "Expected eth:key to be written by bridge.");
     AssertEqual("eth_value", Encoding.UTF8.GetString(found!));
+}
+
+static async Task EthereumBridgeServiceHandlesDataReadEventAndResolvesFromStoreAsync()
+{
+    // Compute the DataReadRequested event topic
+    var readRequestedTopic = "0x" + KeccakHash.ComputeHex("DataReadRequested(address,string)");
+    const string contractAddress = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+    // ABI-encode (string key="read:key")  — single string ABI
+    // Word 0: offset to key = 0x20 (32)
+    // Word 1: key length = 8 ("read:key")
+    // Word 2: key bytes padded to 32
+    var keyBytes = Encoding.UTF8.GetBytes("read:key"); // 8 bytes
+
+    static string PadTo32Hex2(byte[] b)
+    {
+        var padded = new byte[32];
+        Buffer.BlockCopy(b, 0, padded, 0, b.Length);
+        return Convert.ToHexString(padded).ToLowerInvariant();
+    }
+
+    var abiHex =
+        "0x" +
+        "0000000000000000000000000000000000000000000000000000000000000020" +
+        keyBytes.Length.ToString("x").PadLeft(64, '0') +
+        PadTo32Hex2(keyBytes);
+
+    const string userTopic = "0x000000000000000000000000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    // Set up fake Ethereum HTTP JSON-RPC server
+    var rpcPort = TestNetHelpers.GetFreePort();
+    var rpcListener = new System.Net.HttpListener();
+    rpcListener.Prefixes.Add($"http://127.0.0.1:{rpcPort}/");
+    rpcListener.Start();
+
+    long blockCall = 0;
+    var fakeRpcTask = Task.Run(async () =>
+    {
+        for (var i = 0; i < 4 && rpcListener.IsListening; i++)
+        {
+            HttpListenerContext ctx;
+            try { ctx = await rpcListener.GetContextAsync(); }
+            catch { break; }
+
+            var body = await new System.IO.StreamReader(ctx.Request.InputStream).ReadToEndAsync();
+            using var doc = JsonDocument.Parse(body);
+            var method = doc.RootElement.GetProperty("method").GetString();
+
+            string responseJson;
+            if (method == "eth_blockNumber")
+            {
+                var n = Interlocked.Increment(ref blockCall);
+                responseJson = $"{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x{n:X}\"}}";
+            }
+            else if (method == "eth_getLogs" && Interlocked.Read(ref blockCall) == 1)
+            {
+                responseJson = $@"{{
+                    ""jsonrpc"":""2.0"",""id"":2,""result"":[{{
+                        ""address"":""{contractAddress}"",
+                        ""topics"":[""{readRequestedTopic}"",""{userTopic}""],
+                        ""data"":""{abiHex}"",
+                        ""blockNumber"":""0x1""
+                    }}]
+                }}";
+            }
+            else
+            {
+                responseJson = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":[]}";
+            }
+
+            var respBytes = Encoding.UTF8.GetBytes(responseJson);
+            ctx.Response.ContentType = "application/json";
+            ctx.Response.ContentLength64 = respBytes.Length;
+            await ctx.Response.OutputStream.WriteAsync(respBytes);
+            ctx.Response.Close();
+        }
+    });
+
+    var innerSwarm = new InMemorySwarmClient();
+    var index = new InMemoryKeyIndex();
+    var store = new SwarmKeyValueStore(innerSwarm, index, new IntegrityOptions { Enabled = false });
+    // Pre-populate the store with the value the read request should resolve
+    await store.PutAsync("read:key", Encoding.UTF8.GetBytes("resolved_value"));
+
+    var bridgeOptions = new EthereumBridgeOptions
+    {
+        Enabled = true,
+        RpcUrl = $"http://127.0.0.1:{rpcPort}/",
+        ContractAddress = contractAddress,
+        PollIntervalSeconds = 1,
+        ReconnectDelaySeconds = 1
+    };
+
+    var bridge = new EthereumBridgeService(
+        store,
+        bridgeOptions,
+        NullLogger<EthereumBridgeService>.Instance);
+
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    await bridge.StartAsync(cts.Token);
+
+    // Wait until the bridge has processed the DataReadRequested event (eventCount > 0)
+    var state = await WaitUntilValueAsync(
+        () => Task.FromResult(bridge.GetState()),
+        s => s.EventCount > 0,
+        TimeSpan.FromSeconds(8),
+        TimeSpan.FromMilliseconds(200));
+
+    cts.Cancel();
+    await bridge.DisposeAsync();
+    rpcListener.Stop();
+    await fakeRpcTask;
+
+    Assert(state.EventCount > 0, "Expected bridge to process at least one DataReadRequested event.");
+    // The store value should still be intact after a read (read-only operation)
+    var value = await store.GetAsync("read:key");
+    AssertEqual("resolved_value", Encoding.UTF8.GetString(value!));
 }
 
 

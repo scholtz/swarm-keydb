@@ -174,7 +174,11 @@ public sealed class MonitoringHttpServer : IDisposable
         if (path.Equals("/ethereum/bridge", StringComparison.OrdinalIgnoreCase))
         {
             var bridgeState = _ethereumBridge?.GetState() ?? new EthereumBridgeState();
-            var statusCode = bridgeState.Status == EthereumBridgeStatus.Connected
+            // Return 200 when bridge is disabled (intentional) or connected.
+            // Return 503 only when the bridge is enabled but not currently operational
+            // (connecting / retrying / error) to signal a transient failure.
+            var statusCode = bridgeState.Status is EthereumBridgeStatus.Connected
+                                                 or EthereumBridgeStatus.Disabled
                 ? HttpStatusCode.OK
                 : HttpStatusCode.ServiceUnavailable;
             await WriteJsonAsync(
