@@ -32,5 +32,5 @@
 - [x] Integrate with IPFS for hybrid storage options. (100%)
 - [x] Enable interoperability with Ethereum smart contracts. (100%: `EthereumBridgeService` background service with WebSocket + HTTP polling, `ISwarmKeyDb.sol` interface, `SwarmKeyDbOracle.sol` reference implementation with Hardhat tests, `/ethereum/bridge` monitoring endpoint, `ETH_*` environment variable configuration, Docker Compose example with local Hardhat node, full unit + integration test coverage)
 - [x] Support cross-chain data synchronization. (100%)
-- [ ] Add connectors for popular frameworks like React and Node.js.
+- [x] Add connectors for popular frameworks like React and Node.js. (100%: added `swarm-keydb-react` hooks/provider package with Storybook docs + tests, `swarm-keydb-node` service/middleware package with retry/pooling + tests, and runnable `examples/react-app` + `examples/node-express`)
 - [ ] Provide APIs for integration with decentralized identity systems.

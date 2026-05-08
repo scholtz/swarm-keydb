@@ -70,13 +70,24 @@ dotnet run --project tests/SwarmKeyDb.Tests/SwarmKeyDb.Tests.csproj
 - `swarm-keydb-js/` - JavaScript/TypeScript SDK (`get`, `put`, `delete`, `list`, `batchGet`, `batchPut`, `setWithTTL`, `backup`, `restore`, `rotateKey`)
 - `swarm-keydb-py/` - Python SDK with sync and async clients plus `backup`, `restore`, and `rotate_key`
 - `swarm-keydb-go/` - Go SDK with context-aware API, JSON helpers, and `Backup`/`Restore`/`RotateKey`
+- `swarm-keydb-react/` - React hooks connector with `SwarmKeyDbProvider`, `useSwarmValue`, `useSwarmPut`, `useSwarmDelete`, and `useSwarmKeys`
+- `swarm-keydb-node/` - Node.js connector with `SwarmKeyDbService`, Express/Fastify middleware helpers, retries, pooling, and streaming key scans
 
 SDK test commands:
 
 ```bash
 (cd swarm-keydb-js && npm install && npm test)
+(cd swarm-keydb-react && npm install && npm test)
+(cd swarm-keydb-node && npm install && npm test)
 (cd swarm-keydb-py && pip install . && python -m unittest discover -s tests -v)
 (cd swarm-keydb-go && go test ./...)
+```
+
+Framework connector examples:
+
+```bash
+(cd examples/react-app && npm install && npm run dev)
+(cd examples/node-express && npm install && npm start)
 ```
 
 ## CLI (`skdb`)

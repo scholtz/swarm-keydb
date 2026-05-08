@@ -7,7 +7,7 @@ This folder is the entrypoint for project documentation.
 - `getting-started.md` gets a new developer from zero to first `put`/`get` quickly.
 - `api-reference.md` documents Redis commands and public C# client methods.
 - `tutorials/` contains end-to-end walkthroughs for common app patterns.
-- `sdk/` contains SDK quick references for JavaScript, Python, and Go.
+- `sdk/` contains SDK/connectors quick references for JavaScript, React, Node.js, Python, and Go.
 - `deployment.md` covers production Docker deployment and monitoring integration.
 - `faq.md` answers frequent setup/runtime questions.
 - `architecture/` explains the storage model and runtime components.
@@ -16,7 +16,7 @@ This folder is the entrypoint for project documentation.
 - `reference/` documents configuration and environment variables.
 - `development/migration.md` documents Redis-to-SwarmKeyDb migration workflows.
 - `../examples/` contains runnable C# examples.
-- `../swarm-keydb-js/`, `../swarm-keydb-py/`, and `../swarm-keydb-go/` contain language SDKs with examples and tests.
+- `../swarm-keydb-js/`, `../swarm-keydb-react/`, `../swarm-keydb-node/`, `../swarm-keydb-py/`, and `../swarm-keydb-go/` contain SDK/connectors with examples and tests.
 
 ## Quick links
 
@@ -29,6 +29,8 @@ This folder is the entrypoint for project documentation.
 - `tutorials/encryption-user-keypair.md`
 - `tutorials/key-rotation-backup.md`
 - `sdk/js.md`
+- `sdk/react.md`
+- `sdk/node.md`
 - `sdk/python.md`
 - `sdk/go.md`
 - `deployment.md`

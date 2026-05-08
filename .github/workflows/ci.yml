@@ -55,11 +55,30 @@ jobs:
         npm ci
         npm test
 
+    - name: React connector tests
+      run: |
+        cd swarm-keydb-react
+        npm ci
+        npm test
+
+    - name: Node connector tests
+      run: |
+        cd swarm-keydb-node
+        npm ci
+        npm test
+
     - name: JavaScript example syntax check
       run: |
         node --check swarm-keydb-js/examples/user-profile.mjs
         node --check swarm-keydb-js/examples/config-management.mjs
         node --check swarm-keydb-js/examples/chat-message-history.mjs
+        node --check examples/node-express/server.js
+
+    - name: React example build
+      run: |
+        cd examples/react-app
+        npm ci
+        npm run build
 
     - name: Setup Python
       uses: actions/setup-python@v5

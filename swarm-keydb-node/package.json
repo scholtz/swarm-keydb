@@ -1,0 +1,16 @@
+{
+  "name": "swarm-keydb-node",
+  "version": "0.1.0",
+  "description": "Node.js middleware and service utilities for SwarmKeyDb",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": ["swarm", "swarm-keydb", "node", "express", "fastify"],
+  "license": "MIT",
+  "dependencies": {
+    "swarm-keydb-js": "file:../swarm-keydb-js"
+  }
+}

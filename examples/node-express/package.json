@@ -1,0 +1,13 @@
+{
+  "name": "swarm-keydb-node-express-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "swarm-keydb-js": "file:../../swarm-keydb-js",
+    "swarm-keydb-node": "file:../../swarm-keydb-node"
+  }
+}

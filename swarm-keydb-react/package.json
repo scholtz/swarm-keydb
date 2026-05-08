@@ -1,0 +1,27 @@
+{
+  "name": "swarm-keydb-react",
+  "version": "0.1.0",
+  "description": "React hooks and provider for SwarmKeyDb",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "test": "node --test",
+    "storybook": "storybook dev -p 6006"
+  },
+  "keywords": ["swarm", "swarm-keydb", "react", "hooks"],
+  "license": "MIT",
+  "peerDependencies": {
+    "react": "^18.3.1 || ^19.0.0",
+    "swarm-keydb-js": "^0.1.0"
+  },
+  "dependencies": {
+    "swarm-keydb-js": "file:../swarm-keydb-js"
+  },
+  "devDependencies": {
+    "@storybook/react": "^8.5.6",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-test-renderer": "^18.3.1"
+  }
+}
