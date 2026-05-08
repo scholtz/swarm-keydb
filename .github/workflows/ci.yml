@@ -32,6 +32,12 @@ jobs:
     - name: Run tests
       run: dotnet run --project tests/SwarmKeyDb.Tests/SwarmKeyDb.Tests.csproj
 
+    - name: Run C# examples
+      run: |
+        dotnet run --project examples/RangeScanExample/RangeScanExample.csproj
+        dotnet run --project examples/UserProfileExample/UserProfileExample.csproj
+        dotnet run --project examples/BatchOperationsExample/BatchOperationsExample.csproj
+
   sdk-tests:
     runs-on: ubuntu-latest
 
@@ -49,6 +55,12 @@ jobs:
         npm ci
         npm test
 
+    - name: JavaScript example syntax check
+      run: |
+        node --check swarm-keydb-js/examples/user-profile.mjs
+        node --check swarm-keydb-js/examples/config-management.mjs
+        node --check swarm-keydb-js/examples/chat-message-history.mjs
+
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
@@ -59,6 +71,12 @@ jobs:
         cd swarm-keydb-py
         pip install .
         python -m unittest discover -s tests -v
+
+    - name: Python example syntax check
+      run: |
+        python -m py_compile swarm-keydb-py/examples/user_profile.py
+        python -m py_compile swarm-keydb-py/examples/config_management.py
+        python -m py_compile swarm-keydb-py/examples/chat_message_history.py
 
     - name: Setup Go
       uses: actions/setup-go@v5
