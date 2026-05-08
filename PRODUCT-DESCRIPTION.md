@@ -21,6 +21,19 @@ Under the hood, Swarm Feeds let you create a stable pointer (identified by your 
 - Config storage for dApps that need mutable state
 - Chat history, bookmarks, preferences — anything an app would normally put in a database
 
+***What are the planned features to make it a robust key-value database?***
+
+- **P2P Replication and Synchronization:** Enable peer-to-peer data replication across multiple nodes for high availability and fault tolerance, similar to OrbitDB's IPFS-based sync.
+- **Conflict Resolution:** Implement CRDTs (Conflict-free Replicated Data Types) for handling concurrent writes and merges, inspired by GunDB's HAM algorithm.
+- **Encryption and Privacy:** Add end-to-end encryption for data at rest and in transit, with user-controlled keys tied to Ethereum addresses for enhanced privacy.
+- **Offline-First Support:** Allow operations in offline mode with automatic sync when connectivity is restored, leveraging Swarm's decentralized nature.
+- **Advanced Data Types and Operations:** Support for TTL (time-to-live), expiration, batch operations, and complex queries beyond simple get/put.
+- **Multi-User Access Control:** Implement shared databases with access controls, allowing multiple users to read/write based on permissions.
+- **Backup and Restore:** Provide mechanisms for data backup and restore, utilizing Swarm's content addressing for immutable snapshots.
+- **Performance Optimizations:** Add caching, indexing improvements, and compression to handle larger datasets efficiently.
+- **Monitoring and Observability:** Include logging, metrics, and health checks for production deployments.
+- **Ecosystem Integrations:** Support for integration with other decentralized tools like IPFS, Ethereum smart contracts, and cross-chain data.
+
 ***What are the UX, Privacy, other requirements?***
 
 - The developer should never need to understand feeds, topics, or SOCs to use this library
