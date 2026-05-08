@@ -139,15 +139,8 @@ public sealed class RedisCommandProcessor : IDisposable
             return RespValue.Error("ERR AUTHADDR is not available.");
         }
 
-        try
-        {
-            _ethAddressAccessor.CurrentAddress = EthereumAddress.Normalize(args[1].AsString());
-            return RespValue.SimpleString("OK");
-        }
-        catch (ArgumentException ex)
-        {
-            return RespValue.Error("ERR " + ex.Message);
-        }
+        _ethAddressAccessor.CurrentAddress = EthereumAddress.Normalize(args[1].AsString());
+        return RespValue.SimpleString("OK");
     }
 
     private async Task<RespValue> SetAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)

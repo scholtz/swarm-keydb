@@ -94,6 +94,8 @@ public sealed class AclKeyValueStore : IKeyValueStore, IAccessControlVerifier
         var allowed = _mode switch
         {
             AclMode.Allowlist => hasEntry && Allows(permission, operation),
+            // In denylist mode, listed permissions represent denied capabilities:
+            // a "read" entry blocks reads only, "write" blocks writes only, and "admin" blocks both.
             AclMode.Denylist => !hasEntry || !Allows(permission, operation),
             _ => false
         };
