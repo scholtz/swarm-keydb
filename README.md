@@ -112,7 +112,8 @@ Configure it with:
 
 **Startup behaviour:** If `SWARM_KEYDB_ENCRYPTION_ENABLED=true` but neither `SWARM_KEYDB_ENCRYPTION_KEY` nor `SWARM_KEYDB_ENCRYPTION_ETH_KEY` is set, the server fails fast with a descriptive error — it will never silently store plaintext when encryption is expected.
 
-**Layer ordering:** Encryption sits below CRDT merge handling and below compression (Swarm → ACL → Encrypt → Compress → CRDT → Cache), so CRDT merges run on plaintext while persisted Swarm bytes remain encrypted.
+**Layer ordering:** The configured stack is `Cache → CRDT → Compress → Encrypt → ACL → Swarm` (outermost to innermost), so CRDT merges run on plaintext while persisted Swarm bytes remain encrypted.
+This includes CRDT metadata (`vectorClock`, `timestamp`, and strategy marker), because the full CRDT envelope is encrypted before being written to Swarm.
 
 **Example (Docker):**
 
@@ -163,7 +164,7 @@ Configure it with:
 
 **Startup behaviour:** If `SWARM_KEYDB_ACL_ENABLED=true` and `SWARM_KEYDB_ACL_ENTRIES` is empty or invalid, the server fails fast with a descriptive error.
 
-**Layer ordering:** ACL checks run before encryption/compression/CRDT merge handling (Swarm → ACL → Encrypt → Compress → CRDT → Cache).
+**Layer ordering:** The configured stack is `Cache → CRDT → Compress → Encrypt → ACL → Swarm` (outermost to innermost), so ACL checks are enforced immediately before Swarm storage access.
 
 **Supplying caller identity:** SwarmKeyDb currently speaks Redis RESP over TCP, so there is no HTTP header transport on the wire. For the Redis server, identify the caller once per connection with `AUTHADDR <0x-address>`. HTTP adapters can map the same identity to an `X-Eth-Address` header and translate `AccessDeniedException` to HTTP `403`.
 
@@ -250,6 +251,10 @@ await db.SetKeyOptionsAsync("shared:set", new KeyOptions { MergeStrategy = OrSet
 await db.PutBytesAsync("shared:set", OrSetValue.Empty.Add("alice", "node-a:1").ToByteArray());
 await db.MergeBytesAsync("shared:set", OrSetValue.Empty.Add("bob", "node-b:1").ToByteArray());
 
-var merged = OrSetValue.FromByteArray(await db.GetBytesAsync("shared:set")!);
-Console.WriteLine(string.Join(",", merged.Elements)); // alice,bob
+var mergedBytes = await db.GetBytesAsync("shared:set");
+if (mergedBytes is not null)
+{
+    var merged = OrSetValue.FromByteArray(mergedBytes);
+    Console.WriteLine(string.Join(",", merged.Elements)); // alice,bob
+}
 ```

@@ -24,6 +24,9 @@ public sealed class OrSetMergeStrategy : IMergeStrategy
             mergedSet.ToByteArray(),
             existing.VectorClock.Merge(incoming.VectorClock),
             existing.TimestampUtc >= incoming.TimestampUtc ? existing.TimestampUtc : incoming.TimestampUtc,
-            string.CompareOrdinal(existing.WriterNodeId, incoming.WriterNodeId) >= 0 ? existing.WriterNodeId : incoming.WriterNodeId);
+            ChooseDeterministicWriter(existing.WriterNodeId, incoming.WriterNodeId));
     }
+
+    private static string ChooseDeterministicWriter(string left, string right) =>
+        string.CompareOrdinal(left, right) >= 0 ? left : right;
 }

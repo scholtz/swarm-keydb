@@ -9,6 +9,9 @@ namespace SwarmKeyDb;
 public sealed class CrdtKeyValueStore : IKeyValueStore, IAccessControlVerifier
 {
     private const string EnvelopeType = "swarm-keydb/crdt-v1";
+    private static readonly StoredEnvelope InvalidEnvelope = new(
+        new CrdtValue(Array.Empty<byte>(), VectorClock.Empty, DateTimeOffset.UnixEpoch, string.Empty),
+        LwwRegisterMergeStrategy.Instance.Name);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -22,7 +25,7 @@ public sealed class CrdtKeyValueStore : IKeyValueStore, IAccessControlVerifier
     public CrdtKeyValueStore(IKeyValueStore inner, string? nodeId = null)
     {
         _inner = inner;
-        _nodeId = string.IsNullOrWhiteSpace(nodeId) ? Environment.MachineName + ":" + Guid.NewGuid().ToString("N") : nodeId;
+        _nodeId = string.IsNullOrWhiteSpace(nodeId) ? $"{Environment.MachineName}:{Guid.NewGuid():N}" : nodeId;
     }
 
     public Task PutAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default) =>
@@ -149,9 +152,7 @@ public sealed class CrdtKeyValueStore : IKeyValueStore, IAccessControlVerifier
             var serialized = JsonSerializer.Deserialize<SerializedEnvelope>(data, JsonOptions);
             if (serialized is null || !string.Equals(serialized.Type, EnvelopeType, StringComparison.Ordinal))
             {
-                envelope = new StoredEnvelope(
-                    new CrdtValue(Array.Empty<byte>(), VectorClock.Empty, DateTimeOffset.UnixEpoch, string.Empty),
-                    LwwRegisterMergeStrategy.Instance.Name);
+                envelope = InvalidEnvelope;
                 return false;
             }
 
@@ -166,9 +167,7 @@ public sealed class CrdtKeyValueStore : IKeyValueStore, IAccessControlVerifier
         }
         catch (JsonException)
         {
-            envelope = new StoredEnvelope(
-                new CrdtValue(Array.Empty<byte>(), VectorClock.Empty, DateTimeOffset.UnixEpoch, string.Empty),
-                LwwRegisterMergeStrategy.Instance.Name);
+            envelope = InvalidEnvelope;
             return false;
         }
     }

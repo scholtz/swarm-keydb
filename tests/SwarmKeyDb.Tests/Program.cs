@@ -318,6 +318,7 @@ static Task OrSetAddRemoveAndConcurrentMergeAsync()
 {
     var left = OrSetValue.Empty.Add("alpha", "node-a:1");
     var right = OrSetValue.Empty.Remove("alpha").Add("beta", "node-b:1");
+    AssertSequenceEqual(new[] { "beta" }, right.Elements);
     var merged = left.Merge(right);
     AssertSequenceEqual(new[] { "alpha", "beta" }, merged.Elements);
 
@@ -876,11 +877,11 @@ static async Task ServiceCollectionPlacesAclBetweenSwarmAndEncryptionAsync()
     var store = provider.GetRequiredService<IKeyValueStore>();
 
     AssertEqual(typeof(CachingKeyValueStore), store.GetType());
-    AssertEqual(typeof(CrdtKeyValueStore), GetInnerStore(store).GetType());
-    AssertEqual(typeof(CompressingKeyValueStore), GetInnerStore(GetInnerStore(store)).GetType());
-    AssertEqual(typeof(EncryptingKeyValueStore), GetInnerStore(GetInnerStore(GetInnerStore(store))).GetType());
-    AssertEqual(typeof(AclKeyValueStore), GetInnerStore(GetInnerStore(GetInnerStore(GetInnerStore(store)))).GetType());
-    AssertEqual(typeof(SwarmKeyValueStore), GetInnerStore(GetInnerStore(GetInnerStore(GetInnerStore(GetInnerStore(store))))).GetType());
+    AssertEqual(typeof(CrdtKeyValueStore), GetInnerStoreAtDepth(store, depth: 1).GetType());
+    AssertEqual(typeof(CompressingKeyValueStore), GetInnerStoreAtDepth(store, depth: 2).GetType());
+    AssertEqual(typeof(EncryptingKeyValueStore), GetInnerStoreAtDepth(store, depth: 3).GetType());
+    AssertEqual(typeof(AclKeyValueStore), GetInnerStoreAtDepth(store, depth: 4).GetType());
+    AssertEqual(typeof(SwarmKeyValueStore), GetInnerStoreAtDepth(store, depth: 5).GetType());
 
     await store.PutAsync("pipeline:key", Encoding.UTF8.GetBytes("value"));
     AssertEqual("value", Encoding.UTF8.GetString((await store.GetAsync("pipeline:key"))!));
@@ -1030,6 +1031,17 @@ static IKeyValueStore GetInnerStore(object store)
     var field = store.GetType().GetField("_inner", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
     Assert(field is not null, $"Expected {store.GetType().Name} to expose an _inner field.");
     return (IKeyValueStore)field!.GetValue(store)!;
+}
+
+static IKeyValueStore GetInnerStoreAtDepth(IKeyValueStore store, int depth)
+{
+    var current = store;
+    for (var i = 0; i < depth; i++)
+    {
+        current = GetInnerStore(current);
+    }
+
+    return current;
 }
 
 internal sealed record Settings(bool Enabled, int Count);

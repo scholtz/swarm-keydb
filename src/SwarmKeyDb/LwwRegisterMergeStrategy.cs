@@ -37,6 +37,7 @@ public sealed class LwwRegisterMergeStrategy : IMergeStrategy
             return left.TimestampUtc > right.TimestampUtc ? left : right;
         }
 
+        // Deterministic tie-break: larger node id wins; identical ids keep the left value.
         return string.CompareOrdinal(left.WriterNodeId, right.WriterNodeId) >= 0 ? left : right;
     }
 }
