@@ -4,6 +4,7 @@ using SwarmKeyDb;
 var tests = new (string Name, Func<Task> Test)[]
 {
     ("client stores strings json binary and lists keys", ClientStoresSupportedValuesAsync),
+    ("bee client parses upload references", BeeClientParsesUploadReferenceAsync),
     ("redis protocol supports set get exists delete", RedisProtocolRoundTripAsync),
     ("redis protocol supports keys and scan", RedisProtocolKeyIterationAsync)
 };
@@ -29,6 +30,23 @@ static async Task ClientStoresSupportedValuesAsync()
     AssertSequenceEqual(new[] { "profile:avatar", "profile:name", "profile:settings" }, await client.KeysAsync());
     Assert(await client.DeleteAsync("profile:name"), "Delete should report existing key.");
     AssertEqual(null, await client.GetStringAsync("profile:name"));
+}
+
+static async Task BeeClientParsesUploadReferenceAsync()
+{
+    var handler = new StubHttpMessageHandler(request =>
+    {
+        AssertEqual("POST", request.Method.Method);
+        Assert(request.Headers.Contains("swarm-postage-batch-id"), "Upload should include postage batch header.");
+        return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"reference\":\"abc123\"}")
+        };
+    });
+    using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("http://localhost:1633/") };
+    var client = new BeeSwarmClient(httpClient, "batch-id");
+
+    AssertEqual("abc123", await client.UploadAsync(new byte[] { 1, 2, 3 }));
 }
 
 static async Task RedisProtocolRoundTripAsync()
@@ -109,3 +127,16 @@ static void AssertSequenceEqual<T>(IEnumerable<T> expected, IEnumerable<T> actua
 }
 
 internal sealed record Settings(bool Enabled, int Count);
+
+internal sealed class StubHttpMessageHandler : HttpMessageHandler
+{
+    private readonly Func<HttpRequestMessage, HttpResponseMessage> _handler;
+
+    public StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> handler)
+    {
+        _handler = handler;
+    }
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+        Task.FromResult(_handler(request));
+}

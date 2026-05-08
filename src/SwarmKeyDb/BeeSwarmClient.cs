@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace SwarmKeyDb;
 
@@ -63,6 +64,7 @@ public sealed class BeeSwarmClient : ISwarmClient, IDisposable
 
     private sealed class BeeUploadResponse
     {
+        [JsonPropertyName("reference")]
         public string? Reference { get; set; }
     }
 }
