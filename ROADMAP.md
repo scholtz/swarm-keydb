@@ -8,7 +8,7 @@
 - [ ] Support for composite keys and hierarchical namespaces.
 
 ## Performance and Scalability
-- [ ] Add in-memory caching layer for frequently accessed keys.
+- [x] Add in-memory caching layer for frequently accessed keys. (100%)
 - [ ] Implement data compression to reduce storage costs on Swarm.
 - [ ] Optimize indexing for faster key lookups and iterations.
 - [ ] Enable horizontal scaling with sharding across multiple Swarm nodes.

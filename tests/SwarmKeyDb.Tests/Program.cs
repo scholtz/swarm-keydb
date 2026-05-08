@@ -1,4 +1,7 @@
 using System.Text;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using SwarmKeyDb;
 
 var tests = new (string Name, Func<Task> Test)[]
@@ -20,7 +23,12 @@ var tests = new (string Name, Func<Task> Test)[]
     ("pexpire and pttl round trip", PExpireAndPttlRoundTripAsync),
     ("expireat in past removes key", ExpireAtInPastRemovesKeyAsync),
     ("set with exat option sets expiry", SetWithExAtOptionSetsExpiryAsync),
-    ("setex rejects overflow ttl", SetExRejectsOverflowTtlAsync)
+    ("setex rejects overflow ttl", SetExRejectsOverflowTtlAsync),
+    ("caching store get returns cached value after put", CachingKeyValueStoreGetReturnsCachedValueAfterPutAsync),
+    ("caching store put invalidates cache", CachingKeyValueStorePutInvalidatesCacheAsync),
+    ("caching store delete invalidates cache", CachingKeyValueStoreDeleteInvalidatesCacheAsync),
+    ("caching store respects key ttl", CachingKeyValueStoreRespectsKeyTtlAsync),
+    ("caching store max entries evicts lru", CachingKeyValueStoreMaxEntriesEvictsLruAsync)
 };
 
 foreach (var (name, test) in tests)
@@ -239,8 +247,89 @@ static async Task SetExRejectsOverflowTtlAsync()
     AssertEqual("-ERR value is not an integer or out of range\r\n", await ExecuteAsync(processor, RespCommand("SET", "bad", "v", "PX", "9223372036854775807")));
 }
 
+static async Task CachingKeyValueStoreGetReturnsCachedValueAfterPutAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var store = CreateCachingStore(inner, maxEntries: 8);
+    await store.PutAsync("hot:key", Encoding.UTF8.GetBytes("v1"));
+
+    AssertEqual("v1", Encoding.UTF8.GetString((await store.GetAsync("hot:key"))!));
+    AssertEqual("v1", Encoding.UTF8.GetString((await store.GetAsync("hot:key"))!));
+    AssertEqual(1, inner.GetCallCount("hot:key"));
+}
+
+static async Task CachingKeyValueStorePutInvalidatesCacheAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var store = CreateCachingStore(inner, maxEntries: 8);
+    await store.PutAsync("hot:key", Encoding.UTF8.GetBytes("v1"));
+    _ = await store.GetAsync("hot:key");
+
+    await store.PutAsync("hot:key", Encoding.UTF8.GetBytes("v2"));
+    var reloaded = await store.GetAsync("hot:key");
+
+    AssertEqual("v2", Encoding.UTF8.GetString(reloaded!));
+    AssertEqual(2, inner.GetCallCount("hot:key"));
+}
+
+static async Task CachingKeyValueStoreDeleteInvalidatesCacheAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var store = CreateCachingStore(inner, maxEntries: 8);
+    await store.PutAsync("hot:key", Encoding.UTF8.GetBytes("v1"));
+    _ = await store.GetAsync("hot:key");
+    Assert(await store.DeleteAsync("hot:key"), "Delete should return true for existing key.");
+
+    var afterDelete = await store.GetAsync("hot:key");
+
+    AssertEqual(null, afterDelete);
+    AssertEqual(2, inner.GetCallCount("hot:key"));
+}
+
+static async Task CachingKeyValueStoreRespectsKeyTtlAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var store = CreateCachingStore(inner, maxEntries: 8, defaultEntryTtl: TimeSpan.FromMinutes(1));
+    await store.PutAsync("ttl:key", Encoding.UTF8.GetBytes("v1"));
+    Assert(await store.SetTtlAsync("ttl:key", TimeSpan.FromSeconds(1)), "SetTtlAsync should succeed.");
+    _ = await store.GetAsync("ttl:key");
+
+    await Task.Delay(1100);
+    var afterExpiry = await store.GetAsync("ttl:key");
+
+    AssertEqual(null, afterExpiry);
+    AssertEqual(2, inner.GetCallCount("ttl:key"));
+}
+
+static async Task CachingKeyValueStoreMaxEntriesEvictsLruAsync()
+{
+    var inner = new CountingKeyValueStore();
+    var store = CreateCachingStore(inner, maxEntries: 1);
+    await store.PutAsync("a", Encoding.UTF8.GetBytes("A"));
+    await store.PutAsync("b", Encoding.UTF8.GetBytes("B"));
+
+    _ = await store.GetAsync("a");
+    _ = await store.GetAsync("b");
+    _ = await store.GetAsync("a");
+
+    AssertEqual(2, inner.GetCallCount("a"));
+    Assert(store.Evictions > 0, "Expected at least one cache eviction.");
+}
+
 static RedisCommandProcessor CreateProcessor() =>
     new(new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()));
+
+static CachingKeyValueStore CreateCachingStore(CountingKeyValueStore inner, int maxEntries, TimeSpan? defaultEntryTtl = null)
+{
+    var options = Options.Create(new CacheOptions
+    {
+        Enabled = true,
+        MaxEntries = maxEntries,
+        DefaultEntryTtl = defaultEntryTtl
+    });
+    var cache = new MemoryCache(new MemoryCacheOptions { SizeLimit = maxEntries });
+    return new CachingKeyValueStore(inner, cache, options, NullLogger<CachingKeyValueStore>.Instance);
+}
 
 static async Task<string> ExecuteAsync(RedisCommandProcessor processor, string commands)
 {
@@ -308,4 +397,72 @@ internal sealed class StubHttpMessageHandler : HttpMessageHandler
 
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
         Task.FromResult(_handler(request));
+}
+
+internal sealed class CountingKeyValueStore : IKeyValueStore
+{
+    private readonly Dictionary<string, byte[]> _values = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTimeOffset> _expiries = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _getCalls = new(StringComparer.Ordinal);
+
+    public Task PutAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default)
+    {
+        _values[key] = value.ToArray();
+        _expiries.Remove(key);
+        return Task.CompletedTask;
+    }
+
+    public Task<byte[]?> GetAsync(string key, CancellationToken cancellationToken = default)
+    {
+        _getCalls[key] = GetCallCount(key) + 1;
+        if (_expiries.TryGetValue(key, out var expiresAt) && expiresAt <= DateTimeOffset.UtcNow)
+        {
+            _values.Remove(key);
+            _expiries.Remove(key);
+            return Task.FromResult<byte[]?>(null);
+        }
+
+        return Task.FromResult(_values.TryGetValue(key, out var value) ? value.ToArray() : null);
+    }
+
+    public Task<bool> DeleteAsync(string key, CancellationToken cancellationToken = default)
+    {
+        var removed = _values.Remove(key);
+        _expiries.Remove(key);
+        return Task.FromResult(removed);
+    }
+
+    public Task<IReadOnlyList<string>> ListKeysAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<string>>(_values.Keys.OrderBy(static key => key, StringComparer.Ordinal).ToArray());
+
+    public Task<bool> SetTtlAsync(string key, TimeSpan ttl, CancellationToken cancellationToken = default)
+    {
+        if (!_values.ContainsKey(key))
+        {
+            return Task.FromResult(false);
+        }
+
+        _expiries[key] = DateTimeOffset.UtcNow.Add(ttl);
+        return Task.FromResult(true);
+    }
+
+    public Task<(bool Exists, TimeSpan? Ttl)> GetTtlAsync(string key, CancellationToken cancellationToken = default)
+    {
+        if (!_values.ContainsKey(key))
+        {
+            return Task.FromResult((false, (TimeSpan?)null));
+        }
+
+        if (!_expiries.TryGetValue(key, out var expiresAt))
+        {
+            return Task.FromResult((true, (TimeSpan?)null));
+        }
+
+        return Task.FromResult((true, (TimeSpan?)(expiresAt - DateTimeOffset.UtcNow)));
+    }
+
+    public Task<bool> RemoveTtlAsync(string key, CancellationToken cancellationToken = default) =>
+        Task.FromResult(_expiries.Remove(key));
+
+    public int GetCallCount(string key) => _getCalls.TryGetValue(key, out var count) ? count : 0;
 }

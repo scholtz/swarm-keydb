@@ -1,4 +1,8 @@
 using System.Net;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using SwarmKeyDb;
 using SwarmKeyDb.Server;
 
@@ -10,9 +14,28 @@ var index = new FileKeyIndex(Path.Combine(dataDir, "index.json"));
 ISwarmClient swarmClient = backend.Equals("bee", StringComparison.OrdinalIgnoreCase)
     ? new BeeSwarmClient(new Uri(Environment.GetEnvironmentVariable("BEE_URL") ?? "http://localhost:1633/"), RequireEnvironment("BEE_POSTAGE_BATCH_ID"))
     : new FileSwarmClient(Path.Combine(dataDir, "objects"));
+var cacheOptions = new CacheOptions
+{
+    Enabled = GetBool("SWARM_KEYDB_CACHE_ENABLED", true),
+    MaxEntries = Math.Max(1, GetInt("SWARM_KEYDB_CACHE_MAX_ENTRIES", 1_000)),
+    DefaultEntryTtl = GetNullableInt("SWARM_KEYDB_CACHE_DEFAULT_TTL_SECONDS") is { } ttlSeconds
+        ? TimeSpan.FromSeconds(Math.Max(1, ttlSeconds))
+        : null
+};
+var services = new ServiceCollection();
+services.AddLogging(builder => builder.AddSimpleConsole().SetMinimumLevel(LogLevel.Information));
+services.AddOptions();
+services.AddSingleton<IOptions<CacheOptions>>(Options.Create(cacheOptions));
+services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions { SizeLimit = cacheOptions.MaxEntries }));
+services.AddSingleton<IKeyValueStore>(sp => new CachingKeyValueStore(
+    new SwarmKeyValueStore(swarmClient, index),
+    sp.GetRequiredService<IMemoryCache>(),
+    sp.GetRequiredService<IOptions<CacheOptions>>(),
+    sp.GetRequiredService<ILogger<CachingKeyValueStore>>()));
+services.AddSingleton<ICacheStats>(sp => (ICacheStats)sp.GetRequiredService<IKeyValueStore>());
 
-var store = new SwarmKeyValueStore(swarmClient, index);
-var processor = new RedisCommandProcessor(store);
+using var provider = services.BuildServiceProvider();
+var processor = new RedisCommandProcessor(provider.GetRequiredService<IKeyValueStore>());
 var server = new RedisServer(bind, port, processor);
 
 using var cts = new CancellationTokenSource();
@@ -26,6 +49,12 @@ await server.RunAsync(cts.Token);
 
 static int GetInt(string name, int defaultValue) =>
     int.TryParse(Environment.GetEnvironmentVariable(name), out var value) ? value : defaultValue;
+
+static int? GetNullableInt(string name) =>
+    int.TryParse(Environment.GetEnvironmentVariable(name), out var value) ? value : null;
+
+static bool GetBool(string name, bool defaultValue) =>
+    bool.TryParse(Environment.GetEnvironmentVariable(name), out var value) ? value : defaultValue;
 
 static string RequireEnvironment(string name) =>
     Environment.GetEnvironmentVariable(name) ?? throw new InvalidOperationException($"Environment variable {name} is required.");

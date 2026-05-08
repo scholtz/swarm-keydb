@@ -53,6 +53,16 @@ dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
 
 The key index is persisted in `SWARM_KEYDB_DATA_DIR/index.json` and values are fetched from the Swarm references stored there.
 
+### In-memory read cache
+
+The server enables an in-memory read-through cache by default for hot keys. Configure it with:
+
+- `SWARM_KEYDB_CACHE_ENABLED` (`true`/`false`, default `true`)
+- `SWARM_KEYDB_CACHE_MAX_ENTRIES` (default `1000`)
+- `SWARM_KEYDB_CACHE_DEFAULT_TTL_SECONDS` (optional cap for cache-entry lifetime)
+
+Writes (`SET`, `SETEX`, `MSET`, etc.), deletes, and TTL changes invalidate cached entries so subsequent reads refresh from Swarm/index data.
+
 ## Docker
 
 ```bash
