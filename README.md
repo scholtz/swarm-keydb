@@ -10,6 +10,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 - String, JSON, and binary value helpers in the `SwarmKeyDbClient` library.
 - Default-on SHA-256 integrity verification for values stored in Swarm, with typed corruption errors.
 - CRDT-backed conflict resolution (LWW register by default, with OR-Set and PN-counter strategies available).
+- Optional cross-chain replication across configured EVM namespaces with per-chain sync status and retries.
 - Prefix scans, lexicographic range scans, predicate queries, and cursor-based iteration.
 - Swarm, IPFS, and hybrid dual-write storage backends selectable per deployment.
 - Optional sharding router with consistent hashing across up to 64 shards.
@@ -37,6 +38,24 @@ var db = new SwarmKeyDbClient(new SwarmKeyValueStore(new InMemorySwarmClient(), 
 await db.PutStringAsync("hello", "world");
 var value = await db.GetStringAsync("hello");
 Console.WriteLine(value == "world" ? "round-trip ok" : "round-trip failed");
+```
+
+## Cross-chain quick start
+
+```csharp
+using SwarmKeyDb;
+
+var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+var sync = new CrossChainSyncService(
+[
+    new NamespacedChainAdapter(store, new ChainAdapterOptions { ChainId = (int)ChainId.Ethereum, Name = "Ethereum" }),
+    new NamespacedChainAdapter(store, new ChainAdapterOptions { ChainId = (int)ChainId.Polygon, Name = "Polygon" })
+],
+    new InMemoryCrossChainStateStore(),
+    new CrossChainOptions { Enabled = true });
+var db = new SwarmKeyDbClient(store, sync);
+await db.PutStringAsync("profile:name", "Ada", new[] { ChainId.Ethereum, ChainId.Polygon });
+Console.WriteLine((await db.GetSyncStatusAsync("profile:name"))?.Chains.Count);
 ```
 
 ## Build and test
@@ -78,6 +97,9 @@ skdb get user:alice
 skdb list --prefix user:
 skdb scan --from user:a --to user:z
 skdb delete user:alice
+skdb put profile:name Ada --chains 1,137
+skdb sync status --key profile:name
+skdb sync force --key profile:name
 skdb backup --out ./backup.ref
 skdb restore --ref "$(cat ./backup.ref)" --key ./eth.key
 skdb rotate-key --old-key ./old.key --new-key ./new.key
@@ -88,6 +110,8 @@ Global overrides:
 
 - `--bee-url`, `--batch-id`, `--output plain|json|table`
 - `SWARMKEYDB_BEE_URL`, `SWARMKEYDB_BATCH_ID`, `SWARMKEYDB_OUTPUT`
+
+Cross-chain writes can target EVM namespaces directly from the CLI with `--chains <id,id,...>`, and sync state is persisted in `~/.swarmkeydb/crosschain-sync.json`.
 
 ## Migration CLI (`swarmkeydb-migrate`)
 
@@ -118,6 +142,11 @@ redis-cli -p 6379 SET profile:name Ada
 redis-cli -p 6379 GET profile:name
 redis-cli -p 6379 KEYS '*'
 ```
+
+When cross-chain sync is enabled in `src/SwarmKeyDb.Server/appsettings.json` (or the matching `SWARM_KEYDB_CROSS_CHAIN_*` environment variables), the server dashboard also exposes:
+
+- `GET /sync` for per-chain replication health totals
+- `GET /sync/{key}` for per-key replication status (`pending`, `synced`, `failed`)
 
 ## Redis command examples (RESP responses)
 

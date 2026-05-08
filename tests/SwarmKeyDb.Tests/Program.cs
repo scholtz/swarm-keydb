@@ -135,6 +135,10 @@ var tests = new (string Name, Func<Task> Test)[]
     ("ethereum bridge monitoring endpoint returns bridge state", EthereumBridgeMonitoringEndpointReturnsBridgeStateAsync),
     ("ethereum bridge service handles data write event and writes to store", EthereumBridgeServiceHandlesDataWriteEventAndWritesToStoreAsync),
     ("ethereum bridge service handles data read event and resolves from store", EthereumBridgeServiceHandlesDataReadEventAndResolvesFromStoreAsync),
+    ("cross chain client replicates writes and deletes to configured chains", CrossChainClientReplicatesWritesAndDeletesAsync),
+    ("cross chain sync retries failed writes with status tracking", CrossChainSyncRetriesFailedWritesAsync),
+    ("monitoring sync endpoint returns per chain status", MonitoringSyncEndpointReturnsPerChainStatusAsync),
+    ("cli sync status and force commands work", CliSyncStatusAndForceCommandsAsync),
 };
 
 foreach (var (name, test) in tests)
@@ -2996,6 +3000,162 @@ static async Task EthereumBridgeServiceHandlesDataReadEventAndResolvesFromStoreA
     AssertEqual("resolved_value", Encoding.UTF8.GetString(value!));
 }
 
+static async Task CrossChainClientReplicatesWritesAndDeletesAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex(), new IntegrityOptions { Enabled = false });
+    var syncService = new CrossChainSyncService(
+    [
+        new NamespacedChainAdapter(store, new ChainAdapterOptions { ChainId = (int)ChainId.Ethereum, Name = "Ethereum" }),
+        new NamespacedChainAdapter(store, new ChainAdapterOptions { ChainId = (int)ChainId.Polygon, Name = "Polygon" })
+    ],
+        new InMemoryCrossChainStateStore(),
+        new CrossChainOptions
+        {
+            Enabled = true,
+            Chains =
+            [
+                new ChainAdapterOptions { ChainId = (int)ChainId.Ethereum, Name = "Ethereum" },
+                new ChainAdapterOptions { ChainId = (int)ChainId.Polygon, Name = "Polygon" }
+            ]
+        },
+        NullLogger<CrossChainSyncService>.Instance);
+    var client = new SwarmKeyDbClient(store, syncService);
+
+    await client.PutStringAsync("profile:name", "Ada", [ChainId.Ethereum, ChainId.Polygon]);
+
+    AssertEqual("Ada", Encoding.UTF8.GetString((await store.GetAsync("chain:1:profile:name"))!));
+    AssertEqual("Ada", Encoding.UTF8.GetString((await store.GetAsync("chain:137:profile:name"))!));
+
+    var status = await client.GetSyncStatusAsync("profile:name");
+    Assert(status is not null, "Expected cross-chain sync status.");
+    AssertEqual(2, status!.Chains.Count);
+    Assert(status.Chains.All(static chain => chain.Status == "synced"), "Expected synced status for all target chains.");
+
+    var deleted = await client.DeleteAsync("profile:name", [(int)ChainId.Ethereum, (int)ChainId.Polygon]);
+    Assert(deleted, "Delete should report success.");
+    AssertEqual(null, await store.GetAsync("chain:1:profile:name"));
+    AssertEqual(null, await store.GetAsync("chain:137:profile:name"));
+}
+
+static async Task CrossChainSyncRetriesFailedWritesAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex(), new IntegrityOptions { Enabled = false });
+    var stateStore = new InMemoryCrossChainStateStore();
+    var syncService = new CrossChainSyncService(
+    [
+        new FlakyChainAdapter(store, new ChainAdapterOptions { ChainId = (int)ChainId.Polygon, Name = "Polygon" }, failuresBeforeSuccess: 1)
+    ],
+        stateStore,
+        new CrossChainOptions
+        {
+            Enabled = true,
+            MaxRetryAttempts = 5,
+            RetryBaseDelaySeconds = 1,
+            Chains = [new ChainAdapterOptions { ChainId = (int)ChainId.Polygon, Name = "Polygon" }]
+        },
+        NullLogger<CrossChainSyncService>.Instance);
+
+    await syncService.PutAsync("retry:key", Encoding.UTF8.GetBytes("value"), [(int)ChainId.Polygon]);
+
+    var pendingStatus = await syncService.GetStatusAsync("retry:key");
+    Assert(pendingStatus is not null, "Expected pending sync status.");
+    AssertEqual("pending", pendingStatus!.Chains.Single().Status);
+    Assert(pendingStatus.Chains.Single().LastError?.Contains("Polygon", StringComparison.Ordinal) == true, "Expected actionable failure message.");
+
+    var record = await stateStore.GetAsync("retry:key");
+    Assert(record is not null, "Expected persisted sync record.");
+    record!.Chains.Single().NextRetryUtc = DateTimeOffset.UtcNow.AddMilliseconds(-1);
+    await stateStore.UpsertAsync(record);
+
+    await syncService.ReconcileDueOperationsAsync();
+
+    var syncedStatus = await syncService.GetStatusAsync("retry:key");
+    AssertEqual("synced", syncedStatus!.Chains.Single().Status);
+    AssertEqual("value", Encoding.UTF8.GetString((await store.GetAsync("chain:137:retry:key"))!));
+}
+
+static async Task MonitoringSyncEndpointReturnsPerChainStatusAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex(), new IntegrityOptions { Enabled = false });
+    var syncService = new CrossChainSyncService(
+    [
+        new NamespacedChainAdapter(store, new ChainAdapterOptions { ChainId = (int)ChainId.Ethereum, Name = "Ethereum" }),
+        new NamespacedChainAdapter(store, new ChainAdapterOptions { ChainId = (int)ChainId.Polygon, Name = "Polygon" })
+    ],
+        new InMemoryCrossChainStateStore(),
+        new CrossChainOptions
+        {
+            Enabled = true,
+            Chains =
+            [
+                new ChainAdapterOptions { ChainId = (int)ChainId.Ethereum, Name = "Ethereum" },
+                new ChainAdapterOptions { ChainId = (int)ChainId.Polygon, Name = "Polygon" }
+            ]
+        },
+        NullLogger<CrossChainSyncService>.Instance);
+    await syncService.PutAsync("sync:key", Encoding.UTF8.GetBytes("value"), [(int)ChainId.Ethereum, (int)ChainId.Polygon]);
+
+    var metrics = new MonitoringMetrics(() => NoOpCacheStats.Instance);
+    var port = TestNetHelpers.GetFreePort();
+    var server = new MonitoringHttpServer(
+        IPAddress.Loopback,
+        port,
+        metrics,
+        new AlwaysReadyProbe(),
+        metricsEnabled: true,
+        dashboardEnabled: true,
+        NullLogger<MonitoringHttpServer>.Instance,
+        crossChainSyncService: syncService);
+    using var cts = new CancellationTokenSource();
+    var runTask = server.RunAsync(cts.Token);
+    using var client = new HttpClient();
+
+    var response = await client.GetAsync($"http://127.0.0.1:{port}/sync/sync%3Akey");
+    var payload = await response.Content.ReadAsStringAsync();
+
+    AssertEqual(HttpStatusCode.OK, response.StatusCode);
+    Assert(payload.Contains("\"Key\":\"sync:key\"", StringComparison.Ordinal), "Expected sync key in payload.");
+    Assert(payload.Contains("\"Status\":\"synced\"", StringComparison.Ordinal), "Expected synced chain statuses in payload.");
+    Assert(payload.Contains("\"ChainId\":137", StringComparison.Ordinal), "Expected Polygon chain in payload.");
+
+    cts.Cancel();
+    await runTask;
+    server.Dispose();
+    await syncService.DisposeAsync();
+}
+
+static async Task CliSyncStatusAndForceCommandsAsync()
+{
+    var swarm = new InMemorySwarmClient();
+    var index = new InMemoryKeyIndex();
+    var home = Path.Combine(Path.GetTempPath(), "swarm-keydb-cli-sync", Guid.NewGuid().ToString("N"));
+    var options = new CliExecutionOptions
+    {
+        SwarmClientFactory = _ => swarm,
+        KeyIndexFactory = _ => index,
+        EnvironmentFactory = () => new EnvironmentSnapshot
+        {
+            Home = home,
+            BeeUrl = "http://localhost:1633/",
+            BatchId = "batch-id"
+        }
+    };
+
+    var putResult = await RunCliAsync(new[] { "put", "sync:cli", "value", "--chains", "1,137" }, options);
+    AssertEqual(0, putResult.ExitCode);
+
+    var statusResult = await RunCliAsync(new[] { "sync", "status", "--key", "sync:cli", "--output", "json" }, options);
+    AssertEqual(0, statusResult.ExitCode);
+    var payload = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(statusResult.Stdout.Trim());
+    Assert(payload is not null, "Expected sync status JSON payload.");
+    AssertEqual("sync:cli", payload!["Key"].GetString());
+    AssertEqual(2, payload["Chains"].GetArrayLength());
+
+    var forceResult = await RunCliAsync(new[] { "sync", "force", "--key", "sync:cli" }, options);
+    AssertEqual(0, forceResult.ExitCode);
+    Assert(forceResult.Stdout.Contains("Forced sync for sync:cli", StringComparison.Ordinal), "Expected force sync confirmation.");
+}
+
 
 internal sealed record Settings(bool Enabled, int Count);
 
@@ -3219,6 +3379,42 @@ internal sealed class TestLogger<T> : Microsoft.Extensions.Logging.ILogger<T>
         Func<TState, Exception?, string> formatter)
     {
         Messages.Add(formatter(state, exception));
+    }
+}
+
+internal sealed class FlakyChainAdapter : IChainAdapter
+{
+    private readonly NamespacedChainAdapter _inner;
+    private int _failuresRemaining;
+
+    public FlakyChainAdapter(IKeyValueStore store, ChainAdapterOptions options, int failuresBeforeSuccess)
+    {
+        _inner = new NamespacedChainAdapter(store, options);
+        _failuresRemaining = failuresBeforeSuccess;
+        ChainId = _inner.ChainId;
+        Name = _inner.Name;
+        RpcUrl = _inner.RpcUrl;
+        BridgeContractAddress = _inner.BridgeContractAddress;
+    }
+
+    public int ChainId { get; }
+    public string Name { get; }
+    public string? RpcUrl { get; }
+    public string? BridgeContractAddress { get; }
+
+    public string GetNamespacedKey(string key) => _inner.GetNamespacedKey(key);
+
+    public Task DeleteAsync(string key, CancellationToken cancellationToken = default) =>
+        _inner.DeleteAsync(key, cancellationToken);
+
+    public async Task PutAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default)
+    {
+        if (_failuresRemaining-- > 0)
+        {
+            throw new InvalidOperationException("FlakyChainAdapter: simulated failure for testing.");
+        }
+
+        await _inner.PutAsync(key, value, cancellationToken).ConfigureAwait(false);
     }
 }
 
