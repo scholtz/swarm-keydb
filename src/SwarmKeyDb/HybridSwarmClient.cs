@@ -105,7 +105,7 @@ public sealed class HybridSwarmClient : ISwarmClient
             }
         }
 
-        return (null, $"{backend} upload failed after {_maxRetries + 1} attempt(s): {lastError?.Message}");
+        return (null, $"{backend} upload failed after {_maxRetries + 1} attempt(s): {lastError?.GetType().Name}: {lastError?.Message}");
     }
 
     private static async Task<(string Backend, byte[]? Payload, string? ErrorMessage)> TryDownloadAsync(

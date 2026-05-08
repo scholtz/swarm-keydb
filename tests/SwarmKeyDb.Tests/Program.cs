@@ -308,11 +308,13 @@ static async Task IpfsBackendSupportsKeyValueOperationsAsync()
 {
     var catPayload = Encoding.UTF8.GetBytes("downloaded");
     var sawPinnedAddCall = false;
+    var sawUnpinnedAddCall = false;
     var handler = new StubHttpMessageHandler(request =>
     {
         if (request.RequestUri?.AbsolutePath.EndsWith("/api/v0/add", StringComparison.Ordinal) == true)
         {
             sawPinnedAddCall = request.RequestUri.Query.Contains("pin=true", StringComparison.Ordinal);
+            sawUnpinnedAddCall = request.RequestUri.Query.Contains("pin=false", StringComparison.Ordinal);
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent("{\"Hash\":\"bafytestcid\"}")
@@ -335,6 +337,9 @@ static async Task IpfsBackendSupportsKeyValueOperationsAsync()
     AssertEqual("bafytestcid", await ipfsClient.UploadAsync(Encoding.UTF8.GetBytes("upload")));
     Assert(sawPinnedAddCall, "IPFS uploads should set pin=true.");
     AssertSequenceEqual(catPayload, await ipfsClient.DownloadAsync("bafytestcid"));
+    using var ipfsClientWithoutPinning = new IpfsSwarmClient(httpClient, pinOnWrite: false);
+    AssertEqual("bafytestcid", await ipfsClientWithoutPinning.UploadAsync(Encoding.UTF8.GetBytes("upload")));
+    Assert(sawUnpinnedAddCall, "IPFS uploads should set pin=false when pinning is disabled.");
 
     var store = new IpfsStorageBackend(new MutableSwarmClient(), new InMemoryKeyIndex());
     var processor = new RedisCommandProcessor(store);
@@ -361,7 +366,10 @@ static async Task HybridBackendFallsBackToAvailableStorageAsync()
 
     await store.PutAsync("hybrid:key", Encoding.UTF8.GetBytes("value"));
     var metadata = await ((IBackendMetadataProvider)store).GetBackendMetadataAsync("hybrid:key");
-    Assert(metadata is not null && metadata.Contains("\"ipfsCid\":", StringComparison.Ordinal), "Hybrid metadata should include IPFS CID.");
+    Assert(metadata is not null, "Hybrid metadata should be available.");
+    using var metadataDocument = JsonDocument.Parse(metadata!);
+    Assert(!string.IsNullOrWhiteSpace(metadataDocument.RootElement.GetProperty("ipfsCid").GetString()), "Hybrid metadata should include IPFS CID.");
+    Assert(!string.IsNullOrWhiteSpace(metadataDocument.RootElement.GetProperty("swarmReference").GetString()), "Hybrid metadata should include swarm reference.");
 
     var reference = await index.GetReferenceAsync("hybrid:key");
     if (reference is null || !HybridReferenceCodec.TryDecode(reference, out var decoded))
