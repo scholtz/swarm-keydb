@@ -21,6 +21,9 @@ print(db.get("hello"))
 - `batch_get(keys)`
 - `batch_put(entries)`
 - `set_with_ttl(key, value, ttl_seconds)`
+- `backup()`
+- `restore(ref, key=None)`
+- `rotate_key(old_key, new_key)`
 
 Async equivalents are available in `AsyncSwarmKeyDb`.
 

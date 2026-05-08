@@ -9,6 +9,9 @@ public sealed class RedisCommandProcessor : IDisposable
 {
     private readonly IKeyValueStore _store;
     private readonly IEthAddressAccessor? _ethAddressAccessor;
+    private readonly BackupService? _backupService;
+    private readonly RestoreService? _restoreService;
+    private readonly KeyRotationService? _keyRotationService;
     private readonly IRedisCommandObserver? _observer;
     private readonly ILogger<RedisCommandProcessor> _logger;
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
@@ -16,11 +19,17 @@ public sealed class RedisCommandProcessor : IDisposable
     public RedisCommandProcessor(
         IKeyValueStore store,
         IEthAddressAccessor? ethAddressAccessor = null,
+        BackupService? backupService = null,
+        RestoreService? restoreService = null,
+        KeyRotationService? keyRotationService = null,
         IRedisCommandObserver? observer = null,
         ILogger<RedisCommandProcessor>? logger = null)
     {
         _store = store;
         _ethAddressAccessor = ethAddressAccessor;
+        _backupService = backupService;
+        _restoreService = restoreService;
+        _keyRotationService = keyRotationService;
         _observer = observer;
         _logger = logger ?? NullLogger<RedisCommandProcessor>.Instance;
     }
@@ -131,6 +140,9 @@ public sealed class RedisCommandProcessor : IDisposable
                 "KEYS" => await KeysAsync(args, cancellationToken).ConfigureAwait(false),
                 "SCAN" => await ScanAsync(args, cancellationToken).ConfigureAwait(false),
                 "TYPE" => await TypeAsync(args, cancellationToken).ConfigureAwait(false),
+                "BACKUP" => await BackupAsync(args, cancellationToken).ConfigureAwait(false),
+                "RESTOREDB" => await RestoreDbAsync(args, cancellationToken).ConfigureAwait(false),
+                "ROTATEKEY" => await RotateKeyAsync(args, cancellationToken).ConfigureAwait(false),
                 "QUIT" => RespValue.SimpleString("OK"),
                 _ => RespValue.Error($"ERR unknown command '{command}'")
             };
@@ -180,6 +192,57 @@ public sealed class RedisCommandProcessor : IDisposable
 
         _ethAddressAccessor.CurrentAddress = EthereumAddress.Normalize(args[1].AsString());
         return RespValue.SimpleString("OK");
+    }
+
+    private async Task<RespValue> BackupAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        var arityError = RequireArity(args, 1);
+        if (arityError is not null)
+        {
+            return arityError;
+        }
+
+        if (_backupService is null)
+        {
+            return RespValue.Error("ERR BACKUP is not available.");
+        }
+
+        var result = await _backupService.BackupAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+        return RespValue.BulkString(result.Reference);
+    }
+
+    private async Task<RespValue> RestoreDbAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        if (args.Count is not 2 and not 3)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'RESTOREDB'");
+        }
+
+        if (_restoreService is null)
+        {
+            return RespValue.Error("ERR RESTOREDB is not available.");
+        }
+
+        var key = args.Count == 3 ? args[2].AsString() : null;
+        var result = await _restoreService.RestoreAsync(args[1].AsString(), key, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return RespValue.IntegerValue(result.RestoredKeyCount);
+    }
+
+    private async Task<RespValue> RotateKeyAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        var arityError = RequireArity(args, 3);
+        if (arityError is not null)
+        {
+            return arityError;
+        }
+
+        if (_keyRotationService is null)
+        {
+            return RespValue.Error("ERR ROTATEKEY is not available.");
+        }
+
+        var result = await _keyRotationService.RotateAsync(args[1].AsString(), args[2].AsString(), cancellationToken: cancellationToken).ConfigureAwait(false);
+        return RespValue.BulkString(result.ManifestReference);
     }
 
     private async Task<RespValue> SetAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)

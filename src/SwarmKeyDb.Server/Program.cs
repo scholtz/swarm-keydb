@@ -94,11 +94,13 @@ services.AddSingleton<IOptions<EncryptionOptions>>(Options.Create(encryptionOpti
 services.AddSingleton<IOptions<IntegrityOptions>>(Options.Create(integrityOptions));
 services.AddSingleton<IOptions<AclOptions>>(Options.Create(aclOptions));
 services.AddSingleton<IOptions<AsyncProcessingOptions>>(Options.Create(asyncProcessingOptions));
+services.AddSingleton<IEncryptionKeyProvider>(_ => new MutableEncryptionKeyProvider(encryptionOptions));
 services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
 services.AddSingleton<IEthAddressAccessor, AsyncLocalEthAddressAccessor>();
 IReadinessProbe readinessProbe;
 IShardHealthProvider? shardHealthProvider = null;
 var ownedResources = new List<IDisposable>();
+ISwarmClient? snapshotSwarmClient = null;
 
 if (shardingOptions.Enabled)
 {
@@ -133,6 +135,7 @@ if (shardingOptions.Enabled)
         }
 
         var instrumentedShardClient = new InstrumentedSwarmClient(shardClient, monitoringMetrics);
+        snapshotSwarmClient ??= instrumentedShardClient;
         var shardStore = new SwarmKeyValueStore(instrumentedShardClient, shardIndex, integrityOptions);
         shardStores.Add(new ShardStore(shardName, shardStore));
         shardReadiness.Add(new ShardReadinessRegistration(shardName, shardProbe, shardStore));
@@ -167,14 +170,34 @@ else
     }
 
     var instrumentedClient = new InstrumentedSwarmClient(swarmClient, monitoringMetrics);
+    snapshotSwarmClient = instrumentedClient;
     services.AddSwarmKeyDbStore(_ => new SwarmKeyValueStore(instrumentedClient, index, integrityOptions));
 }
+
+services.AddSingleton<ISwarmClient>(_ => snapshotSwarmClient ?? throw new InvalidOperationException("No Swarm client is configured."));
+
+services.AddSingleton<BackupService>(sp => new BackupService(
+    sp.GetRequiredService<IKeyValueStore>(),
+    sp.GetRequiredService<ISwarmClient>(),
+    sp.GetService<IEncryptionKeyProvider>()));
+services.AddSingleton<RestoreService>(sp => new RestoreService(
+    sp.GetRequiredService<BackupService>(),
+    sp.GetRequiredService<IKeyValueStore>(),
+    sp.GetService<IEncryptionKeyProvider>()));
+services.AddSingleton<KeyRotationService>(sp => new KeyRotationService(
+    sp.GetRequiredService<IKeyValueStore>(),
+    sp.GetRequiredService<ISwarmClient>(),
+    sp.GetRequiredService<IEncryptionKeyProvider>(),
+    sp.GetRequiredService<BackupService>()));
 
 using var provider = services.BuildServiceProvider();
 cacheStats = provider.GetRequiredService<ICacheStats>();
 var processor = new RedisCommandProcessor(
     provider.GetRequiredService<IKeyValueStore>(),
     provider.GetRequiredService<IEthAddressAccessor>(),
+    provider.GetRequiredService<BackupService>(),
+    provider.GetRequiredService<RestoreService>(),
+    provider.GetRequiredService<KeyRotationService>(),
     monitoringMetrics,
     provider.GetRequiredService<ILogger<RedisCommandProcessor>>());
 var server = new RedisServer(

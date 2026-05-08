@@ -108,6 +108,27 @@ func (m *mockRedis) MSet(ctx context.Context, values ...interface{}) *redis.Stat
 	return cmd
 }
 
+func (m *mockRedis) Do(ctx context.Context, args ...interface{}) *redis.Cmd {
+	cmd := redis.NewCmd(ctx)
+	if m.err != nil {
+		cmd.SetErr(m.err)
+		return cmd
+	}
+
+	switch args[0] {
+	case "BACKUP":
+		cmd.SetVal("swarm://backup-ref")
+	case "RESTOREDB":
+		cmd.SetVal(int64(2))
+	case "ROTATEKEY":
+		cmd.SetVal("swarm://rotation-ref")
+	default:
+		cmd.SetErr(errors.New("unexpected command"))
+	}
+
+	return cmd
+}
+
 func TestPutGetDeleteList(t *testing.T) {
 	ctx := context.Background()
 	client := NewWithRedisClient(newMockRedis())
@@ -191,5 +212,25 @@ func TestJSONHelpers(t *testing.T) {
 	}
 	if profile.Name != "Ada" {
 		t.Fatalf("unexpected profile: %#v", profile)
+	}
+}
+
+func TestManagementHelpers(t *testing.T) {
+	ctx := context.Background()
+	client := NewWithRedisClient(newMockRedis())
+
+	backupRef, err := client.Backup(ctx)
+	if err != nil || backupRef != "swarm://backup-ref" {
+		t.Fatalf("backup failed: %v ref=%q", err, backupRef)
+	}
+
+	restored, err := client.Restore(ctx, "swarm://backup-ref", "old-key")
+	if err != nil || restored != 2 {
+		t.Fatalf("restore failed: %v restored=%d", err, restored)
+	}
+
+	rotationRef, err := client.RotateKey(ctx, "old-key", "new-key")
+	if err != nil || rotationRef != "swarm://rotation-ref" {
+		t.Fatalf("rotate failed: %v ref=%q", err, rotationRef)
 	}
 }

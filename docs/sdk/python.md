@@ -19,6 +19,7 @@ Core API:
 - `list(pattern="*")`
 - `batch_put(entries)`, `batch_get(keys)`
 - `set_with_ttl(key, value, ttl_seconds)`
+- `backup()`, `restore(ref, key=None)`, `rotate_key(old_key, new_key)`
 - async client equivalents in `AsyncSwarmKeyDb`
 
 Error handling note: invalid TTL, ACL-denied operations, and failed reads are surfaced as Redis errors.

@@ -18,6 +18,7 @@ type RedisClient interface {
 	Keys(ctx context.Context, pattern string) *redis.StringSliceCmd
 	MGet(ctx context.Context, keys ...string) *redis.SliceCmd
 	MSet(ctx context.Context, values ...interface{}) *redis.StatusCmd
+	Do(ctx context.Context, args ...interface{}) *redis.Cmd
 }
 
 type Options struct {
@@ -150,6 +151,46 @@ func (c *Client) SetWithTTL(ctx context.Context, key string, value string, ttlSe
 	return nil
 }
 
+func (c *Client) Backup(ctx context.Context) (string, error) {
+	v, err := c.redis.Do(ctx, "BACKUP").Text()
+	if err != nil {
+		return "", fmt.Errorf("backup: %w", err)
+	}
+	return v, nil
+}
+
+func (c *Client) Restore(ctx context.Context, ref string, key string) (int64, error) {
+	if ref == "" {
+		return 0, fmt.Errorf("ref must be non-empty")
+	}
+
+	args := []interface{}{"RESTOREDB", ref}
+	if key != "" {
+		args = append(args, key)
+	}
+
+	v, err := c.redis.Do(ctx, args...).Int64()
+	if err != nil {
+		return 0, fmt.Errorf("restore %q: %w", ref, err)
+	}
+	return v, nil
+}
+
+func (c *Client) RotateKey(ctx context.Context, oldKey string, newKey string) (string, error) {
+	if oldKey == "" {
+		return "", fmt.Errorf("oldKey must be non-empty")
+	}
+	if newKey == "" {
+		return "", fmt.Errorf("newKey must be non-empty")
+	}
+
+	v, err := c.redis.Do(ctx, "ROTATEKEY", oldKey, newKey).Text()
+	if err != nil {
+		return "", fmt.Errorf("rotateKey: %w", err)
+	}
+	return v, nil
+}
+
 func (c *Client) PutJSON(ctx context.Context, key string, value any) error {
 	b, err := json.Marshal(value)
 	if err != nil {
@@ -200,4 +241,8 @@ func (r *redisAdapter) MGet(ctx context.Context, keys ...string) *redis.SliceCmd
 
 func (r *redisAdapter) MSet(ctx context.Context, values ...interface{}) *redis.StatusCmd {
 	return r.inner.MSet(ctx, values...)
+}
+
+func (r *redisAdapter) Do(ctx context.Context, args ...interface{}) *redis.Cmd {
+	return r.inner.Do(ctx, args...)
 }

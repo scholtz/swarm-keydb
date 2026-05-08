@@ -32,6 +32,15 @@ class FakeRedis:
     def setex(self, key, ttl, value):
         self.store[key] = value
 
+    def execute_command(self, *args):
+        if args[0] == "BACKUP":
+            return "swarm://backup-ref"
+        if args[0] == "RESTOREDB":
+            return 2
+        if args[0] == "ROTATEKEY":
+            return "swarm://rotation-ref"
+        raise AssertionError(f"unexpected command {args[0]}")
+
 
 class FakeAsyncRedis(FakeRedis):
     async def get(self, key):
@@ -57,6 +66,9 @@ class FakeAsyncRedis(FakeRedis):
 
     async def close(self):
         return None
+
+    async def execute_command(self, *args):
+        return super().execute_command(*args)
 
 
 class SwarmKeyDbTests(unittest.TestCase):
@@ -89,6 +101,12 @@ class SwarmKeyDbTests(unittest.TestCase):
         with self.assertRaises(KeyNotFoundError):
             db.get_or_raise("missing")
 
+    def test_sync_management_commands(self):
+        db = SwarmKeyDb(host="localhost", port=6379, redis_client=FakeRedis())
+        self.assertEqual(db.backup(), "swarm://backup-ref")
+        self.assertEqual(db.restore("swarm://backup-ref", "old-key"), 2)
+        self.assertEqual(db.rotate_key("old-key", "new-key"), "swarm://rotation-ref")
+
 
 class AsyncSwarmKeyDbTests(unittest.IsolatedAsyncioTestCase):
     async def test_async_happy_path(self):
@@ -118,6 +136,12 @@ class AsyncSwarmKeyDbTests(unittest.IsolatedAsyncioTestCase):
             await db.set_with_ttl("a", "b", -1)
         with self.assertRaises(KeyNotFoundError):
             await db.get_or_raise("missing")
+
+    async def test_async_management_commands(self):
+        db = AsyncSwarmKeyDb(host="localhost", port=6379, redis_client=FakeAsyncRedis())
+        self.assertEqual(await db.backup(), "swarm://backup-ref")
+        self.assertEqual(await db.restore("swarm://backup-ref", "old-key"), 2)
+        self.assertEqual(await db.rotate_key("old-key", "new-key"), "swarm://rotation-ref")
 
 
 if __name__ == "__main__":

@@ -21,6 +21,9 @@ fmt.Println(v)
 - `BatchGet(ctx, keys)`
 - `BatchPut(ctx, entries)`
 - `SetWithTTL(ctx, key, value, ttlSeconds)`
+- `Backup(ctx)`
+- `Restore(ctx, ref, key)`
+- `RotateKey(ctx, oldKey, newKey)`
 - `PutJSON` / `GetJSON` helpers
 
 ## Data integrity

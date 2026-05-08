@@ -19,6 +19,7 @@ Core API:
 - `List(ctx, pattern)`
 - `BatchPut(ctx, entries)`, `BatchGet(ctx, keys)`
 - `SetWithTTL(ctx, key, value, ttlSeconds)`
+- `Backup(ctx)`, `Restore(ctx, ref, key)`, `RotateKey(ctx, oldKey, newKey)`
 - `PutJSON` / `GetJSON`
 
 Error handling note: Redis/server errors are returned directly (`error`) for invalid TTL, ACL denial, and failed reads.

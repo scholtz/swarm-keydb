@@ -23,6 +23,9 @@ await db.disconnect();
 - `batchGet(keys)`
 - `batchPut(entries)`
 - `setWithTTL(key, value, ttlSeconds)`
+- `backup()`
+- `restore(ref, key?)`
+- `rotateKey(oldKey, newKey)`
 
 ## Data integrity
 

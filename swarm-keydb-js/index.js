@@ -132,6 +132,46 @@ export class SwarmKeyDb {
     }
   }
 
+  async backup() {
+    try {
+      return await this.client.sendCommand(['BACKUP']);
+    } catch (error) {
+      throw wrapRedisError('backup', error);
+    }
+  }
+
+  async restore(ref, key) {
+    if (typeof ref !== 'string' || ref.length === 0) {
+      throw new Error('ref must be a non-empty string');
+    }
+
+    const args = ['RESTOREDB', ref];
+    if (typeof key === 'string' && key.length > 0) {
+      args.push(key);
+    }
+
+    try {
+      return Number(await this.client.sendCommand(args));
+    } catch (error) {
+      throw wrapRedisError(`restore(${ref})`, error);
+    }
+  }
+
+  async rotateKey(oldKey, newKey) {
+    if (typeof oldKey !== 'string' || oldKey.length === 0) {
+      throw new Error('oldKey must be a non-empty string');
+    }
+    if (typeof newKey !== 'string' || newKey.length === 0) {
+      throw new Error('newKey must be a non-empty string');
+    }
+
+    try {
+      return await this.client.sendCommand(['ROTATEKEY', oldKey, newKey]);
+    } catch (error) {
+      throw wrapRedisError('rotateKey', error);
+    }
+  }
+
   #validateKey(key) {
     if (typeof key !== 'string' || key.length === 0) {
       throw new Error('key must be a non-empty string');
