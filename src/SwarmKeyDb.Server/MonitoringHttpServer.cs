@@ -13,6 +13,7 @@ public sealed class MonitoringHttpServer : IDisposable
     private readonly bool _metricsEnabled;
     private readonly bool _dashboardEnabled;
     private readonly ILogger<MonitoringHttpServer> _logger;
+    private readonly IShardHealthProvider? _shardHealthProvider;
 
     public MonitoringHttpServer(
         IPAddress address,
@@ -21,13 +22,15 @@ public sealed class MonitoringHttpServer : IDisposable
         IReadinessProbe readinessProbe,
         bool metricsEnabled,
         bool dashboardEnabled,
-        ILogger<MonitoringHttpServer> logger)
+        ILogger<MonitoringHttpServer> logger,
+        IShardHealthProvider? shardHealthProvider = null)
     {
         _metrics = metrics;
         _readinessProbe = readinessProbe;
         _metricsEnabled = metricsEnabled;
         _dashboardEnabled = dashboardEnabled;
         _logger = logger;
+        _shardHealthProvider = shardHealthProvider;
         _listener.Prefixes.Add($"http://{(address.Equals(IPAddress.Any) ? "+" : address.ToString())}:{port}/");
     }
 
@@ -72,24 +75,63 @@ public sealed class MonitoringHttpServer : IDisposable
         var path = context.Request.Url?.AbsolutePath ?? "/";
         if (path.Equals("/health", StringComparison.OrdinalIgnoreCase))
         {
-            await WriteJsonAsync(context.Response, HttpStatusCode.OK, new { status = "healthy" }, cancellationToken).ConfigureAwait(false);
+            var shardHealth = _shardHealthProvider is null
+                ? null
+                : await _shardHealthProvider.GetShardHealthAsync(cancellationToken).ConfigureAwait(false);
+            var degraded = shardHealth?.Any(static shard => !shard.Ready) == true;
+            await WriteJsonAsync(
+                context.Response,
+                degraded ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.OK,
+                new
+                {
+                    status = degraded ? "degraded" : "healthy",
+                    shards = shardHealth?.Select(static shard => new
+                    {
+                        shard = shard.Shard,
+                        status = shard.Ready ? "healthy" : "unreachable",
+                        message = shard.Message,
+                        keyCount = shard.KeyCount
+                    })
+                },
+                cancellationToken).ConfigureAwait(false);
             return;
         }
 
         if (path.Equals("/ready", StringComparison.OrdinalIgnoreCase))
         {
             var (ready, message) = await _readinessProbe.CheckAsync(cancellationToken).ConfigureAwait(false);
+            var shardHealth = _shardHealthProvider is null
+                ? null
+                : await _shardHealthProvider.GetShardHealthAsync(cancellationToken).ConfigureAwait(false);
             await WriteJsonAsync(
                 context.Response,
                 ready ? HttpStatusCode.OK : HttpStatusCode.ServiceUnavailable,
-                new { status = ready ? "ready" : "not_ready", message },
+                new
+                {
+                    status = ready ? "ready" : "not_ready",
+                    message,
+                    shards = shardHealth?.Select(static shard => new
+                    {
+                        shard = shard.Shard,
+                        status = shard.Ready ? "ready" : "not_ready",
+                        message = shard.Message,
+                        keyCount = shard.KeyCount
+                    })
+                },
                 cancellationToken).ConfigureAwait(false);
             return;
         }
 
         if (_metricsEnabled && path.Equals("/metrics", StringComparison.OrdinalIgnoreCase))
         {
-            await WriteTextAsync(context.Response, HttpStatusCode.OK, _metrics.CollectPrometheus(), "text/plain; version=0.0.4", cancellationToken).ConfigureAwait(false);
+            var payload = _metrics.CollectPrometheus();
+            if (_shardHealthProvider is not null)
+            {
+                var shardHealth = await _shardHealthProvider.GetShardHealthAsync(cancellationToken).ConfigureAwait(false);
+                payload = $"{payload}{BuildShardPrometheusMetrics(shardHealth)}";
+            }
+
+            await WriteTextAsync(context.Response, HttpStatusCode.OK, payload, "text/plain; version=0.0.4", cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -130,6 +172,28 @@ public sealed class MonitoringHttpServer : IDisposable
         await response.OutputStream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
         response.Close();
     }
+
+    private static string BuildShardPrometheusMetrics(IReadOnlyList<ShardHealthStatus> shardHealth)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("# HELP swarmkeydb_shard_up Shard health status (1=healthy, 0=unreachable).");
+        builder.AppendLine("# TYPE swarmkeydb_shard_up gauge");
+        builder.AppendLine("# HELP swarmkeydb_shard_key_count Approximate key count by shard.");
+        builder.AppendLine("# TYPE swarmkeydb_shard_key_count gauge");
+        foreach (var shard in shardHealth)
+        {
+            builder.AppendLine($"swarmkeydb_shard_up{{shard=\"{EscapeMetricLabel(shard.Shard)}\"}} {(shard.Ready ? 1 : 0)}");
+            if (shard.KeyCount is { } keyCount)
+            {
+                builder.AppendLine($"swarmkeydb_shard_key_count{{shard=\"{EscapeMetricLabel(shard.Shard)}\"}} {keyCount}");
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    private static string EscapeMetricLabel(string value) =>
+        value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
 
     private const string DashboardHtml = """
                                          <!doctype html>

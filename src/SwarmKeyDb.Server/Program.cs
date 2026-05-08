@@ -22,26 +22,8 @@ var logLevel = GetLogLevel("LOG_LEVEL", GetLogLevel("SWARM_KEYDB_LOG_LEVEL", Log
 var environment = GetString("DOTNET_ENVIRONMENT", GetString("ASPNETCORE_ENVIRONMENT", "Production"));
 var useJsonLogging = GetBool("JSON_LOGS", !environment.Equals("Development", StringComparison.OrdinalIgnoreCase));
 
-var index = new FileKeyIndex(Path.Combine(dataDir, "index.json"));
 ICacheStats? cacheStats = null;
 var monitoringMetrics = new MonitoringMetrics(() => cacheStats ?? NoOpCacheStats.Instance);
-IReadinessProbe readinessProbe;
-ISwarmClient swarmClient;
-if (backend.Equals("bee", StringComparison.OrdinalIgnoreCase))
-{
-    var beeUrl = new Uri(GetString("BEE_URL", "http://localhost:1633/"));
-    var batchId = RequireSetting("BEE_POSTAGE_BATCH_ID");
-    readinessProbe = new BeeReadinessProbe(beeUrl, batchId);
-    swarmClient = new BeeSwarmClient(beeUrl, batchId);
-}
-else
-{
-    readinessProbe = new AlwaysReadyProbe();
-    swarmClient = new FileSwarmClient(Path.Combine(dataDir, "objects"));
-}
-
-using var readinessProbeLifetime = readinessProbe as IDisposable;
-swarmClient = new InstrumentedSwarmClient(swarmClient, monitoringMetrics);
 
 var cacheOptions = new CacheOptions
 {
@@ -74,6 +56,8 @@ var integrityOptions = new IntegrityOptions
 {
     Enabled = GetBool("SWARM_KEYDB_INTEGRITY_ENABLED", true)
 };
+var shardingOptions = GetShardingOptions();
+shardingOptions.Validate();
 var aclOptions = GetAclOptions();
 var asyncProcessingOptions = new AsyncProcessingOptions
 {
@@ -112,7 +96,79 @@ services.AddSingleton<IOptions<AclOptions>>(Options.Create(aclOptions));
 services.AddSingleton<IOptions<AsyncProcessingOptions>>(Options.Create(asyncProcessingOptions));
 services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
 services.AddSingleton<IEthAddressAccessor, AsyncLocalEthAddressAccessor>();
-services.AddSwarmKeyDbStore(swarmClient, index);
+IReadinessProbe readinessProbe;
+IShardHealthProvider? shardHealthProvider = null;
+var ownedResources = new List<IDisposable>();
+
+if (shardingOptions.Enabled)
+{
+    var shardStores = new List<ShardStore>();
+    var shardReadiness = new List<ShardReadinessRegistration>();
+    for (var i = 0; i < shardingOptions.Nodes.Count; i++)
+    {
+        var node = shardingOptions.Nodes[i];
+        var shardName = string.IsNullOrWhiteSpace(node.Name) ? $"shard-{i + 1}" : node.Name;
+        var shardDataDir = string.IsNullOrWhiteSpace(node.DataDir)
+            ? Path.Combine(dataDir, "shards", shardName)
+            : node.DataDir;
+        var shardIndex = new FileKeyIndex(Path.Combine(shardDataDir, "index.json"));
+        ISwarmClient shardClient;
+        IReadinessProbe shardProbe;
+        if (backend.Equals("bee", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrWhiteSpace(node.BeeUrl))
+        {
+            var beeUrl = new Uri(node.BeeUrl ?? GetString("BEE_URL", "http://localhost:1633/"));
+            var batchId = node.PostageBatchId
+                ?? GetSetting("BEE_POSTAGE_BATCH_ID")
+                ?? throw new InvalidOperationException("Configuration value BEE_POSTAGE_BATCH_ID is required.");
+            var probe = new BeeReadinessProbe(beeUrl, batchId);
+            shardProbe = probe;
+            shardClient = new BeeSwarmClient(beeUrl, batchId);
+            ownedResources.Add(probe);
+            ownedResources.Add((IDisposable)shardClient);
+        }
+        else
+        {
+            shardProbe = new AlwaysReadyProbe();
+            shardClient = new FileSwarmClient(Path.Combine(shardDataDir, "objects"));
+        }
+
+        var instrumentedClient = new InstrumentedSwarmClient(shardClient, monitoringMetrics);
+        var shardStore = new SwarmKeyValueStore(swarmClient: instrumentedClient, index: shardIndex, integrityOptions: integrityOptions);
+        shardStores.Add(new ShardStore(shardName, shardStore));
+        shardReadiness.Add(new ShardReadinessRegistration(shardName, shardProbe, shardStore));
+    }
+
+    var compositeProbe = new CompositeShardReadinessProbe(shardReadiness);
+    readinessProbe = compositeProbe;
+    shardHealthProvider = compositeProbe;
+    services.AddSwarmKeyDbStore(_ => new ShardingRouter(
+        shardStores,
+        shardingOptions.ShardCount,
+        shardingOptions.VirtualNodesPerNode));
+}
+else
+{
+    var index = new FileKeyIndex(Path.Combine(dataDir, "index.json"));
+    ISwarmClient swarmClient;
+    if (backend.Equals("bee", StringComparison.OrdinalIgnoreCase))
+    {
+        var beeUrl = new Uri(GetString("BEE_URL", "http://localhost:1633/"));
+        var batchId = RequireSetting("BEE_POSTAGE_BATCH_ID");
+        var probe = new BeeReadinessProbe(beeUrl, batchId);
+        readinessProbe = probe;
+        swarmClient = new BeeSwarmClient(beeUrl, batchId);
+        ownedResources.Add(probe);
+        ownedResources.Add((IDisposable)swarmClient);
+    }
+    else
+    {
+        readinessProbe = new AlwaysReadyProbe();
+        swarmClient = new FileSwarmClient(Path.Combine(dataDir, "objects"));
+    }
+
+    var instrumentedClient = new InstrumentedSwarmClient(swarmClient, monitoringMetrics);
+    services.AddSwarmKeyDbStore(_ => new SwarmKeyValueStore(instrumentedClient, index, integrityOptions));
+}
 
 using var provider = services.BuildServiceProvider();
 cacheStats = provider.GetRequiredService<ICacheStats>();
@@ -147,7 +203,8 @@ if (dashboardEnabled)
         readinessProbe,
         metricsEnabled: metricsEnabled,
         dashboardEnabled: true,
-        provider.GetRequiredService<ILogger<MonitoringHttpServer>>());
+        provider.GetRequiredService<ILogger<MonitoringHttpServer>>(),
+        shardHealthProvider);
     monitoringServers.Add(dashboardServer);
     monitoringTasks.Add(dashboardServer.RunAsync(cts.Token));
 }
@@ -161,7 +218,8 @@ if (metricsEnabled && (!dashboardEnabled || metricsPort != dashboardPort))
         readinessProbe,
         metricsEnabled: true,
         dashboardEnabled: false,
-        provider.GetRequiredService<ILogger<MonitoringHttpServer>>());
+        provider.GetRequiredService<ILogger<MonitoringHttpServer>>(),
+        shardHealthProvider);
     monitoringServers.Add(metricsServer);
     monitoringTasks.Add(metricsServer.RunAsync(cts.Token));
 }
@@ -171,6 +229,10 @@ await Task.WhenAll(monitoringTasks);
 foreach (var monitoringServer in monitoringServers)
 {
     monitoringServer.Dispose();
+}
+foreach (var resource in ownedResources)
+{
+    resource.Dispose();
 }
 
 int GetInt(string name, int defaultValue) =>
@@ -192,6 +254,126 @@ string RequireSetting(string name) =>
 
 string? GetSetting(string name) =>
     Environment.GetEnvironmentVariable(name) ?? (appSettings.TryGetValue(name, out var value) ? value : null);
+
+ShardingOptions GetShardingOptions()
+{
+    var enabled = GetBoolFromMany(defaultValue: false, "SWARM_KEYDB_SHARDING_ENABLED", "Sharding:Enabled");
+    var nodes = ParseShardNodes(GetFirstSetting("SWARM_KEYDB_SHARDING_NODES", "Sharding:Nodes"));
+    var shardCount = GetNullableIntFromMany("SWARM_KEYDB_SHARDING_SHARD_COUNT", "Sharding:ShardCount")
+        ?? Math.Max(1, nodes.Count);
+
+    return new ShardingOptions
+    {
+        Enabled = enabled,
+        Nodes = nodes,
+        ShardCount = shardCount,
+        VirtualNodesPerNode = GetNullableIntFromMany("SWARM_KEYDB_SHARDING_VIRTUAL_NODES", "Sharding:VirtualNodesPerNode") ?? 128
+    };
+}
+
+IReadOnlyList<ShardNodeOptions> ParseShardNodes(string? json)
+{
+    if (string.IsNullOrWhiteSpace(json))
+    {
+        return [];
+    }
+
+    try
+    {
+        using var document = JsonDocument.Parse(json);
+        if (document.RootElement.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var nodes = new List<ShardNodeOptions>();
+        var index = 1;
+        foreach (var element in document.RootElement.EnumerateArray())
+        {
+            switch (element.ValueKind)
+            {
+                case JsonValueKind.String:
+                {
+                    var endpoint = element.GetString();
+                    if (!string.IsNullOrWhiteSpace(endpoint))
+                    {
+                        nodes.Add(new ShardNodeOptions
+                        {
+                            Name = $"shard-{index++}",
+                            BeeUrl = endpoint
+                        });
+                    }
+
+                    break;
+                }
+                case JsonValueKind.Object:
+                {
+                    var name = element.TryGetProperty("name", out var nameProperty) ? nameProperty.GetString() : null;
+                    var beeUrl = element.TryGetProperty("beeUrl", out var beeUrlProperty) ? beeUrlProperty.GetString() : null;
+                    var postageBatchId = element.TryGetProperty("postageBatchId", out var batchProperty) ? batchProperty.GetString() : null;
+                    var shardDataDir = element.TryGetProperty("dataDir", out var dataDirProperty) ? dataDirProperty.GetString() : null;
+                    nodes.Add(new ShardNodeOptions
+                    {
+                        Name = string.IsNullOrWhiteSpace(name) ? $"shard-{index}" : name!,
+                        BeeUrl = beeUrl,
+                        PostageBatchId = postageBatchId,
+                        DataDir = shardDataDir
+                    });
+                    index++;
+                    break;
+                }
+            }
+        }
+
+        return nodes;
+    }
+    catch (JsonException ex)
+    {
+        throw new InvalidOperationException(
+            "Sharding nodes configuration is invalid. Configure SWARM_KEYDB_SHARDING_NODES as a JSON array of Bee URLs or node objects.",
+            ex);
+    }
+}
+
+string? GetFirstSetting(params string[] names)
+{
+    foreach (var name in names)
+    {
+        var value = GetSetting(name);
+        if (value is not null)
+        {
+            return value;
+        }
+    }
+
+    return null;
+}
+
+int? GetNullableIntFromMany(params string[] names)
+{
+    foreach (var name in names)
+    {
+        if (int.TryParse(GetSetting(name), out var value))
+        {
+            return value;
+        }
+    }
+
+    return null;
+}
+
+bool GetBoolFromMany(bool defaultValue, params string[] names)
+{
+    foreach (var name in names)
+    {
+        if (bool.TryParse(GetSetting(name), out var value))
+        {
+            return value;
+        }
+    }
+
+    return defaultValue;
+}
 
 AclOptions GetAclOptions()
 {

@@ -1,0 +1,28 @@
+services:
+  swarm-keydb-sharded:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: swarm-keydb:sharded
+    container_name: swarm-keydb-sharded
+    ports:
+      - "6379:6379"
+      - "8080:8080"
+      - "9090:9090"
+    environment:
+      SWARM_KEYDB_BIND: 0.0.0.0
+      SWARM_KEYDB_PORT: 6379
+      SWARM_KEYDB_BACKEND: local
+      SWARM_KEYDB_DATA_DIR: /data
+      SWARM_KEYDB_SHARDING_ENABLED: "true"
+      SWARM_KEYDB_SHARDING_SHARD_COUNT: "3"
+      SWARM_KEYDB_SHARDING_VIRTUAL_NODES: "128"
+      SWARM_KEYDB_SHARDING_NODES: >-
+        [{"name":"shard-a","dataDir":"/data/shard-a"},{"name":"shard-b","dataDir":"/data/shard-b"},{"name":"shard-c","dataDir":"/data/shard-c"}]
+      METRICS_ENABLED: "true"
+      DASHBOARD_ENABLED: "true"
+    volumes:
+      - swarm-keydb-sharded-data:/data
+
+volumes:
+  swarm-keydb-sharded-data:

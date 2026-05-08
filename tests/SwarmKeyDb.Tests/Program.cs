@@ -41,6 +41,9 @@ var tests = new (string Name, Func<Task> Test)[]
     ("ttl returns negative two for missing key", TtlReturnsNegativeTwoForMissingKeyAsync),
     ("set with ex option sets expiry", SetWithExOptionSetsExpiryAsync),
     ("batch operations resp format", BatchOperationsRespFormatAsync),
+    ("consistent hash ring distributes keys with low imbalance", ConsistentHashRingDistributesKeysWithLowImbalanceAsync),
+    ("sharding router routes deterministically and minimizes redistribution", ShardingRouterRoutesDeterministicallyAndMinimizesRedistributionAsync),
+    ("sharding router scan aggregates keys from all shards", ShardingRouterScanAggregatesKeysFromAllShardsAsync),
     ("async batch get and put round trip", AsyncBatchGetAndPutRoundTripAsync),
     ("async flush waits for queued fire and forget writes", AsyncFlushWaitsForQueuedFireAndForgetWritesAsync),
     ("async fire and forget captures and logs errors", AsyncFireAndForgetCapturesAndLogsErrorsAsync),
@@ -110,6 +113,7 @@ var tests = new (string Name, Func<Task> Test)[]
     ("swarm store with btree index prefix scan", SwarmStoreWithBTreeIndexPrefixScanAsync),
     ("monitoring metrics endpoint exposes operation counters and cache ratio", MonitoringMetricsEndpointExposesCountersAsync),
     ("monitoring health and readiness endpoints return expected status codes", MonitoringHealthAndReadinessEndpointsAsync),
+    ("monitoring health endpoint reports degraded for unhealthy shard", MonitoringHealthEndpointReportsDegradedForUnhealthyShardAsync),
     ("redis command logging includes correlation ids", RedisCommandLoggingIncludesCorrelationIdsAsync),
     ("migrate scan pattern applies prefix filter", MigrateScanPatternAppliesPrefixFilterAsync),
     ("migrate checkpoint store saves and loads", MigrateCheckpointStoreSavesAndLoadsAsync),
@@ -628,6 +632,107 @@ static async Task BatchOperationsRespFormatAsync()
     AssertEqual("+OK\r\n*3\r\n$1\r\n1\r\n$-1\r\n$1\r\n2\r\n:0\r\n:1\r\n:2\r\n", response);
 }
 
+static Task ConsistentHashRingDistributesKeysWithLowImbalanceAsync()
+{
+    var shardA = new ShardStore("a", new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()));
+    var shardB = new ShardStore("b", new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()));
+    var shardC = new ShardStore("c", new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()));
+    var router = new ShardingRouter([shardA, shardB, shardC], shardCount: 3, virtualNodesPerNode: 128);
+
+    var counts = new Dictionary<string, int>(StringComparer.Ordinal)
+    {
+        ["a"] = 0,
+        ["b"] = 0,
+        ["c"] = 0
+    };
+
+    for (var i = 0; i < 10_000; i++)
+    {
+        var shard = router.ResolveShardName($"dist:{i}");
+        counts[shard]++;
+    }
+
+    const double average = 10_000 / 3.0;
+    foreach (var count in counts.Values)
+    {
+        var imbalance = Math.Abs(count - average) / average;
+        Assert(imbalance < 0.20, $"Expected shard imbalance <20%, got {imbalance:P2}.");
+    }
+
+    return Task.CompletedTask;
+}
+
+static Task ShardingRouterRoutesDeterministicallyAndMinimizesRedistributionAsync()
+{
+    var shardA = new ShardStore("a", new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()));
+    var shardB = new ShardStore("b", new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()));
+    var shardC = new ShardStore("c", new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()));
+    var routerA = new ShardingRouter([shardA, shardB, shardC], shardCount: 3, virtualNodesPerNode: 128);
+    var routerB = new ShardingRouter([shardA, shardB, shardC], shardCount: 3, virtualNodesPerNode: 128);
+    var routerWithoutC = new ShardingRouter([shardA, shardB], shardCount: 3, virtualNodesPerNode: 128);
+
+    var moved = 0;
+    for (var i = 0; i < 10_000; i++)
+    {
+        var key = $"stable:{i}";
+        var first = routerA.ResolveShardName(key);
+        var second = routerB.ResolveShardName(key);
+        AssertEqual(first, second);
+
+        if (!string.Equals(first, routerWithoutC.ResolveShardName(key), StringComparison.Ordinal))
+        {
+            moved++;
+        }
+    }
+
+    var movedRatio = moved / 10_000d;
+    Assert(movedRatio is > 0.15 and < 0.50, $"Expected partial redistribution (~1/N), got {movedRatio:P2}.");
+    return Task.CompletedTask;
+}
+
+static async Task ShardingRouterScanAggregatesKeysFromAllShardsAsync()
+{
+    var router = new ShardingRouter(
+    [
+        new ShardStore("a", new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex())),
+        new ShardStore("b", new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex())),
+        new ShardStore("c", new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()))
+    ],
+        shardCount: 3,
+        virtualNodesPerNode: 128);
+
+    var client = new SwarmKeyDbClient(router);
+    var values = Enumerable.Range(0, 1_000)
+        .Select(i => new KeyValuePair<string, ReadOnlyMemory<byte>>($"item:{i:D4}", Encoding.UTF8.GetBytes($"v-{i}")))
+        .ToArray();
+    await client.BatchPutAsync(values);
+
+    for (var i = 0; i < 1_000; i++)
+    {
+        AssertEqual($"v-{i}", await client.GetStringAsync($"item:{i:D4}"));
+    }
+
+    var keys = await client.KeysAsync();
+    AssertEqual(1_000, keys.Count);
+    var uniqueKeys = new HashSet<string>(keys, StringComparer.Ordinal);
+    AssertEqual(1_000, uniqueKeys.Count);
+
+    var scanned = new HashSet<string>(StringComparer.Ordinal);
+    var cursor = string.Empty;
+    do
+    {
+        var page = await client.ScanAsync(cursor.Length == 0 ? null : cursor, 111);
+        foreach (var key in page.Keys)
+        {
+            scanned.Add(key);
+        }
+
+        cursor = page.NextCursor;
+    } while (!string.IsNullOrEmpty(cursor));
+
+    AssertEqual(1_000, scanned.Count);
+}
+
 static async Task AsyncBatchGetAndPutRoundTripAsync()
 {
     var client = new SwarmKeyDbClient(CreateAsyncQueuedStore(new CountingKeyValueStore(), maxConcurrentWrites: 4));
@@ -1021,6 +1126,42 @@ static async Task MonitoringHealthAndReadinessEndpointsAsync()
 
     var ready = await client.GetAsync($"http://127.0.0.1:{port}/ready");
     AssertEqual(HttpStatusCode.ServiceUnavailable, ready.StatusCode);
+
+    cts.Cancel();
+    await runTask;
+    server.Dispose();
+}
+
+static async Task MonitoringHealthEndpointReportsDegradedForUnhealthyShardAsync()
+{
+    var metrics = new MonitoringMetrics(() => NoOpCacheStats.Instance);
+    var port = TestNetHelpers.GetFreePort();
+    var server = new MonitoringHttpServer(
+        IPAddress.Loopback,
+        port,
+        metrics,
+        new StaticReadinessProbe(ready: true, message: "all good"),
+        metricsEnabled: true,
+        dashboardEnabled: false,
+        NullLogger<MonitoringHttpServer>.Instance,
+        new StaticShardHealthProvider(
+        [
+            new ShardHealthStatus("shard-a", true, "ok", 10),
+            new ShardHealthStatus("shard-b", false, "timeout", null)
+        ]));
+    using var cts = new CancellationTokenSource();
+    var runTask = server.RunAsync(cts.Token);
+    using var client = new HttpClient();
+
+    var health = await client.GetAsync($"http://127.0.0.1:{port}/health");
+    AssertEqual(HttpStatusCode.ServiceUnavailable, health.StatusCode);
+    var payload = await health.Content.ReadAsStringAsync();
+    Assert(payload.Contains("\"status\":\"degraded\"", StringComparison.Ordinal), "Expected degraded health status.");
+    Assert(payload.Contains("\"shard\":\"shard-b\"", StringComparison.Ordinal), "Expected unhealthy shard details.");
+
+    var metricsPayload = await client.GetStringAsync($"http://127.0.0.1:{port}/metrics");
+    Assert(metricsPayload.Contains("swarmkeydb_shard_up{shard=\"shard-a\"} 1", StringComparison.Ordinal), "Expected shard-up metric for healthy shard.");
+    Assert(metricsPayload.Contains("swarmkeydb_shard_up{shard=\"shard-b\"} 0", StringComparison.Ordinal), "Expected shard-up metric for unhealthy shard.");
 
     cts.Cancel();
     await runTask;
@@ -2351,6 +2492,19 @@ internal sealed class StaticReadinessProbe : IReadinessProbe
 
     public Task<(bool Ready, string Message)> CheckAsync(CancellationToken cancellationToken = default) =>
         Task.FromResult((_ready, _message));
+}
+
+internal sealed class StaticShardHealthProvider : IShardHealthProvider
+{
+    private readonly IReadOnlyList<ShardHealthStatus> _statuses;
+
+    public StaticShardHealthProvider(IReadOnlyList<ShardHealthStatus> statuses)
+    {
+        _statuses = statuses;
+    }
+
+    public Task<IReadOnlyList<ShardHealthStatus>> GetShardHealthAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult(_statuses);
 }
 
 internal sealed class CaptureLogger<T> : ILogger<T>
