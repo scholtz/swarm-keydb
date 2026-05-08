@@ -40,18 +40,25 @@ This reference covers the public Redis protocol surface and `SwarmKeyDbClient` m
 | Method | Parameters | Returns | Example |
 | --- | --- | --- | --- |
 | `PutBytesAsync` | `key`, `ReadOnlyMemory<byte>` | `Task` | `await db.PutBytesAsync("k", bytes);` |
+| `PutBytesAsync` | `key`, bytes, `chainIds` | `Task` | `await db.PutBytesAsync("k", bytes, new[] { 1, 137 });` |
 | `PutAsync` | `key`, bytes | `Task` | `await db.PutAsync("k", bytes);` |
+| `PutAsync` | `key`, bytes, `chainIds` | `Task` | `await db.PutAsync("k", bytes, new[] { 1, 137 });` |
 | `PutBytesWithStrategyAsync` | key, bytes, merge strategy | `Task` | `await db.PutBytesWithStrategyAsync("k", bytes, OrSetMergeStrategy.Instance);` |
 | `MergeBytesAsync` | key, incoming bytes | `Task` | `await db.MergeBytesAsync("k", delta);` |
 | `SetKeyOptionsAsync` | key, key options | `Task` | `await db.SetKeyOptionsAsync("k", new KeyOptions());` |
 | `GetBytesAsync` | key | `Task<byte[]?>` | `var bytes = await db.GetBytesAsync("k");` |
 | `GetAsync` | key | `Task<byte[]?>` | `var bytes = await db.GetAsync("k");` |
 | `PutStringAsync` | key, string | `Task` | `await db.PutStringAsync("k", "v");` |
+| `PutStringAsync` | key, string, `IEnumerable<ChainId>` | `Task` | `await db.PutStringAsync("k", "v", new[] { ChainId.Ethereum, ChainId.Polygon });` |
 | `MergeStringAsync` | key, string | `Task` | `await db.MergeStringAsync("k", "delta");` |
 | `GetStringAsync` | key | `Task<string?>` | `var v = await db.GetStringAsync("k");` |
 | `PutJsonAsync<T>` | key, value | `Task` | `await db.PutJsonAsync("profile", new { name = "Ada" });` |
+| `PutJsonAsync<T>` | key, value, `chainIds` | `Task` | `await db.PutJsonAsync("profile", new { name = "Ada" }, new[] { 1, 137 });` |
 | `GetJsonAsync<T>` | key | `Task<T?>` | `var p = await db.GetJsonAsync<Profile>("profile");` |
 | `DeleteAsync` | key | `Task<bool>` | `var deleted = await db.DeleteAsync("k");` |
+| `DeleteAsync` | key, `chainIds` | `Task<bool>` | `var deleted = await db.DeleteAsync("k", new[] { 1, 137 });` |
+| `GetSyncStatusAsync` | key | `Task<CrossChainSyncStatus?>` | `var status = await db.GetSyncStatusAsync("k");` |
+| `ForceSyncAsync` | key | `Task<bool>` | `await db.ForceSyncAsync("k");` |
 | `BatchGetAsync` | key list | `Task<IReadOnlyList<byte[]?>>` | `var vals = await db.BatchGetAsync(keys);` |
 | `BatchPutAsync` | key/value pairs | `Task` | `await db.BatchPutAsync(entries);` |
 | `KeysAsync` | none | `Task<IReadOnlyList<string>>` | `var keys = await db.KeysAsync();` |
@@ -73,3 +80,10 @@ This reference covers the public Redis protocol surface and `SwarmKeyDbClient` m
 - `swarm-keydb-js/examples/*.mjs`
 - `swarm-keydb-py/examples/*.py`
 - `swarm-keydb-go/examples/*/main.go`
+
+## Monitoring HTTP endpoints
+
+When the dashboard/monitoring server is enabled:
+
+- `GET /sync/{key}` returns per-chain replication status for a key.
+- `GET /sync` returns per-chain summary counts used by the dashboard health table.

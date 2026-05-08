@@ -39,6 +39,12 @@
 | `METRICS_PORT` | `9090` | HTTP port used for Prometheus metrics exposure. |
 | `DASHBOARD_ENABLED` | `true` | Enables `/dashboard`, `/health`, `/ready`, and `/logs` endpoints. |
 | `DASHBOARD_PORT` | `8080` | HTTP port used by dashboard and health endpoints. |
+| `SWARM_KEYDB_CROSS_CHAIN_ENABLED` | `false` | Enables cross-chain replication and reconciliation. |
+| `SWARM_KEYDB_CROSS_CHAIN_DEFAULT_CHAIN_IDS` | unset | Comma-separated or JSON array of chain ids replicated by default. |
+| `SWARM_KEYDB_CROSS_CHAIN_CHAINS` | unset | JSON array of chain definitions (`chainId`, `name`, optional `rpcUrl`, optional `bridgeContractAddress`). |
+| `SWARM_KEYDB_CROSS_CHAIN_MAX_RETRIES` | `5` | Maximum retry attempts before a chain transitions to `failed`. |
+| `SWARM_KEYDB_CROSS_CHAIN_RETRY_BASE_SECONDS` | `5` | Base delay used for exponential retry backoff. |
+| `SWARM_KEYDB_CROSS_CHAIN_RECONCILE_SECONDS` | `5` | Background reconciliation interval. |
 
 ## Bee client integration
 
@@ -68,6 +74,8 @@ The CLI stores its persisted settings in `~/.swarmkeydb/config.json`.
 | `SWARMKEYDB_BATCH_ID` | unset | Postage batch id override for CLI commands. |
 | `SWARMKEYDB_OUTPUT` | `plain` | CLI output format override (`plain`, `json`, `table`). |
 
+`skdb put` and `skdb delete` accept `--chains 1,137`, and sync state for `skdb sync status|force --key <key>` is stored in `~/.swarmkeydb/crosschain-sync.json`.
+
 ## Deployment defaults
 
 The checked-in Docker Compose and Kubernetes manifests default to:
@@ -75,3 +83,33 @@ The checked-in Docker Compose and Kubernetes manifests default to:
 - `SWARM_KEYDB_BACKEND=bee`
 - `BEE_MAINNET=false`
 - a Sepolia RPC endpoint placeholder that you must replace
+
+## `appsettings.json` example
+
+The server also reads `src/SwarmKeyDb.Server/appsettings.json`. Cross-chain entries follow this shape:
+
+```json
+{
+  "CrossChain": {
+    "Enabled": true,
+    "DefaultChainIds": [1, 137],
+    "MaxRetryAttempts": 5,
+    "RetryBaseDelaySeconds": 5,
+    "ReconcileIntervalSeconds": 5,
+    "Chains": [
+      {
+        "chainId": 1,
+        "name": "Ethereum",
+        "rpcUrl": "https://ethereum.example.invalid",
+        "bridgeContractAddress": "0x0000000000000000000000000000000000000000"
+      },
+      {
+        "chainId": 137,
+        "name": "Polygon",
+        "rpcUrl": "https://polygon.example.invalid",
+        "bridgeContractAddress": "0x0000000000000000000000000000000000000000"
+      }
+    ]
+  }
+}
+```

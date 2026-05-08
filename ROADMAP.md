@@ -31,6 +31,6 @@
 ## Ecosystem Integration
 - [x] Integrate with IPFS for hybrid storage options. (100%)
 - [x] Enable interoperability with Ethereum smart contracts. (100%: `EthereumBridgeService` background service with WebSocket + HTTP polling, `ISwarmKeyDb.sol` interface, `SwarmKeyDbOracle.sol` reference implementation with Hardhat tests, `/ethereum/bridge` monitoring endpoint, `ETH_*` environment variable configuration, Docker Compose example with local Hardhat node, full unit + integration test coverage)
-- [ ] Support cross-chain data synchronization.
+- [x] Support cross-chain data synchronization. (100%)
 - [ ] Add connectors for popular frameworks like React and Node.js.
 - [ ] Provide APIs for integration with decentralized identity systems.
