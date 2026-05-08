@@ -24,6 +24,10 @@ await db.disconnect();
 - `batchPut(entries)`
 - `setWithTTL(key, value, ttlSeconds)`
 
+## Data integrity
+
+The SwarmKeyDb server verifies a SHA-256 integrity envelope on every read by default. If stored Swarm data has been corrupted or tampered with, `get()`/`batchGet()` reject with the wrapped Redis/server error; handle that error path the same way you would handle any failed Redis read.
+
 ## Examples
 
 - `examples/user-profile.mjs`

@@ -15,6 +15,11 @@ using SwarmKeyDb.Server;
 var tests = new (string Name, Func<Task> Test)[]
 {
     ("client stores strings json binary and lists keys", ClientStoresSupportedValuesAsync),
+    ("swarm store writes integrity envelope", SwarmStoreWritesIntegrityEnvelopeAsync),
+    ("swarm store detects tampered value", SwarmStoreDetectsTamperedValueAsync),
+    ("swarm store can disable integrity verification", SwarmStoreCanDisableIntegrityVerificationAsync),
+    ("batch get detects tampered key", BatchGetDetectsTamperedKeyAsync),
+    ("swarm store integrity supports empty and large values", SwarmStoreIntegritySupportsEmptyAndLargeValuesAsync),
     ("bee client parses upload references", BeeClientParsesUploadReferenceAsync),
     ("redis protocol supports set get exists delete", RedisProtocolRoundTripAsync),
     ("redis protocol supports keys and scan", RedisProtocolKeyIterationAsync),
@@ -133,6 +138,140 @@ static async Task ClientStoresSupportedValuesAsync()
     AssertSequenceEqual(new[] { "profile:avatar", "profile:name", "profile:settings" }, await client.KeysAsync());
     Assert(await client.DeleteAsync("profile:name"), "Delete should report existing key.");
     AssertEqual(null, await client.GetStringAsync("profile:name"));
+}
+
+static async Task SwarmStoreWritesIntegrityEnvelopeAsync()
+{
+    var swarm = new MutableSwarmClient();
+    var index = new InMemoryKeyIndex();
+    var store = new SwarmKeyValueStore(swarm, index);
+
+    var value = Encoding.UTF8.GetBytes("{\"name\":\"Alice\"}");
+    var expectedHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(value));
+    await store.PutAsync("user:alice", value);
+
+    var reference = await index.GetReferenceAsync("user:alice");
+    Assert(reference is not null, "Expected reference to be written for integrity-protected key.");
+
+    var raw = await swarm.DownloadAsync(reference!);
+    Assert(raw.Take(4).SequenceEqual(new byte[] { 0x53, 0x4B, 0x49, 0x31 }), "Stored payload should start with the integrity envelope magic header.");
+
+    using var envelope = JsonDocument.Parse(raw.AsMemory(4));
+    AssertEqual(1, envelope.RootElement.GetProperty("version").GetInt32());
+    AssertEqual("SHA-256", envelope.RootElement.GetProperty("hashAlgorithm").GetString());
+    AssertEqual(expectedHash, envelope.RootElement.GetProperty("hash").GetString());
+    AssertSequenceEqual(value, envelope.RootElement.GetProperty("payload").GetBytesFromBase64());
+}
+
+static async Task SwarmStoreDetectsTamperedValueAsync()
+{
+    var swarm = new MutableSwarmClient();
+    var index = new InMemoryKeyIndex();
+    var store = new SwarmKeyValueStore(swarm, index);
+
+    await store.PutAsync("profile:1", Encoding.UTF8.GetBytes("original"));
+    var reference = await index.GetReferenceAsync("profile:1");
+    Assert(reference is not null, "Expected reference for tamper test.");
+
+    swarm.Corrupt(reference!, raw =>
+    {
+        using var document = JsonDocument.Parse(raw.AsMemory(4));
+        var payload = document.RootElement.GetProperty("payload").GetBytesFromBase64();
+        payload[0] ^= 0x01;
+        var tamperedEnvelope = new
+        {
+            version = document.RootElement.GetProperty("version").GetInt32(),
+            hashAlgorithm = document.RootElement.GetProperty("hashAlgorithm").GetString(),
+            hash = document.RootElement.GetProperty("hash").GetString(),
+            payload
+        };
+        var json = JsonSerializer.SerializeToUtf8Bytes(tamperedEnvelope);
+        var mutated = new byte[4 + json.Length];
+        Buffer.BlockCopy(raw, 0, mutated, 0, 4);
+        Buffer.BlockCopy(json, 0, mutated, 4, json.Length);
+        return mutated;
+    });
+
+    var threw = false;
+    try
+    {
+        _ = await store.GetAsync("profile:1");
+    }
+    catch (DataIntegrityException ex) when (
+        ex.KeyName == "profile:1" &&
+        ex.ExpectedHash is not null &&
+        ex.ActualHash is not null &&
+        ex.Message.Contains("Data integrity check failed for key 'profile:1'.", StringComparison.Ordinal))
+    {
+        threw = true;
+    }
+
+    Assert(threw, "Expected DataIntegrityException when the stored payload hash no longer matches.");
+}
+
+static async Task SwarmStoreCanDisableIntegrityVerificationAsync()
+{
+    var swarm = new MutableSwarmClient();
+    var index = new InMemoryKeyIndex();
+    var enabledStore = new SwarmKeyValueStore(swarm, index);
+    var disabledStore = new SwarmKeyValueStore(swarm, index, new IntegrityOptions { Enabled = false });
+
+    var value = Encoding.UTF8.GetBytes("plain");
+    await enabledStore.PutAsync("wrapped", value);
+    AssertSequenceEqual(value, (await disabledStore.GetAsync("wrapped"))!);
+
+    await disabledStore.PutAsync("raw", value);
+    var rawReference = await index.GetReferenceAsync("raw");
+    Assert(rawReference is not null, "Expected reference for raw integrity-disabled write.");
+    AssertSequenceEqual(value, await swarm.DownloadAsync(rawReference!));
+}
+
+static async Task BatchGetDetectsTamperedKeyAsync()
+{
+    var swarm = new MutableSwarmClient();
+    var index = new InMemoryKeyIndex();
+    var client = new SwarmKeyDbClient(new SwarmKeyValueStore(swarm, index));
+
+    await client.BatchPutAsync(
+    [
+        new KeyValuePair<string, ReadOnlyMemory<byte>>("safe", Encoding.UTF8.GetBytes("1")),
+        new KeyValuePair<string, ReadOnlyMemory<byte>>("tampered", Encoding.UTF8.GetBytes("2"))
+    ]);
+
+    var reference = await index.GetReferenceAsync("tampered");
+    Assert(reference is not null, "Expected reference for tampered batch key.");
+    swarm.Corrupt(reference!, raw =>
+    {
+        var mutated = raw.ToArray();
+        mutated[^1] ^= 0x01;
+        return mutated;
+    });
+
+    var threw = false;
+    try
+    {
+        _ = await client.BatchGetAsync(["safe", "tampered"]);
+    }
+    catch (DataIntegrityException ex) when (ex.KeyName == "tampered")
+    {
+        threw = true;
+    }
+
+    Assert(threw, "Expected batch get to fail with DataIntegrityException for the corrupted key.");
+}
+
+static async Task SwarmStoreIntegritySupportsEmptyAndLargeValuesAsync()
+{
+    const int BytePatternModulus = 251;
+    var swarm = new MutableSwarmClient();
+    var store = new SwarmKeyValueStore(swarm, new InMemoryKeyIndex());
+
+    await store.PutAsync("empty", Array.Empty<byte>());
+    AssertSequenceEqual(Array.Empty<byte>(), (await store.GetAsync("empty"))!);
+
+    var large = Enumerable.Range(0, 1_100_000).Select(i => (byte)(i % BytePatternModulus)).ToArray();
+    await store.PutAsync("large", large);
+    AssertSequenceEqual(large, (await store.GetAsync("large"))!);
 }
 
 static async Task BeeClientParsesUploadReferenceAsync()
@@ -1986,6 +2125,44 @@ internal sealed class StubHttpMessageHandler : HttpMessageHandler
 
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
         Task.FromResult(_handler(request));
+}
+
+internal sealed class MutableSwarmClient : ISwarmClient
+{
+    private readonly Dictionary<string, byte[]> _objects = new(StringComparer.Ordinal);
+
+    public Task<string> UploadAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var bytes = data.ToArray();
+        var reference = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+        _objects[reference] = bytes;
+        return Task.FromResult(reference);
+    }
+
+    public Task<byte[]> DownloadAsync(string reference, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!_objects.TryGetValue(reference, out var data))
+        {
+            throw new KeyNotFoundException($"Swarm reference '{reference}' was not found.");
+        }
+
+        return Task.FromResult(data.ToArray());
+    }
+
+    public void Corrupt(string reference, Func<byte[], byte[]> mutator)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reference);
+        ArgumentNullException.ThrowIfNull(mutator);
+
+        if (!_objects.TryGetValue(reference, out var data))
+        {
+            throw new KeyNotFoundException($"Swarm reference '{reference}' was not found.");
+        }
+
+        _objects[reference] = mutator(data.ToArray());
+    }
 }
 
 internal sealed class CountingKeyValueStore : IKeyValueStore

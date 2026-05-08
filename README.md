@@ -7,6 +7,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 - Redis-compatible commands for `PING`, `SET`, `SETEX`, `PSETEX`, `GET`, `MGET`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXISTS`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `KEYS`, `SCAN`, `TYPE`, and `QUIT`.
 - Connection-scoped Ethereum-address ACL enforcement via `AUTHADDR` for shared databases.
 - String, JSON, and binary value helpers in the `SwarmKeyDbClient` library.
+- Default-on SHA-256 integrity verification for values stored in Swarm, with typed corruption errors.
 - CRDT-backed conflict resolution (LWW register by default, with OR-Set and PN-counter strategies available).
 - Prefix scans, lexicographic range scans, predicate queries, and cursor-based iteration.
 - Bee HTTP API storage with postage batch configuration handled by environment variables.
@@ -127,6 +128,15 @@ var db = new SwarmKeyDbClient(new SwarmKeyValueStore(swarm, index));
 await db.PutStringAsync("orders:0001", "paid");
 await db.PutStringAsync("orders:0002", "pending");
 await db.PutStringAsync("profile:alice", "active");
+
+try
+{
+    Console.WriteLine(await db.GetStringAsync("profile:alice"));
+}
+catch (DataIntegrityException ex)
+{
+    Console.Error.WriteLine(ex.Message);
+}
 
 var prefixKeys = await db.GetKeysWithPrefixAsync("orders:");
 var range = await db.GetKeyRangeAsync("orders:0001", "orders:9999", new RangeScanOptions { IncludeValues = true });
@@ -261,6 +271,24 @@ docker run --rm -p 6379:6379 \
   swarm-keydb
 ```
 
+### Data integrity verification
+
+SwarmKeyDb wraps each stored value in a small envelope containing a SHA-256 hash and verifies that hash on every read. This is enabled by default for direct library usage and for the server, so `GET`/`MGET`/batch reads fail fast when Swarm returns corrupted or tampered data.
+
+Configure it with:
+
+- `SWARM_KEYDB_INTEGRITY_ENABLED` (`true`/`false`, default `true`)
+
+**Behaviour:**
+
+- Legacy values written before this feature remain readable; raw bytes without the integrity envelope are returned unchanged.
+- When verification fails, the library throws `DataIntegrityException` with the key name plus expected/actual hash details.
+- Disabling integrity verification skips the hash comparison for performance-sensitive scenarios but still unwraps already-enveloped values transparently.
+
+**Stored envelope format:** persisted Swarm bytes are prefixed with a small magic header and a JSON payload containing `version`, `hashAlgorithm`, `hash`, and `payload`.
+
+**Local benchmark:** on an in-memory store with 1,000 sequential `GET` calls over a 128-byte value, integrity verification added about 13.8 ms total (~13.8 µs per read) compared with raw reads on this development runner.
+
 ### Encryption
 
 The server supports transparent end-to-end encryption (AES-256-GCM) for all values stored in Swarm. Only a client holding the correct key can read the data — Swarm node operators and network observers see only ciphertext.
@@ -280,7 +308,7 @@ Configure it with:
 
 **Startup behaviour:** If `SWARM_KEYDB_ENCRYPTION_ENABLED=true` but neither `SWARM_KEYDB_ENCRYPTION_KEY` nor `SWARM_KEYDB_ENCRYPTION_ETH_KEY` is set, the server fails fast with a descriptive error — it will never silently store plaintext when encryption is expected.
 
-**Layer ordering:** The configured stack is `Cache → CRDT → Compress → Encrypt → ACL → Swarm` (outermost to innermost), so CRDT merges run on plaintext while persisted Swarm bytes remain encrypted.
+**Layer ordering:** The configured stack is `Cache → CRDT → Compress → Encrypt → ACL → Swarm`, and the `SwarmKeyValueStore` itself persists the final bytes inside the integrity envelope. CRDT merges therefore run on plaintext while persisted Swarm bytes still benefit from compression/encryption before the final integrity hash is recorded.
 This includes CRDT metadata (`vectorClock`, `timestamp`, and strategy marker), because the full CRDT envelope is encrypted before being written to Swarm.
 
 **Example (Docker):**

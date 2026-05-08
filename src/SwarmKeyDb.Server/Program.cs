@@ -70,6 +70,10 @@ var encryptionOptions = new EncryptionOptions
     KeyHex = GetSetting("SWARM_KEYDB_ENCRYPTION_KEY"),
     EthPrivateKeyHex = GetSetting("SWARM_KEYDB_ENCRYPTION_ETH_KEY")
 };
+var integrityOptions = new IntegrityOptions
+{
+    Enabled = GetBool("SWARM_KEYDB_INTEGRITY_ENABLED", true)
+};
 var aclOptions = GetAclOptions();
 var asyncProcessingOptions = new AsyncProcessingOptions
 {
@@ -103,6 +107,7 @@ services.AddOptions();
 services.AddSingleton<IOptions<CacheOptions>>(Options.Create(cacheOptions));
 services.AddSingleton<IOptions<CompressionOptions>>(Options.Create(compressionOptions));
 services.AddSingleton<IOptions<EncryptionOptions>>(Options.Create(encryptionOptions));
+services.AddSingleton<IOptions<IntegrityOptions>>(Options.Create(integrityOptions));
 services.AddSingleton<IOptions<AclOptions>>(Options.Create(aclOptions));
 services.AddSingleton<IOptions<AsyncProcessingOptions>>(Options.Create(asyncProcessingOptions));
 services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));

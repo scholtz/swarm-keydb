@@ -1,20 +1,36 @@
+using System.Security.Cryptography;
+using System.Text.Json;
+
 namespace SwarmKeyDb;
 
 public sealed class SwarmKeyValueStore : IKeyValueStore
 {
+    private static readonly byte[] IntegrityEnvelopeMagic = [0x53, 0x4B, 0x49, 0x31];
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+    private const int IntegrityEnvelopeVersion = 1;
+    private const string IntegrityHashAlgorithm = "SHA-256";
+
     private readonly ISwarmClient _swarmClient;
     private readonly IKeyIndex _index;
+    private readonly IntegrityOptions _integrityOptions;
 
-    public SwarmKeyValueStore(ISwarmClient swarmClient, IKeyIndex index)
+    public SwarmKeyValueStore(ISwarmClient swarmClient, IKeyIndex index, IntegrityOptions? integrityOptions = null)
     {
         _swarmClient = swarmClient;
         _index = index;
+        _integrityOptions = integrityOptions ?? new IntegrityOptions();
     }
 
     public async Task PutAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default)
     {
         ValidateKey(key);
-        var reference = await _swarmClient.UploadAsync(value, cancellationToken).ConfigureAwait(false);
+        var payload = _integrityOptions.Enabled
+            ? SerializeIntegrityEnvelope(value.Span)
+            : value;
+        var reference = await _swarmClient.UploadAsync(payload, cancellationToken).ConfigureAwait(false);
         await _index.SetReferenceAsync(key, reference, expiresAt: null, cancellationToken).ConfigureAwait(false);
     }
 
@@ -22,9 +38,13 @@ public sealed class SwarmKeyValueStore : IKeyValueStore
     {
         ValidateKey(key);
         var reference = await _index.GetReferenceAsync(key, cancellationToken).ConfigureAwait(false);
-        return reference is null
-            ? null
-            : await _swarmClient.DownloadAsync(reference, cancellationToken).ConfigureAwait(false);
+        if (reference is null)
+        {
+            return null;
+        }
+
+        var data = await _swarmClient.DownloadAsync(reference, cancellationToken).ConfigureAwait(false);
+        return ReadStoredValue(key, data, verifyHash: _integrityOptions.Enabled);
     }
 
     public async Task<bool> DeleteAsync(string key, CancellationToken cancellationToken = default)
@@ -193,4 +213,63 @@ public sealed class SwarmKeyValueStore : IKeyValueStore
             throw new ArgumentException("Keys must not be empty.", nameof(key));
         }
     }
+
+    private static byte[] ReadStoredValue(string key, byte[] data, bool verifyHash)
+    {
+        if (!HasIntegrityEnvelope(data))
+        {
+            return data;
+        }
+
+        try
+        {
+            var envelope = JsonSerializer.Deserialize<IntegrityEnvelope>(data.AsSpan(IntegrityEnvelopeMagic.Length), JsonOptions);
+            if (envelope is null ||
+                envelope.Version != IntegrityEnvelopeVersion ||
+                !string.Equals(envelope.HashAlgorithm, IntegrityHashAlgorithm, StringComparison.Ordinal) ||
+                string.IsNullOrWhiteSpace(envelope.Hash) ||
+                envelope.Payload is null)
+            {
+                throw new DataIntegrityException(key, detail: "Stored integrity envelope is invalid or corrupted.");
+            }
+
+            if (verifyHash)
+            {
+                var actualHash = ComputeHashHex(envelope.Payload);
+                if (!string.Equals(envelope.Hash, actualHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new DataIntegrityException(key, envelope.Hash, actualHash);
+                }
+            }
+
+            return envelope.Payload;
+        }
+        catch (JsonException ex)
+        {
+            throw new DataIntegrityException(key, detail: "Stored integrity envelope is invalid or corrupted.", innerException: ex);
+        }
+    }
+
+    private static byte[] SerializeIntegrityEnvelope(ReadOnlySpan<byte> payload)
+    {
+        var envelope = new IntegrityEnvelope(
+            IntegrityEnvelopeVersion,
+            IntegrityHashAlgorithm,
+            ComputeHashHex(payload),
+            payload.ToArray());
+        var json = JsonSerializer.SerializeToUtf8Bytes(envelope, JsonOptions);
+        var stored = new byte[IntegrityEnvelopeMagic.Length + json.Length];
+        Buffer.BlockCopy(IntegrityEnvelopeMagic, 0, stored, 0, IntegrityEnvelopeMagic.Length);
+        Buffer.BlockCopy(json, 0, stored, IntegrityEnvelopeMagic.Length, json.Length);
+        return stored;
+    }
+
+    private static string ComputeHashHex(ReadOnlySpan<byte> payload) =>
+        Convert.ToHexStringLower(SHA256.HashData(payload));
+
+    private static bool HasIntegrityEnvelope(byte[] data) =>
+        data.Length >= IntegrityEnvelopeMagic.Length &&
+        data.AsSpan(0, IntegrityEnvelopeMagic.Length).SequenceEqual(IntegrityEnvelopeMagic);
+
+    private sealed record IntegrityEnvelope(int Version, string? HashAlgorithm, string? Hash, byte[]? Payload);
 }

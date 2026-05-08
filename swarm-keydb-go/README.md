@@ -23,6 +23,10 @@ fmt.Println(v)
 - `SetWithTTL(ctx, key, value, ttlSeconds)`
 - `PutJSON` / `GetJSON` helpers
 
+## Data integrity
+
+The SwarmKeyDb server verifies a SHA-256 integrity envelope on every read by default. If stored Swarm data has been corrupted or tampered with, `Get`/`BatchGet` return an error from Redis; callers should handle that error path explicitly.
+
 ## Examples
 
 - `examples/user-profile/main.go`
