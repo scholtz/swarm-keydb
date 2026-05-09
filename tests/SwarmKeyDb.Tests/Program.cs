@@ -41,6 +41,10 @@ var tests = new (string Name, Func<Task> Test)[]
     ("redis stream validates id ordering and formatting", RedisStreamIdValidationAsync),
     ("redis stream supports maxlen trimming", RedisStreamMaxLenTrimmingAsync),
     ("redis stream commands return wrongtype for string keys", RedisStreamWrongTypeErrorsAsync),
+    ("redis stream consumer groups workflow supports xgroup xreadgroup xack and xpending", RedisStreamConsumerGroupWorkflowAsync),
+    ("redis stream consumer groups support xclaim xautoclaim and delconsumer", RedisStreamConsumerGroupClaimAndPendingAsync),
+    ("redis stream consumer groups persist pending entries across processor restart", RedisStreamConsumerGroupPersistenceAcrossRestartAsync),
+    ("redis stream consumer groups support setid destroy and busygroup semantics", RedisStreamConsumerGroupAdminCommandsAsync),
     ("prefix scan returns matching keys", PrefixScanReturnsMatchingKeysAsync),
     ("range scan supports boundaries and reverse order", RangeScanSupportsBoundariesAndReverseOrderAsync),
     ("range scan rejects invalid bounds", RangeScanRejectsInvalidBoundsAsync),
@@ -156,6 +160,7 @@ var tests = new (string Name, Func<Task> Test)[]
     ("monitoring health and dashboard expose cache sync metrics", MonitoringHealthAndDashboardExposeCacheSyncMetricsAsync),
     ("monitoring metrics and dashboard expose resync status", MonitoringMetricsAndDashboardExposeResyncStatusAsync),
     ("prometheus metrics endpoint exposes consistency telemetry shape and labels", PrometheusMetricsEndpointExposesConsistencyTelemetryShapeAndLabelsAsync),
+    ("prometheus metrics exposes stream consumer group telemetry", PrometheusMetricsExposeStreamConsumerGroupTelemetryAsync),
     ("redis command logging includes correlation ids", RedisCommandLoggingIncludesCorrelationIdsAsync),
     ("redis swarm resync command supports modes and errors", RedisSwarmResyncCommandSupportsModesAndErrorsAsync),
     ("redis management commands backup restore and rotate", RedisManagementCommandsBackupRestoreAndRotateAsync),
@@ -194,6 +199,7 @@ var tests = new (string Name, Func<Task> Test)[]
     ("redis authdid command returns error when not available", RedisAuthdidCommandReturnsErrorWhenNotAvailableAsync),
     ("did authorization exception has correct status code", DidAuthorizationExceptionHasCorrectStatusCodeAsync),
     ("dashboard html contains did mode", DashboardHtmlContainsDidModeAsync),
+    ("dashboard html contains stream group panel", DashboardHtmlContainsStreamGroupPanelAsync),
     ("pubsub subscribe and publish single node", PubSubSubscribeAndPublishSingleNodeAsync),
     ("pubsub pattern subscribe receives matching channel messages", PubSubPatternSubscribeReceivesMatchingChannelMessagesAsync),
     ("pubsub multi subscriber fan out delivers to all", PubSubMultiSubscriberFanOutDeliversToAllAsync),
@@ -908,6 +914,93 @@ static async Task RedisStreamWrongTypeErrorsAsync()
 
     Assert(response.Contains("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", StringComparison.Ordinal),
         "Stream commands must return WRONGTYPE for non-stream keys.");
+}
+
+static async Task RedisStreamConsumerGroupWorkflowAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("XADD", "cg:events", "1-0", "f", "v1") +
+        RespCommand("XADD", "cg:events", "2-0", "f", "v2") +
+        RespCommand("XGROUP", "CREATE", "cg:events", "workers", "0-0") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "COUNT", "2", "STREAMS", "cg:events", ">") +
+        RespCommand("XPENDING", "cg:events", "workers") +
+        RespCommand("XPENDING", "cg:events", "workers", "-", "+", "10") +
+        RespCommand("XACK", "cg:events", "workers", "1-0") +
+        RespCommand("XPENDING", "cg:events", "workers"));
+
+    Assert(response.Contains("+OK\r\n", StringComparison.Ordinal), "XGROUP CREATE should return +OK.");
+    Assert(response.Contains("*1\r\n*2\r\n$9\r\ncg:events\r\n*2\r\n*2\r\n$3\r\n1-0\r\n", StringComparison.Ordinal),
+        "XREADGROUP should return stream entries in RESP2 nested format.");
+    Assert(response.Contains("*4\r\n:2\r\n$3\r\n1-0\r\n$3\r\n2-0\r\n*1\r\n*2\r\n$2\r\nc1\r\n:2\r\n", StringComparison.Ordinal),
+        "XPENDING summary should expose count, min/max IDs, and per-consumer counts.");
+    Assert(response.Contains("*2\r\n*4\r\n$3\r\n1-0\r\n$2\r\nc1\r\n", StringComparison.Ordinal),
+        "XPENDING range form should expose pending entries with consumer ownership.");
+    Assert(response.Contains(":1\r\n*4\r\n:1\r\n$3\r\n2-0\r\n$3\r\n2-0\r\n*1\r\n*2\r\n$2\r\nc1\r\n:1\r\n", StringComparison.Ordinal),
+        "XACK should remove acknowledged IDs from the PEL.");
+}
+
+static async Task RedisStreamConsumerGroupClaimAndPendingAsync()
+{
+    var processor = CreateProcessor();
+    await ExecuteAsync(processor,
+        RespCommand("XADD", "claim:events", "1-0", "f", "v1") +
+        RespCommand("XGROUP", "CREATE", "claim:events", "workers", "0-0") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "STREAMS", "claim:events", ">"));
+
+    await Task.Delay(20);
+    var response = await ExecuteAsync(processor,
+        RespCommand("XCLAIM", "claim:events", "workers", "c2", "1", "1-0") +
+        RespCommand("XPENDING", "claim:events", "workers", "-", "+", "10") +
+        RespCommand("XAUTOCLAIM", "claim:events", "workers", "c3", "1", "0-0", "COUNT", "10") +
+        RespCommand("XPENDING", "claim:events", "workers", "-", "+", "10") +
+        RespCommand("XGROUP", "DELCONSUMER", "claim:events", "workers", "c3") +
+        RespCommand("XPENDING", "claim:events", "workers"));
+
+    Assert(response.Contains("*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$1\r\nf\r\n$2\r\nv1\r\n", StringComparison.Ordinal),
+        "XCLAIM should return claimed entries.");
+    Assert(response.Contains("$2\r\nc2\r\n", StringComparison.Ordinal) && response.Contains(":2\r\n", StringComparison.Ordinal),
+        "XCLAIM should reassign ownership and increment delivery count.");
+    Assert(response.Contains("*3\r\n$3\r\n1-0\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$1\r\nf\r\n$2\r\nv1\r\n*0\r\n", StringComparison.Ordinal),
+        "XAUTOCLAIM should return [next-id, entries, deleted-ids].");
+    Assert(response.Contains("$2\r\nc3\r\n", StringComparison.Ordinal) && response.Contains(":3\r\n", StringComparison.Ordinal),
+        "XAUTOCLAIM should transfer ownership and increase delivery count.");
+    Assert(response.Contains(":1\r\n*4\r\n:0\r\n$-1\r\n$-1\r\n*0\r\n", StringComparison.Ordinal),
+        "XGROUP DELCONSUMER should remove pending entries owned by the consumer.");
+}
+
+static async Task RedisStreamConsumerGroupPersistenceAcrossRestartAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    var processor1 = new RedisCommandProcessor(store);
+    await ExecuteAsync(processor1,
+        RespCommand("XADD", "persist:events", "1-0", "f", "v1") +
+        RespCommand("XGROUP", "CREATE", "persist:events", "workers", "0-0") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "STREAMS", "persist:events", ">"));
+
+    var processor2 = new RedisCommandProcessor(store);
+    var response = await ExecuteAsync(processor2, RespCommand("XPENDING", "persist:events", "workers"));
+    Assert(response.Contains("*4\r\n:1\r\n$3\r\n1-0\r\n$3\r\n1-0\r\n*1\r\n*2\r\n$2\r\nc1\r\n:1\r\n", StringComparison.Ordinal),
+        "Pending entries should survive processor restart when backed by persisted stream state.");
+}
+
+static async Task RedisStreamConsumerGroupAdminCommandsAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("XGROUP", "CREATE", "admin:events", "workers", "0-0", "MKSTREAM") +
+        RespCommand("XGROUP", "CREATE", "admin:events", "workers", "0-0") +
+        RespCommand("XADD", "admin:events", "1-0", "f", "v1") +
+        RespCommand("XGROUP", "SETID", "admin:events", "workers", "1-0") +
+        RespCommand("XGROUP", "DESTROY", "admin:events", "workers") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "STREAMS", "admin:events", ">"));
+
+    Assert(response.StartsWith("+OK\r\n", StringComparison.Ordinal), "XGROUP CREATE MKSTREAM should create stream and group.");
+    Assert(response.Contains("-BUSYGROUP Consumer Group name already exists\r\n", StringComparison.Ordinal),
+        "Duplicate XGROUP CREATE should return BUSYGROUP.");
+    Assert(response.Contains("+OK\r\n:1\r\n", StringComparison.Ordinal), "XGROUP SETID and DESTROY should succeed.");
+    Assert(response.Contains("-NOGROUP No such key 'admin:events' or consumer group 'workers' in XREADGROUP with GROUP option\r\n", StringComparison.Ordinal),
+        "After XGROUP DESTROY, XREADGROUP should return NOGROUP.");
 }
 
 static async Task PrefixScanReturnsMatchingKeysAsync()
@@ -2485,6 +2578,44 @@ static async Task PrometheusMetricsEndpointExposesConsistencyTelemetryShapeAndLa
     Assert(payload.Contains("swarmkeydb_resync_keys_replayed_total{privacy_mode=\"none\"} 8", StringComparison.Ordinal), "Expected resync replayed keys counter.");
     Assert(payload.Contains("swarmkeydb_cache_verification_fail_total{privacy_mode=\"none\"} 2", StringComparison.Ordinal), "Expected verification failure counter.");
     Assert(payload.Contains("swarmkeydb_cache_eviction_by_verification_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "Expected verification eviction counter.");
+
+    cts.Cancel();
+    await runTask;
+    server.Dispose();
+}
+
+static async Task PrometheusMetricsExposeStreamConsumerGroupTelemetryAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    var processor = new RedisCommandProcessor(store);
+    await ExecuteAsync(processor,
+        RespCommand("XADD", "metrics:events", "1-0", "f", "v1") +
+        RespCommand("XGROUP", "CREATE", "metrics:events", "workers", "0-0") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "STREAMS", "metrics:events", ">") +
+        RespCommand("XCLAIM", "metrics:events", "workers", "c2", "0", "1-0") +
+        RespCommand("XACK", "metrics:events", "workers", "1-0"));
+
+    var metrics = new MonitoringMetrics(
+        () => NoOpCacheStats.Instance,
+        streamMetricsAccessor: () => processor.GetStreamMetrics());
+    var port = TestNetHelpers.GetFreePort();
+    var server = new MonitoringHttpServer(
+        IPAddress.Loopback,
+        port,
+        metrics,
+        new StaticReadinessProbe(ready: true, message: "ready"),
+        metricsEnabled: true,
+        dashboardEnabled: false,
+        NullLogger<MonitoringHttpServer>.Instance);
+    using var cts = new CancellationTokenSource();
+    var runTask = server.RunAsync(cts.Token);
+    using var client = new HttpClient();
+
+    var payload = await client.GetStringAsync($"http://127.0.0.1:{port}/metrics");
+    Assert(payload.Contains("swarmkeydb_stream_pending_entries_total{privacy_mode=\"none\"} 0", StringComparison.Ordinal), "Pending entries metric should be exposed.");
+    Assert(payload.Contains("swarmkeydb_stream_xack_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "XACK metric should count acknowledgements.");
+    Assert(payload.Contains("swarmkeydb_stream_xclaim_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "XCLAIM metric should count claims.");
+    Assert(payload.Contains("swarmkeydb_stream_group_count{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "Stream group count metric should be exposed.");
 
     cts.Cancel();
     await runTask;
@@ -5039,6 +5170,31 @@ static async Task DashboardHtmlContainsDidModeAsync()
     using var http = new HttpClient();
     var response = await http.GetStringAsync($"http://127.0.0.1:{port}/dashboard");
     Assert(response.Contains("ethrdid", StringComparison.OrdinalIgnoreCase), "Dashboard should display DID mode.");
+    cts.Cancel();
+    await runTask;
+}
+
+static async Task DashboardHtmlContainsStreamGroupPanelAsync()
+{
+    var port = TestNetHelpers.GetFreePort();
+    var metrics = new MonitoringMetrics(() => NoOpCacheStats.Instance);
+    using var server = new MonitoringHttpServer(
+        IPAddress.Loopback,
+        port,
+        metrics,
+        new AlwaysReadyProbe(),
+        metricsEnabled: true,
+        dashboardEnabled: true,
+        NullLogger<MonitoringHttpServer>.Instance);
+    using var cts = new CancellationTokenSource();
+    var runTask = server.RunAsync(cts.Token);
+
+    using var http = new HttpClient();
+    var response = await http.GetStringAsync($"http://127.0.0.1:{port}/dashboard");
+    Assert(response.Contains("Stream Groups", StringComparison.Ordinal), "Dashboard should include stream group section.");
+    Assert(response.Contains("stream-group-count", StringComparison.Ordinal), "Dashboard should include stream group count element.");
+    Assert(response.Contains("stream-pending-total", StringComparison.Ordinal), "Dashboard should include stream pending entries element.");
+
     cts.Cancel();
     await runTask;
 }

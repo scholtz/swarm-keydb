@@ -466,10 +466,16 @@ public sealed class MonitoringHttpServer : IDisposable
                                                </p>
                                                <pre id="resync-result">idle</pre>
                                                 <h2>Pub/Sub Status</h2>
-                                                <p>Active Subscriber Connections: <strong id="pubsub-subscribers">0</strong></p>
-                                                <p>Messages Published (total): <strong id="pubsub-published">0</strong></p>
-                                                <p>Messages Dropped (total): <strong id="pubsub-dropped">0</strong></p>
-                                                <h2>Cross-chain replication health</h2>
+                                                 <p>Active Subscriber Connections: <strong id="pubsub-subscribers">0</strong></p>
+                                                 <p>Messages Published (total): <strong id="pubsub-published">0</strong></p>
+                                                 <p>Messages Dropped (total): <strong id="pubsub-dropped">0</strong></p>
+                                                 <h2>Stream Groups</h2>
+                                                 <p>Group Count: <strong id="stream-group-count">0</strong></p>
+                                                 <p>Pending Entries: <strong id="stream-pending-total">0</strong></p>
+                                                 <p>XACK Total: <strong id="stream-xack-total">0</strong></p>
+                                                 <p>XCLAIM Total: <strong id="stream-xclaim-total">0</strong></p>
+                                                 <p>Idle Consumers: <strong id="stream-idle-consumer-count">0</strong></p>
+                                                 <h2>Cross-chain replication health</h2>
                                             <table>
                                               <thead>
                                                 <tr><th>Chain</th><th>Pending</th><th>Synced</th><th>Failed</th><th>Health</th></tr>
@@ -517,10 +523,15 @@ public sealed class MonitoringHttpServer : IDisposable
                                                const resyncResultEl = document.getElementById('resync-result');
                                                const resyncTriggerPartialButton = document.getElementById('resync-trigger-partial');
                                                const resyncTriggerFullButton = document.getElementById('resync-trigger-full');
-                                               const pubSubSubscribersEl = document.getElementById('pubsub-subscribers');
-                                               const pubSubPublishedEl = document.getElementById('pubsub-published');
-                                               const pubSubDroppedEl = document.getElementById('pubsub-dropped');
-                                              function parseCounters(metricsText) {
+                                                const pubSubSubscribersEl = document.getElementById('pubsub-subscribers');
+                                                const pubSubPublishedEl = document.getElementById('pubsub-published');
+                                                const pubSubDroppedEl = document.getElementById('pubsub-dropped');
+                                                const streamGroupCountEl = document.getElementById('stream-group-count');
+                                                const streamPendingTotalEl = document.getElementById('stream-pending-total');
+                                                const streamXAckTotalEl = document.getElementById('stream-xack-total');
+                                                const streamXClaimTotalEl = document.getElementById('stream-xclaim-total');
+                                                const streamIdleConsumerCountEl = document.getElementById('stream-idle-consumer-count');
+                                               function parseCounters(metricsText) {
                                                const wanted = [
                                                  'swarmkeydb_operations_total{operation="get",status="success"}',
                                                  'swarmkeydb_operations_total{operation="put",status="success"}',
@@ -541,10 +552,15 @@ public sealed class MonitoringHttpServer : IDisposable
                                                    'swarmkeydb_resync_full_total',
                                                    'swarmkeydb_resync_duration_seconds',
                                                    'swarmkeydb_resync_keys_replayed_total',
-                                                   'swarmkeydb_pubsub_subscribers_total',
-                                                   'swarmkeydb_pubsub_messages_published_total',
-                                                   'swarmkeydb_pubsub_messages_dropped_total'
-                                                 ];
+                                                    'swarmkeydb_pubsub_subscribers_total',
+                                                    'swarmkeydb_pubsub_messages_published_total',
+                                                    'swarmkeydb_pubsub_messages_dropped_total',
+                                                    'swarmkeydb_stream_pending_entries_total',
+                                                    'swarmkeydb_stream_xack_total',
+                                                    'swarmkeydb_stream_xclaim_total',
+                                                    'swarmkeydb_stream_group_count',
+                                                    'swarmkeydb_stream_idle_consumer_count'
+                                                  ];
                                                return metricsText.split('\n').filter(line => wanted.some(prefix => line.startsWith(prefix))).join('\n');
                                              }
                                              async function refreshReady() {
@@ -587,10 +603,15 @@ public sealed class MonitoringHttpServer : IDisposable
                                                   const line = text.split('\n').find(l => l.startsWith(name + ' '));
                                                   return line ? line.split(' ')[1] : '0';
                                                 };
-                                                pubSubSubscribersEl.textContent = extractMetric('swarmkeydb_pubsub_subscribers_total');
-                                                pubSubPublishedEl.textContent = extractMetric('swarmkeydb_pubsub_messages_published_total');
-                                                pubSubDroppedEl.textContent = extractMetric('swarmkeydb_pubsub_messages_dropped_total');
-                                              }
+                                                 pubSubSubscribersEl.textContent = extractMetric('swarmkeydb_pubsub_subscribers_total');
+                                                 pubSubPublishedEl.textContent = extractMetric('swarmkeydb_pubsub_messages_published_total');
+                                                 pubSubDroppedEl.textContent = extractMetric('swarmkeydb_pubsub_messages_dropped_total');
+                                                 streamGroupCountEl.textContent = extractMetric('swarmkeydb_stream_group_count');
+                                                 streamPendingTotalEl.textContent = extractMetric('swarmkeydb_stream_pending_entries_total');
+                                                 streamXAckTotalEl.textContent = extractMetric('swarmkeydb_stream_xack_total');
+                                                 streamXClaimTotalEl.textContent = extractMetric('swarmkeydb_stream_xclaim_total');
+                                                 streamIdleConsumerCountEl.textContent = extractMetric('swarmkeydb_stream_idle_consumer_count');
+                                               }
                                               async function refreshSyncSummary() {
                                                 const response = await fetch('/sync');
                                                 const payload = await response.json();

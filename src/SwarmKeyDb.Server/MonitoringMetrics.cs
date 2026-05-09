@@ -18,6 +18,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
     private readonly Func<ICacheSyncStatusProvider> _cacheSyncStatusAccessor;
     private readonly Func<PubSubManager?> _pubSubManagerAccessor;
     private readonly Func<TransactionMetricsSnapshot> _transactionMetricsAccessor;
+    private readonly Func<StreamMetricsSnapshot> _streamMetricsAccessor;
     private readonly string _privacyMode;
     private long _activeConnections;
     private long _swarmReads;
@@ -37,7 +38,8 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         int maxLogEntries = 200,
         PrivacyMode privacyMode = PrivacyMode.None,
         Func<PubSubManager?>? pubSubManagerAccessor = null,
-        Func<TransactionMetricsSnapshot>? transactionMetricsAccessor = null)
+        Func<TransactionMetricsSnapshot>? transactionMetricsAccessor = null,
+        Func<StreamMetricsSnapshot>? streamMetricsAccessor = null)
     {
         _cacheStatsAccessor = cacheStatsAccessor;
         _offlineStatusAccessor = offlineStatusAccessor ?? (() => NoOpOfflineStatusProvider.Instance);
@@ -45,6 +47,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         _cacheSyncStatusAccessor = cacheSyncStatusAccessor ?? (() => NoOpCacheSyncStatusProvider.Instance);
         _pubSubManagerAccessor = pubSubManagerAccessor ?? (() => null);
         _transactionMetricsAccessor = transactionMetricsAccessor ?? (() => EmptyTransactionMetricsSnapshot);
+        _streamMetricsAccessor = streamMetricsAccessor ?? (() => EmptyStreamMetricsSnapshot);
         _maxLogEntries = Math.Max(10, maxLogEntries);
         _privacyMode = privacyMode.ToString().ToLowerInvariant();
     }
@@ -176,6 +179,16 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine("# TYPE swarmkeydb_transaction_queue_depth histogram");
         builder.AppendLine("# HELP swarmkeydb_transaction_exec_duration_seconds EXEC duration histogram.");
         builder.AppendLine("# TYPE swarmkeydb_transaction_exec_duration_seconds histogram");
+        builder.AppendLine("# HELP swarmkeydb_stream_pending_entries_total Current pending stream entries.");
+        builder.AppendLine("# TYPE swarmkeydb_stream_pending_entries_total gauge");
+        builder.AppendLine("# HELP swarmkeydb_stream_xack_total Total acknowledged stream pending entries.");
+        builder.AppendLine("# TYPE swarmkeydb_stream_xack_total counter");
+        builder.AppendLine("# HELP swarmkeydb_stream_xclaim_total Total claimed stream pending entries.");
+        builder.AppendLine("# TYPE swarmkeydb_stream_xclaim_total counter");
+        builder.AppendLine("# HELP swarmkeydb_stream_group_count Total stream consumer groups.");
+        builder.AppendLine("# TYPE swarmkeydb_stream_group_count gauge");
+        builder.AppendLine("# HELP swarmkeydb_stream_idle_consumer_count Total idle stream consumers.");
+        builder.AppendLine("# TYPE swarmkeydb_stream_idle_consumer_count gauge");
 
         foreach (var entry in _operations.OrderBy(static item => item.Key, StringComparer.Ordinal))
         {
@@ -252,6 +265,12 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine(FormatMetric("swarmkeydb_transaction_watch_conflict_total", txMetrics.WatchConflictTotal));
         AppendHistogramMetrics(builder, "swarmkeydb_transaction_queue_depth", txMetrics.QueueDepth);
         AppendHistogramMetrics(builder, "swarmkeydb_transaction_exec_duration_seconds", txMetrics.ExecDuration);
+        var streamMetrics = _streamMetricsAccessor();
+        builder.AppendLine(FormatMetric("swarmkeydb_stream_pending_entries_total", streamMetrics.PendingEntriesTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_stream_xack_total", streamMetrics.XAckTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_stream_xclaim_total", streamMetrics.XClaimTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_stream_group_count", streamMetrics.GroupCount));
+        builder.AppendLine(FormatMetric("swarmkeydb_stream_idle_consumer_count", streamMetrics.IdleConsumerCount));
 
         return builder.ToString();
     }
@@ -271,6 +290,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
             new long[RedisCommandProcessor.TransactionExecDurationBucketUpperBounds.Length],
             0,
             0));
+    private static readonly StreamMetricsSnapshot EmptyStreamMetricsSnapshot = new(0, 0, 0, 0, 0);
 
     private void AppendHistogramMetrics(StringBuilder builder, string metricName, TransactionHistogramSnapshot histogram)
     {
