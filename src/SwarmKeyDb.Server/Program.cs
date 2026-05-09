@@ -49,12 +49,14 @@ ICacheStats? cacheStats = null;
 IOfflineStatusProvider? offlineStatusMetrics = null;
 IConsistencyVerificationStatusProvider? consistencyStatusMetrics = null;
 ICacheSyncStatusProvider? cacheSyncStatusMetrics = null;
+PubSubManager? pubSubManager = null;
 var monitoringMetrics = new MonitoringMetrics(
     () => cacheStats ?? NoOpCacheStats.Instance,
     () => offlineStatusMetrics ?? NoOpOfflineStatusProvider.Instance,
     () => consistencyStatusMetrics ?? NoOpConsistencyVerificationStatusProvider.Instance,
     () => cacheSyncStatusMetrics ?? NoOpCacheSyncStatusProvider.Instance,
-    privacyMode: privacyOptions.PrivacyMode);
+    privacyMode: privacyOptions.PrivacyMode,
+    pubSubManagerAccessor: () => pubSubManager);
 
 var cacheOptions = new CacheOptions
 {
@@ -411,6 +413,11 @@ var resyncCoordinator = provider.GetService<IResyncCoordinator>() ?? NoOpResyncC
 var resyncStatusProvider = provider.GetService<IResyncStatusProvider>() ?? NoOpResyncCoordinator.Instance;
 offlineStatusMetrics = offlineStatusProvider;
 cacheSyncStatusMetrics = cacheSyncStatusProvider;
+// Create the Pub/Sub manager (singleton shared across all connections)
+pubSubManager = new PubSubManager(
+    provider.GetService<ICacheSyncBus>(),
+    nodeId: null,
+    provider.GetService<ILogger<PubSubManager>>());
 CrossChainSyncService? crossChainSyncService = null;
 OfflineSyncService? offlineSyncService = provider.GetService<OfflineSyncService>();
 AntiEntropyService? antiEntropyService = cacheSyncStatusProvider as AntiEntropyService;
@@ -436,7 +443,8 @@ var processor = new RedisCommandProcessor(
     provider.GetRequiredService<ILogger<RedisCommandProcessor>>(),
     provider.GetRequiredService<IDidContextAccessor>(),
     provider.GetService<IDecentralizedIdentityProvider>(),
-    resyncCoordinator);
+    resyncCoordinator,
+    pubSubManager);
 var server = new RedisServer(
     bind,
     port,
