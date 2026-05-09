@@ -44,7 +44,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         _consistencyStatusAccessor = consistencyStatusAccessor ?? (() => NoOpConsistencyVerificationStatusProvider.Instance);
         _cacheSyncStatusAccessor = cacheSyncStatusAccessor ?? (() => NoOpCacheSyncStatusProvider.Instance);
         _pubSubManagerAccessor = pubSubManagerAccessor ?? (() => null);
-        _transactionMetricsAccessor = transactionMetricsAccessor ?? (() => new TransactionMetricsSnapshot(0, 0, 0));
+        _transactionMetricsAccessor = transactionMetricsAccessor ?? (() => EmptyTransactionMetricsSnapshot);
         _maxLogEntries = Math.Max(10, maxLogEntries);
         _privacyMode = privacyMode.ToString().ToLowerInvariant();
     }
@@ -164,12 +164,18 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine("# TYPE swarmkeydb_pubsub_messages_published_total counter");
         builder.AppendLine("# HELP swarmkeydb_pubsub_messages_dropped_total Total messages dropped due to slow or full subscriber buffers.");
         builder.AppendLine("# TYPE swarmkeydb_pubsub_messages_dropped_total counter");
-        builder.AppendLine("# HELP swarmkeydb_transaction_exec_total Total EXEC invocations (successful and aborted).");
-        builder.AppendLine("# TYPE swarmkeydb_transaction_exec_total counter");
-        builder.AppendLine("# HELP swarmkeydb_transaction_abort_total Total transactions aborted (EXECABORT or WATCH conflict).");
-        builder.AppendLine("# TYPE swarmkeydb_transaction_abort_total counter");
+        builder.AppendLine("# HELP swarmkeydb_transaction_started_total Total MULTI invocations.");
+        builder.AppendLine("# TYPE swarmkeydb_transaction_started_total counter");
+        builder.AppendLine("# HELP swarmkeydb_transaction_committed_total Total successful EXEC completions.");
+        builder.AppendLine("# TYPE swarmkeydb_transaction_committed_total counter");
+        builder.AppendLine("# HELP swarmkeydb_transaction_aborted_total Total transactions aborted by DISCARD or WATCH conflict.");
+        builder.AppendLine("# TYPE swarmkeydb_transaction_aborted_total counter");
         builder.AppendLine("# HELP swarmkeydb_transaction_watch_conflict_total Total EXEC aborts caused by a WATCH key conflict.");
         builder.AppendLine("# TYPE swarmkeydb_transaction_watch_conflict_total counter");
+        builder.AppendLine("# HELP swarmkeydb_transaction_queue_depth Transaction queue depth histogram.");
+        builder.AppendLine("# TYPE swarmkeydb_transaction_queue_depth histogram");
+        builder.AppendLine("# HELP swarmkeydb_transaction_exec_duration_seconds EXEC duration histogram.");
+        builder.AppendLine("# TYPE swarmkeydb_transaction_exec_duration_seconds histogram");
 
         foreach (var entry in _operations.OrderBy(static item => item.Key, StringComparer.Ordinal))
         {
@@ -240,11 +246,45 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine(FormatMetric("swarmkeydb_pubsub_messages_published_total", pubSub?.MessagesPublishedTotal ?? 0L));
         builder.AppendLine(FormatMetric("swarmkeydb_pubsub_messages_dropped_total", pubSub?.MessagesDroppedTotal ?? 0L));
         var txMetrics = _transactionMetricsAccessor();
-        builder.AppendLine(FormatMetric("swarmkeydb_transaction_exec_total", txMetrics.ExecTotal));
-        builder.AppendLine(FormatMetric("swarmkeydb_transaction_abort_total", txMetrics.AbortTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_transaction_started_total", txMetrics.StartedTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_transaction_committed_total", txMetrics.CommittedTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_transaction_aborted_total", txMetrics.AbortedTotal));
         builder.AppendLine(FormatMetric("swarmkeydb_transaction_watch_conflict_total", txMetrics.WatchConflictTotal));
+        AppendHistogramMetrics(builder, "swarmkeydb_transaction_queue_depth", txMetrics.QueueDepth);
+        AppendHistogramMetrics(builder, "swarmkeydb_transaction_exec_duration_seconds", txMetrics.ExecDuration);
 
         return builder.ToString();
+    }
+
+    private static readonly TransactionMetricsSnapshot EmptyTransactionMetricsSnapshot = new(
+        0,
+        0,
+        0,
+        0,
+        new TransactionHistogramSnapshot(
+            RedisCommandProcessor.TransactionQueueDepthBucketUpperBounds,
+            new long[RedisCommandProcessor.TransactionQueueDepthBucketUpperBounds.Length],
+            0,
+            0),
+        new TransactionHistogramSnapshot(
+            RedisCommandProcessor.TransactionExecDurationBucketUpperBounds,
+            new long[RedisCommandProcessor.TransactionExecDurationBucketUpperBounds.Length],
+            0,
+            0));
+
+    private void AppendHistogramMetrics(StringBuilder builder, string metricName, TransactionHistogramSnapshot histogram)
+    {
+        for (var i = 0; i < histogram.BucketUpperBounds.Count && i < histogram.BucketCounts.Count; i++)
+        {
+            builder.AppendLine(FormatMetric(
+                $"{metricName}_bucket",
+                histogram.BucketCounts[i],
+                ("le", histogram.BucketUpperBounds[i].ToString(CultureInfo.InvariantCulture))));
+        }
+
+        builder.AppendLine(FormatMetric($"{metricName}_bucket", histogram.Count, ("le", "+Inf")));
+        builder.AppendLine(FormatMetric($"{metricName}_sum", histogram.Sum));
+        builder.AppendLine(FormatMetric($"{metricName}_count", histogram.Count));
     }
 
     private void UpdateCacheDriftTotal(CacheSyncSnapshot snapshot)

@@ -28,9 +28,19 @@ public sealed class RedisCommandProcessor : IDisposable
     private long _versionClock;
 
     // Transaction telemetry counters
-    private long _txExecTotal;
-    private long _txAbortTotal;
+    private long _txStartedTotal;
+    private long _txCommittedTotal;
+    private long _txAbortedTotal;
     private long _txWatchConflictTotal;
+    private readonly long[] _txQueueDepthBucketCounts = new long[TransactionQueueDepthBucketUpperBounds.Length];
+    private readonly long[] _txExecDurationBucketCounts = new long[TransactionExecDurationBucketUpperBounds.Length];
+    private long _txQueueDepthCount;
+    private double _txQueueDepthSum;
+    private long _txExecDurationCount;
+    private double _txExecDurationSumSeconds;
+
+    public static readonly double[] TransactionQueueDepthBucketUpperBounds = [0, 1, 2, 4, 8, 16, 32];
+    public static readonly double[] TransactionExecDurationBucketUpperBounds = [0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5];
 
     public RedisCommandProcessor(
         IKeyValueStore store,
@@ -290,6 +300,7 @@ public sealed class RedisCommandProcessor : IDisposable
                     return RespValue.Error("ERR MULTI calls can not be nested");
                 }
                 tx.InMulti = true;
+                Interlocked.Increment(ref _txStartedTotal);
                 return RespValue.SimpleString("OK");
 
             case "EXEC":
@@ -304,7 +315,9 @@ public sealed class RedisCommandProcessor : IDisposable
                 {
                     return RespValue.Error("ERR DISCARD without MULTI");
                 }
+                ObserveTransactionQueueDepth(tx.CommandQueue.Count);
                 tx.Reset();
+                Interlocked.Increment(ref _txAbortedTotal);
                 return RespValue.SimpleString("OK");
 
             case "WATCH":
@@ -338,46 +351,55 @@ public sealed class RedisCommandProcessor : IDisposable
     /// </summary>
     private async Task<RespValue> ExecTransactionAsync(TransactionState tx, CancellationToken cancellationToken)
     {
-        // Count every EXEC attempt so abort_rate = abort_total / exec_total is meaningful
-        Interlocked.Increment(ref _txExecTotal);
+        var queueDepth = tx.CommandQueue.Count;
+        ObserveTransactionQueueDepth(queueDepth);
+        var stopwatch = Stopwatch.StartNew();
 
-        // Syntax error during queuing → abort the whole transaction
-        if (tx.HasQueueError)
+        try
         {
-            tx.Reset();
-            Interlocked.Increment(ref _txAbortTotal);
-            return RespValue.Error("EXECABORT Transaction discarded because of previous errors.");
-        }
-
-        // WATCH conflict check
-        foreach (var (watchedKey, watchedVersion) in tx.WatchedVersions)
-        {
-            if (GetKeyVersion(watchedKey) != watchedVersion)
+            // Syntax error during queuing → abort the whole transaction
+            if (tx.HasQueueError)
             {
                 tx.Reset();
-                Interlocked.Increment(ref _txWatchConflictTotal);
-                Interlocked.Increment(ref _txAbortTotal);
-                return RespValue.NullArray();
+                return RespValue.Error("EXECABORT Transaction discarded because of previous errors.");
             }
-        }
 
-        // Snapshot and clear the queue before executing so that nested commands behave correctly
-        var queue = tx.CommandQueue.ToArray();
-        tx.Reset();
-
-        var results = new RespValue[queue.Length];
-        for (var i = 0; i < queue.Length; i++)
-        {
-            results[i] = await ExecuteAsync(queue[i], cancellationToken).ConfigureAwait(false);
-
-            // Propagate mutations so WATCH on other connections sees them
-            if (results[i].Type != RespType.Error && queue[i].Items is { Count: > 0 } qItems)
+            // WATCH conflict check
+            foreach (var (watchedKey, watchedVersion) in tx.WatchedVersions)
             {
-                BumpMutatedKeys(qItems[0].AsString().ToUpperInvariant(), qItems);
+                if (GetKeyVersion(watchedKey) != watchedVersion)
+                {
+                    tx.Reset();
+                    Interlocked.Increment(ref _txWatchConflictTotal);
+                    Interlocked.Increment(ref _txAbortedTotal);
+                    return RespValue.NullArray();
+                }
             }
-        }
 
-        return RespValue.Array(results);
+            // Snapshot and clear the queue before executing so that nested commands behave correctly
+            var queue = tx.CommandQueue.ToArray();
+            tx.Reset();
+
+            var results = new RespValue[queue.Length];
+            for (var i = 0; i < queue.Length; i++)
+            {
+                results[i] = await ExecuteAsync(queue[i], cancellationToken).ConfigureAwait(false);
+
+                // Propagate mutations so WATCH on other connections sees them
+                if (results[i].Type != RespType.Error && queue[i].Items is { Count: > 0 } qItems)
+                {
+                    BumpMutatedKeys(qItems[0].AsString().ToUpperInvariant(), qItems);
+                }
+            }
+
+            Interlocked.Increment(ref _txCommittedTotal);
+            return RespValue.Array(results);
+        }
+        finally
+        {
+            stopwatch.Stop();
+            ObserveExecDuration(stopwatch.Elapsed);
+        }
     }
 
     /// <summary>
@@ -444,9 +466,71 @@ public sealed class RedisCommandProcessor : IDisposable
 
     /// <summary>Returns a snapshot of transaction telemetry counters.</summary>
     public TransactionMetricsSnapshot GetTransactionMetrics() => new(
-        Interlocked.Read(ref _txExecTotal),
-        Interlocked.Read(ref _txAbortTotal),
-        Interlocked.Read(ref _txWatchConflictTotal));
+        Interlocked.Read(ref _txStartedTotal),
+        Interlocked.Read(ref _txCommittedTotal),
+        Interlocked.Read(ref _txAbortedTotal),
+        Interlocked.Read(ref _txWatchConflictTotal),
+        new TransactionHistogramSnapshot(
+            TransactionQueueDepthBucketUpperBounds,
+            SnapshotBucketCounts(_txQueueDepthBucketCounts),
+            Interlocked.Read(ref _txQueueDepthCount),
+            Volatile.Read(ref _txQueueDepthSum)),
+        new TransactionHistogramSnapshot(
+            TransactionExecDurationBucketUpperBounds,
+            SnapshotBucketCounts(_txExecDurationBucketCounts),
+            Interlocked.Read(ref _txExecDurationCount),
+            Volatile.Read(ref _txExecDurationSumSeconds)));
+
+    private static long[] SnapshotBucketCounts(long[] source)
+    {
+        var snapshot = new long[source.Length];
+        for (var i = 0; i < source.Length; i++)
+        {
+            snapshot[i] = Volatile.Read(ref source[i]);
+        }
+
+        return snapshot;
+    }
+
+    private void ObserveTransactionQueueDepth(int depth)
+    {
+        var depthValue = Math.Max(0, depth);
+        ObserveHistogram(_txQueueDepthBucketCounts, TransactionQueueDepthBucketUpperBounds, depthValue);
+        Interlocked.Increment(ref _txQueueDepthCount);
+        AddDouble(ref _txQueueDepthSum, depthValue);
+    }
+
+    private void ObserveExecDuration(TimeSpan duration)
+    {
+        var seconds = Math.Max(0D, duration.TotalSeconds);
+        ObserveHistogram(_txExecDurationBucketCounts, TransactionExecDurationBucketUpperBounds, seconds);
+        Interlocked.Increment(ref _txExecDurationCount);
+        AddDouble(ref _txExecDurationSumSeconds, seconds);
+    }
+
+    private static void ObserveHistogram(long[] bucketCounts, IReadOnlyList<double> bucketBounds, double value)
+    {
+        for (var i = 0; i < bucketBounds.Count; i++)
+        {
+            if (value <= bucketBounds[i])
+            {
+                Interlocked.Increment(ref bucketCounts[i]);
+            }
+        }
+    }
+
+    private static void AddDouble(ref double target, double delta)
+    {
+        while (true)
+        {
+            var current = Volatile.Read(ref target);
+            var updated = current + delta;
+            if (Interlocked.CompareExchange(ref target, updated, current) == current)
+            {
+                return;
+            }
+        }
+    }
 
     /// <summary>
     /// Handles SUBSCRIBE, UNSUBSCRIBE, PSUBSCRIBE, and PUNSUBSCRIBE commands,
@@ -1434,4 +1518,17 @@ public sealed class RedisCommandProcessor : IDisposable
 }
 
 /// <summary>Snapshot of per-processor transaction telemetry counters.</summary>
-public sealed record TransactionMetricsSnapshot(long ExecTotal, long AbortTotal, long WatchConflictTotal);
+public sealed record TransactionMetricsSnapshot(
+    long StartedTotal,
+    long CommittedTotal,
+    long AbortedTotal,
+    long WatchConflictTotal,
+    TransactionHistogramSnapshot QueueDepth,
+    TransactionHistogramSnapshot ExecDuration);
+
+/// <summary>Histogram snapshot used for transaction telemetry.</summary>
+public sealed record TransactionHistogramSnapshot(
+    IReadOnlyList<double> BucketUpperBounds,
+    IReadOnlyList<long> BucketCounts,
+    long Count,
+    double Sum);

@@ -350,6 +350,17 @@ When sharding is enabled, `/health` and `/ready` include per-shard state and `/m
 
 Monitoring endpoints bind to the same host as Redis (`SWARM_KEYDB_BIND`, default `0.0.0.0`). For local-only exposure, set `SWARM_KEYDB_BIND=127.0.0.1`.
 
+Transactions metrics exposed on `/metrics`:
+
+- `swarmkeydb_transaction_started_total`
+- `swarmkeydb_transaction_committed_total`
+- `swarmkeydb_transaction_aborted_total`
+- `swarmkeydb_transaction_watch_conflict_total`
+- `swarmkeydb_transaction_queue_depth` (histogram)
+- `swarmkeydb_transaction_exec_duration_seconds` (histogram)
+
+Compatibility note: commands queued under `MULTI` execute against key state at `EXEC` time. If a key expires or is deleted between queueing and execution, `GET` slots in the `EXEC` reply return nil (`$-1`) consistent with Redis 7.x missing-key behavior.
+
 Quick check:
 
 ```bash

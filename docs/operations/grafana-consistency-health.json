@@ -2,7 +2,7 @@
   "title": "SwarmKeyDb Consistency Health",
   "uid": "swarmkeydb-consistency-health",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "panels": [
     {
@@ -75,6 +75,98 @@
         "w": 12,
         "x": 12,
         "y": 8
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Transactions Started / Committed / Aborted",
+      "targets": [
+        {
+          "expr": "rate(swarmkeydb_transaction_started_total[5m])",
+          "legendFormat": "started/s"
+        },
+        {
+          "expr": "rate(swarmkeydb_transaction_committed_total[5m])",
+          "legendFormat": "committed/s"
+        },
+        {
+          "expr": "rate(swarmkeydb_transaction_aborted_total[5m])",
+          "legendFormat": "aborted/s"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "WATCH Conflict Rate",
+      "targets": [
+        {
+          "expr": "rate(swarmkeydb_transaction_watch_conflict_total[5m])",
+          "legendFormat": "watch-conflicts/s"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Transaction Queue Depth Distribution",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(swarmkeydb_transaction_queue_depth_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(swarmkeydb_transaction_queue_depth_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(swarmkeydb_transaction_queue_depth_bucket[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "EXEC Latency (p50/p95/p99)",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(swarmkeydb_transaction_exec_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(swarmkeydb_transaction_exec_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(swarmkeydb_transaction_exec_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
       }
     }
   ]
