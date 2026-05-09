@@ -17,6 +17,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
     private readonly Func<IConsistencyVerificationStatusProvider> _consistencyStatusAccessor;
     private readonly Func<ICacheSyncStatusProvider> _cacheSyncStatusAccessor;
     private readonly Func<PubSubManager?> _pubSubManagerAccessor;
+    private readonly Func<TransactionMetricsSnapshot> _transactionMetricsAccessor;
     private readonly string _privacyMode;
     private long _activeConnections;
     private long _swarmReads;
@@ -35,13 +36,15 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         Func<ICacheSyncStatusProvider>? cacheSyncStatusAccessor = null,
         int maxLogEntries = 200,
         PrivacyMode privacyMode = PrivacyMode.None,
-        Func<PubSubManager?>? pubSubManagerAccessor = null)
+        Func<PubSubManager?>? pubSubManagerAccessor = null,
+        Func<TransactionMetricsSnapshot>? transactionMetricsAccessor = null)
     {
         _cacheStatsAccessor = cacheStatsAccessor;
         _offlineStatusAccessor = offlineStatusAccessor ?? (() => NoOpOfflineStatusProvider.Instance);
         _consistencyStatusAccessor = consistencyStatusAccessor ?? (() => NoOpConsistencyVerificationStatusProvider.Instance);
         _cacheSyncStatusAccessor = cacheSyncStatusAccessor ?? (() => NoOpCacheSyncStatusProvider.Instance);
         _pubSubManagerAccessor = pubSubManagerAccessor ?? (() => null);
+        _transactionMetricsAccessor = transactionMetricsAccessor ?? (() => new TransactionMetricsSnapshot(0, 0, 0));
         _maxLogEntries = Math.Max(10, maxLogEntries);
         _privacyMode = privacyMode.ToString().ToLowerInvariant();
     }
@@ -161,6 +164,12 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine("# TYPE swarmkeydb_pubsub_messages_published_total counter");
         builder.AppendLine("# HELP swarmkeydb_pubsub_messages_dropped_total Total messages dropped due to slow or full subscriber buffers.");
         builder.AppendLine("# TYPE swarmkeydb_pubsub_messages_dropped_total counter");
+        builder.AppendLine("# HELP swarmkeydb_transaction_exec_total Total EXEC invocations (successful and aborted).");
+        builder.AppendLine("# TYPE swarmkeydb_transaction_exec_total counter");
+        builder.AppendLine("# HELP swarmkeydb_transaction_abort_total Total transactions aborted (EXECABORT or WATCH conflict).");
+        builder.AppendLine("# TYPE swarmkeydb_transaction_abort_total counter");
+        builder.AppendLine("# HELP swarmkeydb_transaction_watch_conflict_total Total EXEC aborts caused by a WATCH key conflict.");
+        builder.AppendLine("# TYPE swarmkeydb_transaction_watch_conflict_total counter");
 
         foreach (var entry in _operations.OrderBy(static item => item.Key, StringComparer.Ordinal))
         {
@@ -230,6 +239,10 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine(FormatMetric("swarmkeydb_pubsub_subscribers_total", pubSub?.GetSubscribersTotal() ?? 0L));
         builder.AppendLine(FormatMetric("swarmkeydb_pubsub_messages_published_total", pubSub?.MessagesPublishedTotal ?? 0L));
         builder.AppendLine(FormatMetric("swarmkeydb_pubsub_messages_dropped_total", pubSub?.MessagesDroppedTotal ?? 0L));
+        var txMetrics = _transactionMetricsAccessor();
+        builder.AppendLine(FormatMetric("swarmkeydb_transaction_exec_total", txMetrics.ExecTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_transaction_abort_total", txMetrics.AbortTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_transaction_watch_conflict_total", txMetrics.WatchConflictTotal));
 
         return builder.ToString();
     }

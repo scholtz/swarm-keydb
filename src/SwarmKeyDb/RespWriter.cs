@@ -29,7 +29,14 @@ public sealed class RespWriter
                 await WriteBulkStringAsync(value.Bytes, cancellationToken).ConfigureAwait(false);
                 break;
             case RespType.Array:
-                await WriteArrayAsync(value.Items ?? Array.Empty<RespValue>(), cancellationToken).ConfigureAwait(false);
+                if (value.Items is null)
+                {
+                    await WriteAsciiAsync("*-1\r\n", cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    await WriteArrayAsync(value.Items, cancellationToken).ConfigureAwait(false);
+                }
                 break;
         }
 
