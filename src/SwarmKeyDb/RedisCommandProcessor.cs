@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -17,6 +18,7 @@ public sealed class RedisCommandProcessor : IDisposable
     private readonly KeyRotationService? _keyRotationService;
     private readonly IRedisCommandObserver? _observer;
     private readonly IResyncCoordinator? _resyncCoordinator;
+    private readonly PubSubManager? _pubSubManager;
     private readonly ILogger<RedisCommandProcessor> _logger;
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
 
@@ -30,7 +32,8 @@ public sealed class RedisCommandProcessor : IDisposable
         ILogger<RedisCommandProcessor>? logger = null,
         IDidContextAccessor? didContextAccessor = null,
         IDecentralizedIdentityProvider? didProvider = null,
-        IResyncCoordinator? resyncCoordinator = null)
+        IResyncCoordinator? resyncCoordinator = null,
+        PubSubManager? pubSubManager = null)
     {
         _store = store;
         _ethAddressAccessor = ethAddressAccessor;
@@ -42,6 +45,7 @@ public sealed class RedisCommandProcessor : IDisposable
         _observer = observer;
         _logger = logger ?? NullLogger<RedisCommandProcessor>.Instance;
         _resyncCoordinator = resyncCoordinator;
+        _pubSubManager = pubSubManager;
     }
 
     public async Task ProcessAsync(Stream input, Stream output, CancellationToken cancellationToken = default)
@@ -61,18 +65,66 @@ public sealed class RedisCommandProcessor : IDisposable
             _didContextAccessor.Current = null;
         }
 
+        // Per-connection pub/sub state
+        var connectionId = Guid.NewGuid().ToString("N");
+        var channelSubs = new HashSet<string>(StringComparer.Ordinal);
+        var patternSubs = new HashSet<string>(StringComparer.Ordinal);
+        // Bounded push channel: DropWrite so a slow subscriber doesn't block the publisher
+        var pushChannel = Channel.CreateBounded<RespValue>(new BoundedChannelOptions(256)
+        {
+            FullMode = BoundedChannelFullMode.DropWrite,
+            SingleReader = true
+        });
+
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
                 RespValue? request;
-                try
+                var isSubscribed = channelSubs.Count + patternSubs.Count > 0;
+
+                if (isSubscribed)
                 {
-                    request = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+                    // In subscription mode: interleave push message delivery with command reading.
+                    // Drain any queued push messages before blocking on the next command.
+                    while (pushChannel.Reader.TryRead(out var pending))
+                    {
+                        await writer.WriteAsync(pending, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    // Concurrently wait for either a new incoming command or a push message.
+                    var readTask = reader.ReadAsync(cancellationToken);
+                    while (!readTask.IsCompleted)
+                    {
+                        var pushWaiter = pushChannel.Reader.WaitToReadAsync(cancellationToken).AsTask();
+                        await Task.WhenAny(readTask, pushWaiter).ConfigureAwait(false);
+
+                        // Flush any push messages that arrived while waiting
+                        while (pushChannel.Reader.TryRead(out var push))
+                        {
+                            await writer.WriteAsync(push, cancellationToken).ConfigureAwait(false);
+                        }
+                    }
+
+                    try
+                    {
+                        request = await readTask.ConfigureAwait(false);
+                    }
+                    catch (EndOfStreamException)
+                    {
+                        break;
+                    }
                 }
-                catch (EndOfStreamException)
+                else
                 {
-                    break;
+                    try
+                    {
+                        request = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (EndOfStreamException)
+                    {
+                        break;
+                    }
                 }
 
                 if (request is null)
@@ -88,6 +140,26 @@ public sealed class RedisCommandProcessor : IDisposable
                 if (_didContextAccessor is not null)
                 {
                     _didContextAccessor.Current = currentDidContext;
+                }
+
+                var command = request.Type == RespType.Array && request.Items is { Count: > 0 }
+                    ? request.Items[0].AsString().ToUpperInvariant()
+                    : string.Empty;
+
+                // Handle pub/sub commands that require direct access to the writer and connection state
+                if (_pubSubManager is not null && command is "SUBSCRIBE" or "UNSUBSCRIBE" or "PSUBSCRIBE" or "PUNSUBSCRIBE")
+                {
+                    await HandlePubSubCommandAsync(command, request, connectionId, pushChannel.Writer, channelSubs, patternSubs, writer, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                // In subscription mode only PING, RESET, and QUIT are permitted
+                if (isSubscribed && command is not ("PING" or "RESET" or "QUIT"))
+                {
+                    await writer.WriteAsync(
+                        RespValue.Error($"ERR Can't call '{command.ToLowerInvariant()}' in subscribe mode"),
+                        cancellationToken).ConfigureAwait(false);
+                    continue;
                 }
 
                 var response = await ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
@@ -110,6 +182,14 @@ public sealed class RedisCommandProcessor : IDisposable
         }
         finally
         {
+            // Clean up all subscriptions for this connection
+            if (_pubSubManager is not null)
+            {
+                _pubSubManager.RemoveConnection(connectionId);
+            }
+
+            pushChannel.Writer.TryComplete();
+
             if (_ethAddressAccessor is not null)
             {
                 _ethAddressAccessor.CurrentAddress = null;
@@ -118,6 +198,120 @@ public sealed class RedisCommandProcessor : IDisposable
             if (_didContextAccessor is not null)
             {
                 _didContextAccessor.Current = null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Handles SUBSCRIBE, UNSUBSCRIBE, PSUBSCRIBE, and PUNSUBSCRIBE commands,
+    /// writing subscription confirmation replies directly to the output writer.
+    /// </summary>
+    private async Task HandlePubSubCommandAsync(
+        string command,
+        RespValue request,
+        string connectionId,
+        ChannelWriter<RespValue> pushWriter,
+        HashSet<string> channelSubs,
+        HashSet<string> patternSubs,
+        RespWriter writer,
+        CancellationToken cancellationToken)
+    {
+        var args = request.Items!;
+        var isPattern = command is "PSUBSCRIBE" or "PUNSUBSCRIBE";
+        var isSubscribe = command is "SUBSCRIBE" or "PSUBSCRIBE";
+        var replyType = isPattern
+            ? (isSubscribe ? "psubscribe" : "punsubscribe")
+            : (isSubscribe ? "subscribe" : "unsubscribe");
+
+        if (isSubscribe)
+        {
+            if (args.Count < 2)
+            {
+                await writer.WriteAsync(
+                    RespValue.Error($"ERR wrong number of arguments for '{command.ToLowerInvariant()}'"),
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            for (var i = 1; i < args.Count; i++)
+            {
+                var target = args[i].AsString();
+                int total;
+                if (isPattern)
+                {
+                    total = _pubSubManager!.PSubscribe(connectionId, target, pushWriter);
+                    patternSubs.Add(target);
+                }
+                else
+                {
+                    total = _pubSubManager!.Subscribe(connectionId, target, pushWriter);
+                    channelSubs.Add(target);
+                }
+
+                _logger.LogDebug("Connection {ConnectionId} {Command} {Target}. Total={Total}.", connectionId, command, target, total);
+                await writer.WriteAsync(
+                    RespValue.Array(new[]
+                    {
+                        RespValue.BulkString(replyType),
+                        RespValue.BulkString(target),
+                        RespValue.IntegerValue(total)
+                    }),
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
+        else
+        {
+            // UNSUBSCRIBE / PUNSUBSCRIBE
+            // If no arguments, unsubscribe from all
+            IReadOnlyList<string> targets;
+            if (args.Count < 2)
+            {
+                targets = isPattern
+                    ? patternSubs.ToArray()
+                    : channelSubs.ToArray();
+            }
+            else
+            {
+                targets = args.Skip(1).Select(a => a.AsString()).ToArray();
+            }
+
+            if (targets.Count == 0)
+            {
+                // Nothing to unsubscribe from; send a single reply with count 0
+                await writer.WriteAsync(
+                    RespValue.Array(new[]
+                    {
+                        RespValue.BulkString(replyType),
+                        RespValue.BulkString((string?)null),
+                        RespValue.IntegerValue(0)
+                    }),
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            foreach (var target in targets)
+            {
+                int remaining;
+                if (isPattern)
+                {
+                    remaining = _pubSubManager!.PUnsubscribe(connectionId, target);
+                    patternSubs.Remove(target);
+                }
+                else
+                {
+                    remaining = _pubSubManager!.Unsubscribe(connectionId, target);
+                    channelSubs.Remove(target);
+                }
+
+                _logger.LogDebug("Connection {ConnectionId} {Command} {Target}. Remaining={Remaining}.", connectionId, command, target, remaining);
+                await writer.WriteAsync(
+                    RespValue.Array(new[]
+                    {
+                        RespValue.BulkString(replyType),
+                        RespValue.BulkString(target),
+                        RespValue.IntegerValue(remaining)
+                    }),
+                    cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -179,6 +373,8 @@ public sealed class RedisCommandProcessor : IDisposable
                 "ROTATEKEY" => await RotateKeyAsync(args, cancellationToken).ConfigureAwait(false),
                 "BACKENDMETA" => await BackendMetaAsync(args, cancellationToken).ConfigureAwait(false),
                 "SWARM.RESYNC" => await SwarmResyncAsync(args, cancellationToken).ConfigureAwait(false),
+                "PUBLISH" => PublishCommand(args),
+                "PUBSUB" => PubSubCommand(args),
                 "QUIT" => RespValue.SimpleString("OK"),
                 _ => RespValue.Error($"ERR unknown command '{command}'")
             };
@@ -879,6 +1075,77 @@ public sealed class RedisCommandProcessor : IDisposable
         return new Regex("^" + escaped + "$", RegexOptions.CultureInvariant);
     }
 
+    private RespValue PublishCommand(IReadOnlyList<RespValue> args)
+    {
+        var arityError = RequireArity(args, 3);
+        if (arityError is not null)
+        {
+            return arityError;
+        }
+
+        if (_pubSubManager is null)
+        {
+            return RespValue.IntegerValue(0);
+        }
+
+        var channel = args[1].AsString();
+        var message = args[2].Bytes ?? Array.Empty<byte>();
+        var count = _pubSubManager.Publish(channel, message);
+        _logger.LogDebug("PUBLISH {Channel}: delivered to {Count} subscriber(s).", channel, count);
+        return RespValue.IntegerValue(count);
+    }
+
+    private RespValue PubSubCommand(IReadOnlyList<RespValue> args)
+    {
+        if (args.Count < 2)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'PUBSUB'");
+        }
+
+        var subCommand = args[1].AsString().ToUpperInvariant();
+
+        if (_pubSubManager is null)
+        {
+            return subCommand switch
+            {
+                "CHANNELS" => RespValue.Array(Array.Empty<RespValue>()),
+                "NUMSUB" => RespValue.Array(Array.Empty<RespValue>()),
+                "NUMPAT" => RespValue.IntegerValue(0),
+                _ => RespValue.Error($"ERR unknown subcommand or wrong number of arguments for '{subCommand}' command")
+            };
+        }
+
+        switch (subCommand)
+        {
+            case "CHANNELS":
+            {
+                var pattern = args.Count >= 3 ? args[2].AsString() : null;
+                var channels = _pubSubManager.GetChannels(pattern);
+                return RespValue.Array(channels.Select(static c => RespValue.BulkString(c)).ToArray());
+            }
+
+            case "NUMSUB":
+            {
+                var channelNames = args.Skip(2).Select(static a => a.AsString()).ToArray();
+                var counts = _pubSubManager.GetNumSub(channelNames);
+                var items = new List<RespValue>(channelNames.Length * 2);
+                foreach (var ch in channelNames)
+                {
+                    items.Add(RespValue.BulkString(ch));
+                    items.Add(RespValue.IntegerValue(counts.TryGetValue(ch, out var c) ? c : 0));
+                }
+
+                return RespValue.Array(items);
+            }
+
+            case "NUMPAT":
+                return RespValue.IntegerValue(_pubSubManager.GetNumPat());
+
+            default:
+                return RespValue.Error($"ERR unknown subcommand or wrong number of arguments for '{subCommand}' command");
+        }
+    }
+
     public void Dispose()
     {
         _mutationGate.Dispose();
@@ -899,6 +1166,8 @@ public sealed class RedisCommandProcessor : IDisposable
         "DEL" => "delete",
         "KEYS" or "SCAN" => "list",
         "MGET" or "MSET" or "MSETNX" or "MDEL" => "batch",
+        "PUBLISH" => "pubsub",
+        "SUBSCRIBE" or "UNSUBSCRIBE" or "PSUBSCRIBE" or "PUNSUBSCRIBE" or "PUBSUB" => "pubsub",
         _ => "other"
     };
 

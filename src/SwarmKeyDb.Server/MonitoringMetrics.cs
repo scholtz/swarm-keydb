@@ -16,6 +16,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
     private readonly Func<IOfflineStatusProvider> _offlineStatusAccessor;
     private readonly Func<IConsistencyVerificationStatusProvider> _consistencyStatusAccessor;
     private readonly Func<ICacheSyncStatusProvider> _cacheSyncStatusAccessor;
+    private readonly Func<PubSubManager?> _pubSubManagerAccessor;
     private readonly string _privacyMode;
     private long _activeConnections;
     private long _swarmReads;
@@ -33,12 +34,14 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         Func<IConsistencyVerificationStatusProvider>? consistencyStatusAccessor = null,
         Func<ICacheSyncStatusProvider>? cacheSyncStatusAccessor = null,
         int maxLogEntries = 200,
-        PrivacyMode privacyMode = PrivacyMode.None)
+        PrivacyMode privacyMode = PrivacyMode.None,
+        Func<PubSubManager?>? pubSubManagerAccessor = null)
     {
         _cacheStatsAccessor = cacheStatsAccessor;
         _offlineStatusAccessor = offlineStatusAccessor ?? (() => NoOpOfflineStatusProvider.Instance);
         _consistencyStatusAccessor = consistencyStatusAccessor ?? (() => NoOpConsistencyVerificationStatusProvider.Instance);
         _cacheSyncStatusAccessor = cacheSyncStatusAccessor ?? (() => NoOpCacheSyncStatusProvider.Instance);
+        _pubSubManagerAccessor = pubSubManagerAccessor ?? (() => null);
         _maxLogEntries = Math.Max(10, maxLogEntries);
         _privacyMode = privacyMode.ToString().ToLowerInvariant();
     }
@@ -152,6 +155,12 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine("# TYPE swarmkeydb_cache_drift_total counter");
         builder.AppendLine("# HELP swarmkeydb_sync_lag_keys Current key reconciliation lag (pending reconciliations).");
         builder.AppendLine("# TYPE swarmkeydb_sync_lag_keys gauge");
+        builder.AppendLine("# HELP swarmkeydb_pubsub_subscribers_total Current number of unique Pub/Sub subscriber connections.");
+        builder.AppendLine("# TYPE swarmkeydb_pubsub_subscribers_total gauge");
+        builder.AppendLine("# HELP swarmkeydb_pubsub_messages_published_total Total messages published via PUBLISH command.");
+        builder.AppendLine("# TYPE swarmkeydb_pubsub_messages_published_total counter");
+        builder.AppendLine("# HELP swarmkeydb_pubsub_messages_dropped_total Total messages dropped due to slow or full subscriber buffers.");
+        builder.AppendLine("# TYPE swarmkeydb_pubsub_messages_dropped_total counter");
 
         foreach (var entry in _operations.OrderBy(static item => item.Key, StringComparer.Ordinal))
         {
@@ -217,6 +226,10 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         UpdateCacheDriftTotal(cacheSync);
         builder.AppendLine(FormatMetric("swarmkeydb_cache_drift_total", Interlocked.Read(ref _cacheDriftTotal)));
         builder.AppendLine(FormatMetric("swarmkeydb_sync_lag_keys", Math.Max(0, cacheSync.PendingReconciliations)));
+        var pubSub = _pubSubManagerAccessor();
+        builder.AppendLine(FormatMetric("swarmkeydb_pubsub_subscribers_total", pubSub?.GetSubscribersTotal() ?? 0L));
+        builder.AppendLine(FormatMetric("swarmkeydb_pubsub_messages_published_total", pubSub?.MessagesPublishedTotal ?? 0L));
+        builder.AppendLine(FormatMetric("swarmkeydb_pubsub_messages_dropped_total", pubSub?.MessagesDroppedTotal ?? 0L));
 
         return builder.ToString();
     }
