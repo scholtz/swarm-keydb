@@ -92,6 +92,9 @@ var tests = new (string Name, Func<Task> Test)[]
     ("caching store max entries evicts lru", CachingKeyValueStoreMaxEntriesEvictsLruAsync),
     ("cache sync invalidation propagates across instances", CacheSyncInvalidationPropagatesAcrossInstancesAsync),
     ("cache sync anti entropy reconciles after partition", CacheSyncAntiEntropyReconcilesAfterPartitionAsync),
+    ("MultiNode_Failover_PrimaryKilled_SecondaryConverges", MultiNode_Failover_PrimaryKilled_SecondaryConvergesAsync),
+    ("MultiNode_RollingUpdate_NodeByNodeRestart_NoStaleReads", MultiNode_RollingUpdate_NodeByNodeRestart_NoStaleReadsAsync),
+    ("MultiNode_NetworkPartition_Reconnect_ConvergesWithAntiEntropy", MultiNode_NetworkPartition_Reconnect_ConvergesWithAntiEntropyAsync),
     ("resync coordinator chooses partial and full based on version gap", ResyncCoordinatorChoosesModeByVersionGapAsync),
     ("resync coordinator full mode rebuilds from authoritative store", ResyncCoordinatorFullModeRebuildsCacheAsync),
     ("compressing store put stores compressed value", CompressingKeyValueStorePutStoresCompressedValueAsync),
@@ -148,6 +151,7 @@ var tests = new (string Name, Func<Task> Test)[]
     ("monitoring health and dashboard expose consistency verification metrics", MonitoringHealthAndDashboardExposeConsistencyMetricsAsync),
     ("monitoring health and dashboard expose cache sync metrics", MonitoringHealthAndDashboardExposeCacheSyncMetricsAsync),
     ("monitoring metrics and dashboard expose resync status", MonitoringMetricsAndDashboardExposeResyncStatusAsync),
+    ("prometheus metrics endpoint exposes consistency telemetry shape and labels", PrometheusMetricsEndpointExposesConsistencyTelemetryShapeAndLabelsAsync),
     ("redis command logging includes correlation ids", RedisCommandLoggingIncludesCorrelationIdsAsync),
     ("redis swarm resync command supports modes and errors", RedisSwarmResyncCommandSupportsModesAndErrorsAsync),
     ("redis management commands backup restore and rotate", RedisManagementCommandsBackupRestoreAndRotateAsync),
@@ -1856,6 +1860,112 @@ static async Task CacheSyncAntiEntropyReconcilesAfterPartitionAsync()
     AssertEqual("v2", Encoding.UTF8.GetString(converged!));
 }
 
+static async Task MultiNode_Failover_PrimaryKilled_SecondaryConvergesAsync()
+{
+    var remote = new CountingKeyValueStore();
+    var bus = new InMemoryCacheSyncBus();
+    var syncA = new CacheSyncOptions { Enabled = true, NodeId = "node-a", Peers = ["node-b", "node-c"], SyncIntervalSeconds = 1 };
+    var syncB = new CacheSyncOptions { Enabled = true, NodeId = "node-b", Peers = ["node-a", "node-c"], SyncIntervalSeconds = 1 };
+    var syncC = new CacheSyncOptions { Enabled = true, NodeId = "node-c", Peers = ["node-a", "node-b"], SyncIntervalSeconds = 1 };
+
+    var storeA = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: Options.Create(syncA));
+    var storeB = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: Options.Create(syncB));
+    var storeC = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: Options.Create(syncC));
+    var serviceA = new AntiEntropyService(storeA, bus, syncA, NullLogger<AntiEntropyService>.Instance);
+    var serviceB = new AntiEntropyService(storeB, bus, syncB, NullLogger<AntiEntropyService>.Instance);
+    var serviceC = new AntiEntropyService(storeC, bus, syncC, NullLogger<AntiEntropyService>.Instance);
+
+    await storeA.PutAsync("failover:key", Encoding.UTF8.GetBytes("v1"));
+    _ = await storeB.GetAsync("failover:key");
+    _ = await storeC.GetAsync("failover:key");
+
+    bus.SetNodeConnected("node-a", false);
+    await storeB.PutAsync("failover:key", Encoding.UTF8.GetBytes("v2"));
+    var secondaryConverged = await WaitUntilValueAsync(
+        action: () => storeC.GetAsync("failover:key"),
+        predicate: value => value is not null && Encoding.UTF8.GetString(value) == "v2",
+        timeout: TimeSpan.FromSeconds(2),
+        pollInterval: TimeSpan.FromMilliseconds(50));
+    AssertEqual("v2", Encoding.UTF8.GetString(secondaryConverged!));
+
+    bus.SetNodeConnected("node-a", true);
+    await serviceA.TriggerReconciliationAsync();
+    await serviceB.TriggerReconciliationAsync();
+    await serviceC.TriggerReconciliationAsync();
+    var recoveredPrimary = await WaitUntilValueAsync(
+        action: () => storeA.GetAsync("failover:key"),
+        predicate: value => value is not null && Encoding.UTF8.GetString(value) == "v2",
+        timeout: TimeSpan.FromSeconds(2),
+        pollInterval: TimeSpan.FromMilliseconds(50));
+    AssertEqual("v2", Encoding.UTF8.GetString(recoveredPrimary!));
+}
+
+static async Task MultiNode_RollingUpdate_NodeByNodeRestart_NoStaleReadsAsync()
+{
+    var remote = new CountingKeyValueStore();
+    var bus = new InMemoryCacheSyncBus();
+    var syncA = new CacheSyncOptions { Enabled = true, NodeId = "node-a", Peers = ["node-b", "node-c"], SyncIntervalSeconds = 1 };
+    var syncB = new CacheSyncOptions { Enabled = true, NodeId = "node-b", Peers = ["node-a", "node-c"], SyncIntervalSeconds = 1 };
+    var syncC = new CacheSyncOptions { Enabled = true, NodeId = "node-c", Peers = ["node-a", "node-b"], SyncIntervalSeconds = 1 };
+
+    var storeA = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: Options.Create(syncA));
+    await storeA.PutAsync("rolling:key", Encoding.UTF8.GetBytes("v1"));
+
+    var storeB = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: Options.Create(syncB));
+    AssertEqual("v1", Encoding.UTF8.GetString((await storeB.GetAsync("rolling:key"))!));
+
+    await storeA.PutAsync("rolling:key", Encoding.UTF8.GetBytes("v2"));
+    var restartedNodeB = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: Options.Create(syncB));
+    var nodeBRead = await WaitUntilValueAsync(
+        action: () => restartedNodeB.GetAsync("rolling:key"),
+        predicate: value => value is not null && Encoding.UTF8.GetString(value) == "v2",
+        timeout: TimeSpan.FromSeconds(2),
+        pollInterval: TimeSpan.FromMilliseconds(50));
+    AssertEqual("v2", Encoding.UTF8.GetString(nodeBRead!));
+
+    await storeA.PutAsync("rolling:key", Encoding.UTF8.GetBytes("v3"));
+    var restartedNodeC = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: Options.Create(syncC));
+    var nodeCRead = await WaitUntilValueAsync(
+        action: () => restartedNodeC.GetAsync("rolling:key"),
+        predicate: value => value is not null && Encoding.UTF8.GetString(value) == "v3",
+        timeout: TimeSpan.FromSeconds(2),
+        pollInterval: TimeSpan.FromMilliseconds(50));
+    AssertEqual("v3", Encoding.UTF8.GetString(nodeCRead!));
+}
+
+static async Task MultiNode_NetworkPartition_Reconnect_ConvergesWithAntiEntropyAsync()
+{
+    var remote = new CountingKeyValueStore();
+    var bus = new InMemoryCacheSyncBus();
+    var syncA = new CacheSyncOptions { Enabled = true, NodeId = "node-a", Peers = ["node-b", "node-c"], SyncIntervalSeconds = 1 };
+    var syncB = new CacheSyncOptions { Enabled = true, NodeId = "node-b", Peers = ["node-a", "node-c"], SyncIntervalSeconds = 1 };
+    var syncC = new CacheSyncOptions { Enabled = true, NodeId = "node-c", Peers = ["node-a", "node-b"], SyncIntervalSeconds = 1 };
+
+    var storeA = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: Options.Create(syncA));
+    var storeB = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: Options.Create(syncB));
+    var storeC = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: Options.Create(syncC));
+    var serviceA = new AntiEntropyService(storeA, bus, syncA, NullLogger<AntiEntropyService>.Instance);
+    var serviceC = new AntiEntropyService(storeC, bus, syncC, NullLogger<AntiEntropyService>.Instance);
+
+    await storeA.PutAsync("partition:multi", Encoding.UTF8.GetBytes("v1"));
+    _ = await storeB.GetAsync("partition:multi");
+    _ = await storeC.GetAsync("partition:multi");
+
+    bus.SetNodeConnected("node-c", false);
+    await storeA.PutAsync("partition:multi", Encoding.UTF8.GetBytes("v2"));
+    AssertEqual("v1", Encoding.UTF8.GetString((await storeC.GetAsync("partition:multi"))!));
+
+    bus.SetNodeConnected("node-c", true);
+    await serviceA.TriggerReconciliationAsync();
+    await serviceC.TriggerReconciliationAsync();
+    var converged = await WaitUntilValueAsync(
+        action: () => storeC.GetAsync("partition:multi"),
+        predicate: value => value is not null && Encoding.UTF8.GetString(value) == "v2",
+        timeout: TimeSpan.FromSeconds(2),
+        pollInterval: TimeSpan.FromMilliseconds(50));
+    AssertEqual("v2", Encoding.UTF8.GetString(converged!));
+}
+
 static async Task ResyncCoordinatorChoosesModeByVersionGapAsync()
 {
     var remote = new CountingKeyValueStore();
@@ -2218,6 +2328,61 @@ static async Task MonitoringMetricsAndDashboardExposeResyncStatusAsync()
     var dashboard = await client.GetStringAsync($"http://127.0.0.1:{port}/dashboard");
     Assert(dashboard.Contains("Resync Status", StringComparison.Ordinal), "Expected resync section in dashboard HTML.");
     Assert(dashboard.Contains("resync-trigger-partial", StringComparison.Ordinal), "Expected resync trigger control in dashboard HTML.");
+
+    cts.Cancel();
+    await runTask;
+    server.Dispose();
+}
+
+static async Task PrometheusMetricsEndpointExposesConsistencyTelemetryShapeAndLabelsAsync()
+{
+    var cacheSyncProvider = new MutableCacheSyncStatusProvider(new CacheSyncSnapshot(
+        LastSuccessfulSyncUtc: new DateTimeOffset(2026, 05, 09, 03, 00, 00, TimeSpan.Zero),
+        PeerCount: 2,
+        ReconciledKeysLastCycle: 3,
+        PendingReconciliations: 2,
+        LastError: null));
+    var consistencyProvider = new StaticConsistencyVerificationStatusProvider(
+        new ConsistencyVerificationSnapshot(
+            LastVerificationUtc: new DateTimeOffset(2026, 05, 09, 03, 00, 10, TimeSpan.Zero),
+            TotalVerifications: 9,
+            ViolationCount: 2,
+            SuccessRate: 7D / 9D,
+            WorstLatencyMs: 51,
+            EvictionByVerificationTotal: 1));
+    var metrics = new MonitoringMetrics(
+        () => NoOpCacheStats.Instance,
+        () => NoOpOfflineStatusProvider.Instance,
+        () => consistencyProvider,
+        () => cacheSyncProvider);
+    metrics.RecordResync(ResyncMode.Partial, TimeSpan.FromSeconds(1.2), 3);
+    metrics.RecordResync(ResyncMode.Full, TimeSpan.FromSeconds(2.5), 5);
+
+    var port = TestNetHelpers.GetFreePort();
+    var server = new MonitoringHttpServer(
+        IPAddress.Loopback,
+        port,
+        metrics,
+        new StaticReadinessProbe(ready: true, message: "ready"),
+        metricsEnabled: true,
+        dashboardEnabled: false,
+        NullLogger<MonitoringHttpServer>.Instance,
+        cacheSyncStatusProvider: cacheSyncProvider,
+        consistencyStatusProvider: consistencyProvider);
+    using var cts = new CancellationTokenSource();
+    var runTask = server.RunAsync(cts.Token);
+    using var client = new HttpClient();
+
+    var payload = await client.GetStringAsync($"http://127.0.0.1:{port}/metrics");
+    Assert(payload.Contains("# HELP swarmkeydb_cache_drift_total", StringComparison.Ordinal), "Expected cache drift HELP entry.");
+    Assert(payload.Contains("# TYPE swarmkeydb_cache_drift_total counter", StringComparison.Ordinal), "Expected cache drift TYPE entry.");
+    Assert(payload.Contains("swarmkeydb_cache_drift_total{privacy_mode=\"none\"} 3", StringComparison.Ordinal), "Expected drift counter value.");
+    Assert(payload.Contains("swarmkeydb_sync_lag_keys{privacy_mode=\"none\"} 2", StringComparison.Ordinal), "Expected sync lag gauge value.");
+    Assert(payload.Contains("swarmkeydb_resync_partial_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "Expected partial resync counter.");
+    Assert(payload.Contains("swarmkeydb_resync_full_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "Expected full resync counter.");
+    Assert(payload.Contains("swarmkeydb_resync_keys_replayed_total{privacy_mode=\"none\"} 8", StringComparison.Ordinal), "Expected resync replayed keys counter.");
+    Assert(payload.Contains("swarmkeydb_cache_verification_fail_total{privacy_mode=\"none\"} 2", StringComparison.Ordinal), "Expected verification failure counter.");
+    Assert(payload.Contains("swarmkeydb_cache_eviction_by_verification_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "Expected verification eviction counter.");
 
     cts.Cancel();
     await runTask;
@@ -4741,6 +4906,18 @@ internal sealed class StaticCacheSyncStatusProvider : ICacheSyncStatusProvider
     private readonly CacheSyncSnapshot _snapshot;
 
     public StaticCacheSyncStatusProvider(CacheSyncSnapshot snapshot)
+    {
+        _snapshot = snapshot;
+    }
+
+    public CacheSyncSnapshot GetSnapshot() => _snapshot;
+}
+
+internal sealed class MutableCacheSyncStatusProvider : ICacheSyncStatusProvider
+{
+    private CacheSyncSnapshot _snapshot;
+
+    public MutableCacheSyncStatusProvider(CacheSyncSnapshot snapshot)
     {
         _snapshot = snapshot;
     }

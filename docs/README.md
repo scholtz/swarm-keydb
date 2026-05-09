@@ -15,6 +15,7 @@ This folder is the entrypoint for project documentation.
 - `development/docker-release-pipeline.md` documents Docker publishing and stable tag promotion workflows for GitHub Actions.
 - `development/nuget-swarmconsistency-pipeline.md` documents GitHub Actions publishing for the `SwarmKeyDb.SwarmConsistency` NuGet package.
 - `deployment/` covers Docker Compose, Kubernetes manifests, and Helm deployment assets.
+- `operations/` contains production runbooks and dashboard assets.
 - `reference/` documents configuration and environment variables.
 - `development/migration.md` documents Redis-to-SwarmKeyDb migration workflows.
 - `privacy-preserving-queries.md` documents oblivious key-token query mode and migration.
@@ -45,5 +46,7 @@ This folder is the entrypoint for project documentation.
 - `development/docker-release-pipeline.md`
 - `development/nuget-swarmconsistency-pipeline.md`
 - `deployment/README.md`
+- `operations/cache-consistency-runbook.md`
+- `operations/grafana-consistency-health.json`
 - `development/migration.md`
 - `reference/configuration.md`
