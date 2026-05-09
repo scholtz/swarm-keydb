@@ -9,6 +9,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 - Secure key rotation plus immutable Swarm backup/restore workflows for encrypted databases.
 - String, JSON, and binary value helpers in the `SwarmKeyDbClient` library.
 - Default-on SHA-256 integrity verification for values stored in Swarm, with typed corruption errors.
+- Offline-first journaling with cached reads, automatic replay, and conflict hooks for Bee outages.
 - CRDT-backed conflict resolution (LWW register by default, with OR-Set and PN-counter strategies available).
 - Optional cross-chain replication across configured EVM namespaces with per-chain sync status and retries.
 - Prefix scans, lexicographic range scans, predicate queries, and cursor-based iteration.
@@ -27,6 +28,7 @@ Project documentation lives under `docs/`:
 - `docs/api-reference.md`
 - `docs/tutorials/`
 - `docs/privacy-preserving-queries.md`
+- `docs/offline-first.md`
 - `docs/sdk/`
 - `docs/deployment.md`
 - `docs/faq.md`
@@ -68,9 +70,9 @@ dotnet run --project tests/SwarmKeyDb.Tests/SwarmKeyDb.Tests.csproj
 
 ## Multi-language SDKs
 
-- `swarm-keydb-js/` - JavaScript/TypeScript SDK (`get`, `put`, `delete`, `list`, `batchGet`, `batchPut`, `setWithTTL`, `backup`, `restore`, `rotateKey`)
-- `swarm-keydb-py/` - Python SDK with sync and async clients plus `backup`, `restore`, and `rotate_key`
-- `swarm-keydb-go/` - Go SDK with context-aware API, JSON helpers, and `Backup`/`Restore`/`RotateKey`
+- `swarm-keydb-js/` - JavaScript/TypeScript SDK (`get`, `put`, `delete`, `list`, `batchGet`, `batchPut`, `setWithTTL`, `backup`, `restore`, `rotateKey`, `offlineMode`)
+- `swarm-keydb-py/` - Python SDK with sync and async clients plus `backup`, `restore`, `rotate_key`, and `offline_mode`
+- `swarm-keydb-go/` - Go SDK with context-aware API, JSON helpers, `Backup`/`Restore`/`RotateKey`, and `OfflineMode`
 - `swarm-keydb-react/` - React hooks connector with `SwarmKeyDbProvider`, `useSwarmValue`, `useSwarmPut`, `useSwarmDelete`, and `useSwarmKeys`
 - `swarm-keydb-node/` - Node.js connector with `SwarmKeyDbService`, Express/Fastify middleware helpers, retries, pooling, and streaming key scans
 
@@ -89,6 +91,12 @@ Framework connector examples:
 ```bash
 (cd examples/react-app && npm install && npm run dev)
 (cd examples/node-express && npm install && npm start)
+```
+
+Offline-first walkthrough:
+
+```bash
+(cd examples/offline-first && docker compose up --build)
 ```
 
 ## CLI (`skdb`)

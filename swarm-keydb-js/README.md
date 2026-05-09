@@ -40,6 +40,20 @@ const db = new SwarmKeyDb({
 });
 ```
 
+## Offline-first mode
+
+```ts
+import { OfflineMode, SwarmKeyDb } from 'swarm-keydb-js';
+
+const db = new SwarmKeyDb({
+  host: '127.0.0.1',
+  port: 6379,
+  offlineMode: OfflineMode.Auto
+});
+```
+
+Use this with a server started in offline-first mode so queued writes and cached reads stay enabled during Bee outages.
+
 ## Data integrity
 
 The SwarmKeyDb server verifies a SHA-256 integrity envelope on every read by default. If stored Swarm data has been corrupted or tampered with, `get()`/`batchGet()` reject with the wrapped Redis/server error; handle that error path the same way you would handle any failed Redis read.

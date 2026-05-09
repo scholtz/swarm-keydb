@@ -1,0 +1,30 @@
+services:
+  bee:
+    image: ethersphere/bee:latest
+    ports:
+      - "1633:1633"
+    command: ["start", "--verbosity", "warning", "--cache-capacity", "1000000"]
+
+  swarm-keydb:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      - bee
+    environment:
+      SWARM_KEYDB_BACKEND: bee
+      BEE_URL: http://bee:1633/
+      BEE_POSTAGE_BATCH_ID: local-dev-batch
+      SWARM_KEYDB_OFFLINE_MODE: auto
+      SWARM_KEYDB_OFFLINE_JOURNAL: sqlite
+      SWARM_KEYDB_OFFLINE_SYNC_INTERVAL_MS: 1000
+      DASHBOARD_ENABLED: "true"
+      DASHBOARD_PORT: 8080
+    ports:
+      - "6379:6379"
+      - "8080:8080"
+    volumes:
+      - swarm-keydb-data:/app/data
+
+volumes:
+  swarm-keydb-data:
