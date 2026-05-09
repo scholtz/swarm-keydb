@@ -29,6 +29,7 @@ public sealed class RedisCommandProcessor : IDisposable
     private readonly IResyncCoordinator? _resyncCoordinator;
     private readonly PubSubManager? _pubSubManager;
     private readonly ILogger<RedisCommandProcessor> _logger;
+    private readonly StreamTrimOptions _streamTrimOptions;
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
 
     // Shared key-version tracker for WATCH support (incremented on every successful mutation)
@@ -51,6 +52,7 @@ public sealed class RedisCommandProcessor : IDisposable
     private long _streamXClaimTotal;
     private long _streamBlockedReadersTotal;
     private long _streamXReadWakeupTotal;
+    private long _streamTrimmedTotal;
     private readonly object _streamWaitersGate = new();
     private readonly Dictionary<string, HashSet<StreamReadWaiter>> _streamReadWaiters = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Dictionary<string, Queue<StreamReadWaiter>>> _streamReadGroupWaiters = new(StringComparer.Ordinal);
@@ -70,7 +72,8 @@ public sealed class RedisCommandProcessor : IDisposable
         IDidContextAccessor? didContextAccessor = null,
         IDecentralizedIdentityProvider? didProvider = null,
         IResyncCoordinator? resyncCoordinator = null,
-        PubSubManager? pubSubManager = null)
+        PubSubManager? pubSubManager = null,
+        StreamTrimOptions? streamTrimOptions = null)
     {
         _store = store;
         _ethAddressAccessor = ethAddressAccessor;
@@ -83,6 +86,7 @@ public sealed class RedisCommandProcessor : IDisposable
         _logger = logger ?? NullLogger<RedisCommandProcessor>.Instance;
         _resyncCoordinator = resyncCoordinator;
         _pubSubManager = pubSubManager;
+        _streamTrimOptions = streamTrimOptions ?? new StreamTrimOptions();
     }
 
     public async Task ProcessAsync(Stream input, Stream output, CancellationToken cancellationToken = default)
@@ -340,7 +344,7 @@ public sealed class RedisCommandProcessor : IDisposable
         "DEL", "MDEL", "MGET", "MSET", "MSETNX",
         "EXISTS", "EXPIRE", "PEXPIRE", "EXPIREAT",
         "TTL", "PTTL", "PERSIST",
-        "XADD", "XRANGE", "XREVRANGE", "XLEN", "XREAD",
+        "XADD", "XTRIM", "XRANGE", "XREVRANGE", "XLEN", "XREAD",
         "XGROUP", "XREADGROUP", "XACK", "XPENDING", "XCLAIM", "XAUTOCLAIM",
         "KEYS", "SCAN", "TYPE",
         "BACKUP", "RESTOREDB", "ROTATEKEY", "BACKENDMETA",
@@ -530,6 +534,7 @@ public sealed class RedisCommandProcessor : IDisposable
                 break;
 
             case "XADD":
+            case "XTRIM":
             case "XGROUP":
             case "XREADGROUP":
             case "XACK":
@@ -564,11 +569,21 @@ public sealed class RedisCommandProcessor : IDisposable
     {
         var groupCount = 0L;
         var idleConsumerCount = 0L;
+        var streamLengthBytesTotal = 0L;
+        var streamLengthBytesByStream = new Dictionary<string, long>(StringComparer.Ordinal);
 
         foreach (var key in _store.ListKeysAsync().GetAwaiter().GetResult())
         {
             var bytes = _store.GetAsync(key).GetAwaiter().GetResult();
-            if (!TryReadStream(bytes, out var stream) || stream is null || stream.Groups is null)
+            if (bytes is null || !TryReadStream(bytes, out var stream) || stream is null)
+            {
+                continue;
+            }
+
+            streamLengthBytesTotal += bytes.Length;
+            streamLengthBytesByStream[key] = bytes.Length;
+
+            if (stream.Groups is null)
             {
                 continue;
             }
@@ -600,7 +615,10 @@ public sealed class RedisCommandProcessor : IDisposable
             idleConsumerCount,
             Math.Max(0, Interlocked.Read(ref _streamBlockedReadersTotal)),
             Interlocked.Read(ref _streamXReadWakeupTotal),
-            blockedReadersByStream);
+            blockedReadersByStream,
+            Interlocked.Read(ref _streamTrimmedTotal),
+            Math.Max(0, streamLengthBytesTotal),
+            streamLengthBytesByStream);
     }
 
     private static long[] SnapshotBucketCounts(long[] source)
@@ -821,6 +839,7 @@ public sealed class RedisCommandProcessor : IDisposable
                 "SCAN" => await ScanAsync(args, cancellationToken).ConfigureAwait(false),
                 "TYPE" => await TypeAsync(args, cancellationToken).ConfigureAwait(false),
                 "XADD" => await XAddAsync(args, cancellationToken).ConfigureAwait(false),
+                "XTRIM" => await XTrimAsync(args, cancellationToken).ConfigureAwait(false),
                 "XRANGE" => await XRangeAsync(args, reverse: false, cancellationToken).ConfigureAwait(false),
                 "XREVRANGE" => await XRangeAsync(args, reverse: true, cancellationToken).ConfigureAwait(false),
                 "XLEN" => await XLenAsync(args, cancellationToken).ConfigureAwait(false),
@@ -1537,8 +1556,8 @@ public sealed class RedisCommandProcessor : IDisposable
         }
 
         var key = args[1].AsString();
-        long? maxLen = null;
-        var approximate = false;
+        var maxLen = _streamTrimOptions.DefaultMaxLen;
+        var approximate = _streamTrimOptions.DefaultMaxLenApproximate;
         var index = 2;
         if (index < args.Count && args[index].AsString().Equals("MAXLEN", StringComparison.OrdinalIgnoreCase))
         {
@@ -1603,22 +1622,114 @@ public sealed class RedisCommandProcessor : IDisposable
 
             var entries = stream.Entries.ToList();
             entries.Add(new StreamEntry(id!, timestamp, sequence, fields));
-
-            if (maxLen is { } trimTo && entries.Count > trimTo)
+            var updated = new StreamData(entries, timestamp, sequence, stream.Groups);
+            var removedPending = 0;
+            if (maxLen is { } trimTo)
             {
-                var removeCount = entries.Count - (int)trimTo;
-                if (approximate && removeCount == 1 && entries.Count > trimTo + 32)
+                updated = TrimByMaxLen(updated, trimTo, approximate, out var removedEntries, out removedPending);
+                if (removedEntries > 0)
                 {
-                    removeCount = entries.Count - (int)trimTo;
+                    Interlocked.Add(ref _streamTrimmedTotal, removedEntries);
                 }
-
-                entries.RemoveRange(0, removeCount);
             }
 
-            var updated = new StreamData(entries, timestamp, sequence, stream.Groups);
+            if (removedPending > 0)
+            {
+                Interlocked.Add(ref _streamPendingEntriesTotal, -removedPending);
+            }
+
             await _store.PutAsync(key, SerializeStream(updated), cancellationToken).ConfigureAwait(false);
             NotifyStreamWaiters(key);
             return RespValue.BulkString(id);
+        }
+        finally
+        {
+            _mutationGate.Release();
+        }
+    }
+
+    private async Task<RespValue> XTrimAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        if (args.Count < 4)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'XTRIM' command");
+        }
+
+        var key = args[1].AsString();
+        var strategy = args[2].AsString().ToUpperInvariant();
+        var index = 3;
+        var approximate = false;
+        if (index < args.Count)
+        {
+            var mode = args[index].AsString();
+            if (mode == "~")
+            {
+                approximate = true;
+                index++;
+            }
+            else if (mode == "=")
+            {
+                index++;
+            }
+        }
+
+        if (index != args.Count - 1)
+        {
+            return RespValue.Error("ERR syntax error");
+        }
+
+        await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var existing = await _store.GetAsync(key, cancellationToken).ConfigureAwait(false);
+            if (!TryReadStream(existing, out var stream))
+            {
+                return RespValue.Error(WrongTypeError);
+            }
+
+            if (stream is null || stream.Entries.Count == 0)
+            {
+                return RespValue.IntegerValue(0);
+            }
+
+            StreamData updated;
+            int removedEntries;
+            int removedPending;
+            switch (strategy)
+            {
+                case "MAXLEN":
+                    if (!long.TryParse(args[index].AsString(), out var maxLen) || maxLen < 0)
+                    {
+                        return RespValue.Error("ERR invalid arguments");
+                    }
+
+                    updated = TrimByMaxLen(stream, maxLen, approximate, out removedEntries, out removedPending);
+                    break;
+                case "MINID":
+                    if (!TryParseStreamId(args[index].AsString(), out var minTs, out var minSeq))
+                    {
+                        return RespValue.Error("ERR invalid arguments");
+                    }
+
+                    updated = TrimByMinId(stream, minTs, minSeq, approximate, out removedEntries, out removedPending);
+                    break;
+                default:
+                    return RespValue.Error("ERR syntax error");
+            }
+
+            if (removedEntries <= 0)
+            {
+                return RespValue.IntegerValue(0);
+            }
+
+            if (removedPending > 0)
+            {
+                Interlocked.Add(ref _streamPendingEntriesTotal, -removedPending);
+            }
+
+            Interlocked.Add(ref _streamTrimmedTotal, removedEntries);
+            await _store.PutAsync(key, SerializeStream(updated), cancellationToken).ConfigureAwait(false);
+            return RespValue.IntegerValue(removedEntries);
         }
         finally
         {
@@ -2813,6 +2924,146 @@ public sealed class RedisCommandProcessor : IDisposable
         });
     }
 
+    private static StreamData TrimByMaxLen(
+        StreamData stream,
+        long maxLen,
+        bool approximate,
+        out int removedEntries,
+        out int removedPending)
+    {
+        removedEntries = 0;
+        removedPending = 0;
+        if (stream.Entries.Count == 0)
+        {
+            return stream;
+        }
+
+        long targetLen = maxLen;
+        if (approximate && maxLen > 0)
+        {
+            var slack = (long)Math.Floor(maxLen * 0.1);
+            targetLen = maxLen + slack;
+        }
+
+        if (targetLen < 0 || stream.Entries.Count <= targetLen)
+        {
+            return stream;
+        }
+
+        var removeCountLong = stream.Entries.Count - targetLen;
+        if (removeCountLong <= 0)
+        {
+            return stream;
+        }
+
+        var removeCount = (int)Math.Min(int.MaxValue, removeCountLong);
+        return TrimFirstEntries(stream, removeCount, out removedEntries, out removedPending);
+    }
+
+    private static StreamData TrimByMinId(
+        StreamData stream,
+        ulong thresholdTimestamp,
+        ulong thresholdSequence,
+        bool approximate,
+        out int removedEntries,
+        out int removedPending)
+    {
+        removedEntries = 0;
+        removedPending = 0;
+        if (stream.Entries.Count == 0)
+        {
+            return stream;
+        }
+
+        var removeCount = 0;
+        foreach (var entry in stream.Entries)
+        {
+            if (CompareStreamIds(entry.Timestamp, entry.Sequence, thresholdTimestamp, thresholdSequence) >= 0)
+            {
+                break;
+            }
+
+            removeCount++;
+        }
+
+        if (removeCount <= 0)
+        {
+            return stream;
+        }
+
+        if (approximate && removeCount < stream.Entries.Count)
+        {
+            var slack = Math.Max(1, (int)Math.Ceiling(stream.Entries.Count * 0.1));
+            removeCount = Math.Max(0, removeCount - Math.Min(removeCount, slack));
+        }
+
+        if (removeCount <= 0)
+        {
+            return stream;
+        }
+
+        return TrimFirstEntries(stream, removeCount, out removedEntries, out removedPending);
+    }
+
+    private static StreamData TrimFirstEntries(StreamData stream, int removeCount, out int removedEntries, out int removedPending)
+    {
+        removedEntries = 0;
+        removedPending = 0;
+        if (removeCount <= 0 || stream.Entries.Count == 0)
+        {
+            return stream;
+        }
+
+        var boundedRemoveCount = Math.Min(removeCount, stream.Entries.Count);
+        var removed = stream.Entries.Take(boundedRemoveCount).ToArray();
+        var kept = stream.Entries.Skip(boundedRemoveCount).ToArray();
+        if (removed.Length == 0)
+        {
+            return stream;
+        }
+
+        removedEntries = removed.Length;
+        var removedIds = removed.Select(static entry => entry.Id).ToHashSet(StringComparer.Ordinal);
+        if (stream.Groups is null || stream.Groups.Count == 0)
+        {
+            return stream with { Entries = kept };
+        }
+
+        var groups = CloneGroups(stream);
+        var groupsChanged = false;
+        foreach (var groupEntry in groups.ToArray())
+        {
+            var group = groupEntry.Value;
+            var pending = ClonePending(group);
+            var pendingRemovedForGroup = 0;
+            foreach (var pendingId in pending.Keys.ToArray())
+            {
+                if (!removedIds.Contains(pendingId))
+                {
+                    continue;
+                }
+
+                pending.Remove(pendingId);
+                pendingRemovedForGroup++;
+            }
+
+            if (pendingRemovedForGroup == 0)
+            {
+                continue;
+            }
+
+            removedPending += pendingRemovedForGroup;
+            groups[groupEntry.Key] = group with { Pending = pending };
+            groupsChanged = true;
+        }
+
+        return new StreamData(
+            kept,
+            stream.LastTimestamp,
+            stream.LastSequence,
+            groupsChanged ? groups : stream.Groups);
+    }
+
     private static bool TryResolveXAddId(string token, ulong lastTs, ulong lastSeq, out ulong timestamp, out ulong sequence, out string? id, out string? error)
     {
         timestamp = 0;
@@ -3281,7 +3532,7 @@ public sealed class RedisCommandProcessor : IDisposable
         "DEL" => "delete",
         "KEYS" or "SCAN" => "list",
         "MGET" or "MSET" or "MSETNX" or "MDEL" => "batch",
-        "XADD" or "XRANGE" or "XREVRANGE" or "XLEN" or "XREAD" or "XGROUP" or "XREADGROUP" or "XACK" or "XPENDING" or "XCLAIM" or "XAUTOCLAIM" => "stream",
+        "XADD" or "XTRIM" or "XRANGE" or "XREVRANGE" or "XLEN" or "XREAD" or "XGROUP" or "XREADGROUP" or "XACK" or "XPENDING" or "XCLAIM" or "XAUTOCLAIM" => "stream",
         "PUBLISH" => "pubsub",
         "SUBSCRIBE" or "UNSUBSCRIBE" or "PSUBSCRIBE" or "PUNSUBSCRIBE" or "PUBSUB" => "pubsub",
         "MULTI" or "EXEC" or "DISCARD" or "WATCH" or "UNWATCH" => "transaction",
@@ -3327,4 +3578,7 @@ public sealed record StreamMetricsSnapshot(
     long IdleConsumerCount,
     long BlockedReaders,
     long XReadWakeupTotal,
-    IReadOnlyDictionary<string, long> BlockedReadersByStream);
+    IReadOnlyDictionary<string, long> BlockedReadersByStream,
+    long TrimmedTotal,
+    long StreamLengthBytesTotal,
+    IReadOnlyDictionary<string, long> StreamLengthBytesByStream);

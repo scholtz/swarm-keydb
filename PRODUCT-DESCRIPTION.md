@@ -27,7 +27,7 @@ Traditional Redis-style deployments still struggle with multi-instance data avai
 
 - **Delivered foundation (implemented):** TTL/expiration, batch operations, range and prefix scans, CRDT merge strategies, encryption, ACL and DID authorization, backup/restore/key rotation, offline-first sync, consistency verification middleware, cross-instance cache invalidation + anti-entropy + partial/full resync, Redis Pub/Sub parity, Redis transaction semantics (`MULTI`/`EXEC`/`WATCH`), stream core + consumer-group workflows (including blocking `XREAD`/`XREADGROUP` wake/timeout behavior), Docker and Helm release automation, IPFS and Ethereum integrations, cross-chain sync, and SDK/connectors (JS, Python, Go, React, Node).
 - **Current unresolved gaps (active roadmap):**
-	- **Streams retention and resilience hardening:** finalize retention policy behavior and add more failure-injection coverage for crash recovery, duplicate delivery, and re-delivery from pending entries.
+	- **Streams retention and resilience hardening:** completed with `XTRIM` (`MAXLEN` + `MINID`), default `XADD` retention config, retention metrics/dashboard coverage, and failure-injection tests for restart recovery, duplicate ACK idempotency, PEL re-delivery, and concurrent-group isolation.
 	- **Scripting safety:** implement `EVAL`/`EVALSHA`/script cache support with deterministic sandboxing and runtime guardrails.
 	- **Operability hardening:** expand command compatibility (`INFO`/`COMMAND`/`CLIENT`/`CONFIG GET`), parser conformance tests, adaptive active-expiry budgeting, and memory-pressure controls.
 - **Issue-informed compatibility priorities (next roadmap):**

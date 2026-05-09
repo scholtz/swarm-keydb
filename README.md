@@ -4,7 +4,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 
 ## Features
 
-- Redis-compatible commands for `PING`, `SET`, `SETEX`, `PSETEX`, `GET`, `MGET`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXISTS`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `KEYS`, `SCAN`, `TYPE`, `XADD`, `XRANGE`, `XREVRANGE`, `XLEN`, `XREAD`, `XGROUP`, `XREADGROUP`, `XACK`, `XPENDING`, `XCLAIM`, `XAUTOCLAIM`, `SWARM.RESYNC`, and `QUIT`.
+- Redis-compatible commands for `PING`, `SET`, `SETEX`, `PSETEX`, `GET`, `MGET`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXISTS`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `KEYS`, `SCAN`, `TYPE`, `XADD`, `XTRIM`, `XRANGE`, `XREVRANGE`, `XLEN`, `XREAD`, `XGROUP`, `XREADGROUP`, `XACK`, `XPENDING`, `XCLAIM`, `XAUTOCLAIM`, `SWARM.RESYNC`, and `QUIT`.
 - Connection-scoped Ethereum-address ACL enforcement via `AUTHADDR` for shared databases.
 - Secure key rotation plus immutable Swarm backup/restore workflows for encrypted databases.
 - String, JSON, and binary value helpers in the `SwarmKeyDbClient` library.
@@ -33,6 +33,7 @@ Project documentation lives under `docs/`:
 - `docs/sdk/`
 - `docs/deployment.md`
 - `docs/operations/cache-consistency-runbook.md`
+- `docs/stream-sizing-guide.md`
 - `docs/faq.md`
 
 ## Quickstart (put/get round-trip)
@@ -182,7 +183,21 @@ SET profile:name Ada EX 60        -> +OK
 SWARM.RESYNC PARTIAL              -> {"status":"ok","mode":"partial",...}
 XADD events * type created user ada -> $<id-len>\r\n<ms>-<seq>
 XRANGE events - +                  -> *1\r\n*2\r\n$<id-len>\r\n<ms>-<seq>\r\n*4\r\n$4\r\ntype\r\n$7\r\ncreated\r\n$4\r\nuser\r\n$3\r\nada
+XTRIM events MAXLEN ~ 10000         -> :<trimmed-count>
+XTRIM events MINID 1715200000000-0  -> :<trimmed-count>
 ```
+
+## Stream retention configuration
+
+- Configure default stream retention for `XADD` without inline `MAXLEN`:
+  - `SWARM_KEYDB_STREAM_DEFAULT_MAXLEN=<entries>`
+  - `SWARM_KEYDB_STREAM_DEFAULT_MAXLEN_APPROXIMATE=true|false`
+- Manual retention controls:
+  - `XTRIM key MAXLEN [~|=] count`
+  - `XTRIM key MINID [~|=] threshold-id`
+- Metrics:
+  - `swarmkeydb_stream_trimmed_total`
+  - `swarmkeydb_stream_length_bytes` (total and per-stream labeled series)
 
 ## Querying
 
