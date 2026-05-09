@@ -39,9 +39,10 @@ public sealed class ScriptReplicationManager : IDisposable
         _enabled = syncOptions?.Enabled == true && syncBus is not null && !ReferenceEquals(syncBus, NoOpCacheSyncBus.Instance);
         if (_enabled)
         {
-            _subscription = _syncBus! is ICacheSyncBusWithNodeSubscriptions withNodeSubscriptions
+            var bus = _syncBus!;
+            _subscription = bus is ICacheSyncBusWithNodeSubscriptions withNodeSubscriptions
                 ? withNodeSubscriptions.SubscribeInvalidations(_nodeId, HandleInvalidationAsync)
-                : _syncBus.SubscribeInvalidations(HandleInvalidationAsync);
+                : bus.SubscribeInvalidations(HandleInvalidationAsync);
         }
     }
 
