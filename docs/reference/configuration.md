@@ -14,6 +14,10 @@
 | `SWARM_KEYDB_CACHE_ENABLED` | `true` | Enables the read-through cache. |
 | `SWARM_KEYDB_CACHE_MAX_ENTRIES` | `1000` | Maximum number of cached entries. |
 | `SWARM_KEYDB_CACHE_DEFAULT_TTL_SECONDS` | unset | Optional upper bound for cache entry lifetime. |
+| `SWARM_KEYDB_SYNC_PEERS` | unset | Comma-separated or JSON array of Redis endpoints used for cache invalidation pub/sub. |
+| `SWARM_KEYDB_SYNC_INTERVAL_SEC` | `5` | Anti-entropy reconciliation interval for cross-instance cache version checks. |
+| `SWARM_KEYDB_SYNC_CHANNEL` | `swarm-keydb-sync` | Redis pub/sub channel used for version-stamped cache invalidation events. |
+| `SWARM_KEYDB_SYNC_NODE_ID` | `<machine>:<port>` | Optional stable node identifier used in sync event source metadata. |
 | `SWARM_KEYDB_OFFLINE_MODE` | `never` | Offline-first mode (`never`, `auto`, `always`). |
 | `SWARM_KEYDB_OFFLINE_JOURNAL` | `memory` | Offline journal backend (`memory`, `sqlite`). |
 | `SWARM_KEYDB_OFFLINE_SYNC_INTERVAL_MS` | `5000` | Replay polling interval used by `OfflineSyncService`. |

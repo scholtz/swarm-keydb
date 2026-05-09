@@ -90,6 +90,8 @@ var tests = new (string Name, Func<Task> Test)[]
     ("caching store delete invalidates cache", CachingKeyValueStoreDeleteInvalidatesCacheAsync),
     ("caching store respects key ttl", CachingKeyValueStoreRespectsKeyTtlAsync),
     ("caching store max entries evicts lru", CachingKeyValueStoreMaxEntriesEvictsLruAsync),
+    ("cache sync invalidation propagates across instances", CacheSyncInvalidationPropagatesAcrossInstancesAsync),
+    ("cache sync anti entropy reconciles after partition", CacheSyncAntiEntropyReconcilesAfterPartitionAsync),
     ("compressing store put stores compressed value", CompressingKeyValueStorePutStoresCompressedValueAsync),
     ("compressing store get returns decompressed value", CompressingKeyValueStoreGetReturnsDecompressedValueAsync),
     ("compressing store skips compression below min size", CompressingKeyValueStoreSkipsCompressionBelowMinSizeAsync),
@@ -142,6 +144,7 @@ var tests = new (string Name, Func<Task> Test)[]
     ("monitoring backend endpoint reports backend connectivity", MonitoringBackendEndpointReportsBackendConnectivityAsync),
     ("monitoring health and dashboard expose offline queue depth", MonitoringHealthAndDashboardExposeOfflineQueueDepthAsync),
     ("monitoring health and dashboard expose consistency verification metrics", MonitoringHealthAndDashboardExposeConsistencyMetricsAsync),
+    ("monitoring health and dashboard expose cache sync metrics", MonitoringHealthAndDashboardExposeCacheSyncMetricsAsync),
     ("redis command logging includes correlation ids", RedisCommandLoggingIncludesCorrelationIdsAsync),
     ("redis management commands backup restore and rotate", RedisManagementCommandsBackupRestoreAndRotateAsync),
     ("migrate scan pattern applies prefix filter", MigrateScanPatternAppliesPrefixFilterAsync),
@@ -1794,6 +1797,61 @@ static async Task CachingKeyValueStoreMaxEntriesEvictsLruAsync()
     Assert(store.Evictions > 0, "Expected at least one cache eviction.");
 }
 
+static async Task CacheSyncInvalidationPropagatesAcrossInstancesAsync()
+{
+    var remote = new CountingKeyValueStore();
+    var bus = new InMemoryCacheSyncBus();
+    var syncA = Options.Create(new CacheSyncOptions { Enabled = true, NodeId = "node-a", Peers = ["node-b"], SyncIntervalSeconds = 1 });
+    var syncB = Options.Create(new CacheSyncOptions { Enabled = true, NodeId = "node-b", Peers = ["node-a"], SyncIntervalSeconds = 1 });
+    var storeA = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: syncA);
+    var storeB = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: syncB);
+
+    await storeA.PutAsync("sync:key", Encoding.UTF8.GetBytes("v1"));
+    _ = await storeB.GetAsync("sync:key");
+    AssertEqual("v1", Encoding.UTF8.GetString((await storeB.GetAsync("sync:key"))!));
+
+    await storeA.PutAsync("sync:key", Encoding.UTF8.GetBytes("v2"));
+    var refreshed = await WaitUntilValueAsync(
+        action: () => storeB.GetAsync("sync:key"),
+        predicate: value => value is not null && Encoding.UTF8.GetString(value) == "v2",
+        timeout: TimeSpan.FromSeconds(2),
+        pollInterval: TimeSpan.FromMilliseconds(50));
+
+    AssertEqual("v2", Encoding.UTF8.GetString(refreshed!));
+}
+
+static async Task CacheSyncAntiEntropyReconcilesAfterPartitionAsync()
+{
+    var remote = new CountingKeyValueStore();
+    var bus = new InMemoryCacheSyncBus();
+    var syncA = new CacheSyncOptions { Enabled = true, NodeId = "node-a", Peers = ["node-b"], SyncIntervalSeconds = 1 };
+    var syncB = new CacheSyncOptions { Enabled = true, NodeId = "node-b", Peers = ["node-a"], SyncIntervalSeconds = 1 };
+    var storeA = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: Options.Create(syncA));
+    var storeB = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: Options.Create(syncB));
+    var serviceA = new AntiEntropyService(storeA, bus, syncA, NullLogger<AntiEntropyService>.Instance);
+    var serviceB = new AntiEntropyService(storeB, bus, syncB, NullLogger<AntiEntropyService>.Instance);
+
+    await storeA.PutAsync("partition:key", Encoding.UTF8.GetBytes("v1"));
+    _ = await storeB.GetAsync("partition:key");
+    AssertEqual("v1", Encoding.UTF8.GetString((await storeB.GetAsync("partition:key"))!));
+
+    bus.SetNodeConnected("node-b", false);
+    await storeA.PutAsync("partition:key", Encoding.UTF8.GetBytes("v2"));
+    AssertEqual("v1", Encoding.UTF8.GetString((await storeB.GetAsync("partition:key"))!));
+
+    bus.SetNodeConnected("node-b", true);
+    await serviceA.TriggerReconciliationAsync();
+    await serviceB.TriggerReconciliationAsync();
+
+    var converged = await WaitUntilValueAsync(
+        action: () => storeB.GetAsync("partition:key"),
+        predicate: value => value is not null && Encoding.UTF8.GetString(value) == "v2",
+        timeout: TimeSpan.FromSeconds(2),
+        pollInterval: TimeSpan.FromMilliseconds(50));
+
+    AssertEqual("v2", Encoding.UTF8.GetString(converged!));
+}
+
 static async Task MonitoringMetricsEndpointExposesCountersAsync()
 {
     var cacheStats = new FakeCacheStats { Hits = 3, Misses = 1 };
@@ -2002,6 +2060,46 @@ static async Task MonitoringHealthAndDashboardExposeConsistencyMetricsAsync()
     server.Dispose();
 }
 
+static async Task MonitoringHealthAndDashboardExposeCacheSyncMetricsAsync()
+{
+    var snapshot = new CacheSyncSnapshot(
+        LastSuccessfulSyncUtc: new DateTimeOffset(2026, 05, 09, 02, 00, 00, TimeSpan.Zero),
+        PeerCount: 2,
+        ReconciledKeysLastCycle: 7,
+        PendingReconciliations: 1,
+        LastError: "partition healed");
+    var metrics = new MonitoringMetrics(
+        () => NoOpCacheStats.Instance,
+        () => NoOpOfflineStatusProvider.Instance,
+        () => NoOpConsistencyVerificationStatusProvider.Instance);
+    var port = TestNetHelpers.GetFreePort();
+    var server = new MonitoringHttpServer(
+        IPAddress.Loopback,
+        port,
+        metrics,
+        new StaticReadinessProbe(ready: true, message: "ready"),
+        metricsEnabled: true,
+        dashboardEnabled: true,
+        NullLogger<MonitoringHttpServer>.Instance,
+        cacheSyncStatusProvider: new StaticCacheSyncStatusProvider(snapshot));
+    using var cts = new CancellationTokenSource();
+    var runTask = server.RunAsync(cts.Token);
+    using var client = new HttpClient();
+
+    var readyPayload = await client.GetStringAsync($"http://127.0.0.1:{port}/ready");
+    Assert(readyPayload.Contains("\"cacheSync\":", StringComparison.Ordinal), "Expected cache sync object in ready payload.");
+    Assert(readyPayload.Contains("\"peerCount\":2", StringComparison.Ordinal), "Expected peer count in ready payload.");
+    Assert(readyPayload.Contains("\"reconciledKeysLastCycle\":7", StringComparison.Ordinal), "Expected reconciled key count in ready payload.");
+
+    var dashboard = await client.GetStringAsync($"http://127.0.0.1:{port}/dashboard");
+    Assert(dashboard.Contains("Cache Sync Status", StringComparison.Ordinal), "Expected cache sync section in dashboard HTML.");
+    Assert(dashboard.Contains("cache-sync-peer-count", StringComparison.Ordinal), "Expected cache sync peer element in dashboard HTML.");
+
+    cts.Cancel();
+    await runTask;
+    server.Dispose();
+}
+
 static async Task RedisCommandLoggingIncludesCorrelationIdsAsync()
 {
     var logger = new CaptureLogger<RedisCommandProcessor>();
@@ -2063,7 +2161,12 @@ static async Task RedisManagementCommandsBackupRestoreAndRotateAsync()
 static RedisCommandProcessor CreateProcessor() =>
     new(new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()));
 
-static CachingKeyValueStore CreateCachingStore(CountingKeyValueStore inner, int maxEntries, TimeSpan? defaultEntryTtl = null)
+static CachingKeyValueStore CreateCachingStore(
+    CountingKeyValueStore inner,
+    int maxEntries,
+    TimeSpan? defaultEntryTtl = null,
+    ICacheSyncBus? syncBus = null,
+    IOptions<CacheSyncOptions>? syncOptions = null)
 {
     var options = Options.Create(new CacheOptions
     {
@@ -2072,7 +2175,13 @@ static CachingKeyValueStore CreateCachingStore(CountingKeyValueStore inner, int 
         DefaultEntryTtl = defaultEntryTtl
     });
     var cache = new MemoryCache(new MemoryCacheOptions());
-    return new CachingKeyValueStore(inner, cache, options, NullLogger<CachingKeyValueStore>.Instance);
+    return new CachingKeyValueStore(
+        inner,
+        cache,
+        options,
+        NullLogger<CachingKeyValueStore>.Instance,
+        syncBus,
+        syncOptions);
 }
 
 static AsyncQueuedKeyValueStore CreateAsyncQueuedStore(
@@ -4478,6 +4587,18 @@ internal sealed class StaticConsistencyVerificationStatusProvider : IConsistency
     }
 
     public ConsistencyVerificationSnapshot GetSnapshot() => _snapshot;
+}
+
+internal sealed class StaticCacheSyncStatusProvider : ICacheSyncStatusProvider
+{
+    private readonly CacheSyncSnapshot _snapshot;
+
+    public StaticCacheSyncStatusProvider(CacheSyncSnapshot snapshot)
+    {
+        _snapshot = snapshot;
+    }
+
+    public CacheSyncSnapshot GetSnapshot() => _snapshot;
 }
 
 internal sealed class ToggleConnectivityProbe : IConnectivityProbe

@@ -299,8 +299,12 @@ The server enables an in-memory read-through cache by default for hot keys. Conf
 - `SWARM_KEYDB_CACHE_ENABLED` (`true`/`false`, default `true`)
 - `SWARM_KEYDB_CACHE_MAX_ENTRIES` (default `1000`)
 - `SWARM_KEYDB_CACHE_DEFAULT_TTL_SECONDS` (optional cap for cache-entry lifetime)
+- `SWARM_KEYDB_SYNC_PEERS` (comma-separated or JSON array of Redis pub/sub endpoints used for cross-instance cache invalidation)
+- `SWARM_KEYDB_SYNC_INTERVAL_SEC` (default `5`, anti-entropy reconciliation interval)
+- `SWARM_KEYDB_SYNC_CHANNEL` (default `swarm-keydb-sync`, Redis pub/sub channel for invalidation events)
 
 Writes (`SET`, `SETEX`, `MSET`, etc.), deletes, and TTL changes invalidate cached entries so subsequent reads refresh from Swarm/index data.
+When `SWARM_KEYDB_SYNC_PEERS` is configured, each write publishes version-stamped invalidation events and anti-entropy reconciliation periodically refreshes stale peers after temporary partitions.
 
 ### Async high-throughput write queue
 
@@ -321,6 +325,8 @@ SwarmKeyDb now exposes production observability endpoints:
 - `GET /backend` (per-backend connectivity state for `swarm`, `ipfs`, or `hybrid`)
 - `GET /dashboard` (lightweight HTML dashboard, default port `8080`)
 - `GET /logs` (recent structured command logs with correlation IDs)
+
+`/dashboard` now includes a **Cache Sync Status** panel with peer count, last successful sync, reconciled key count for the last cycle, pending reconciliations, and the latest sync error (if any).
 
 Configuration (environment variables override `appsettings.json`):
 

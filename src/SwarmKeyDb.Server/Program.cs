@@ -115,6 +115,7 @@ var ethereumBridgeOptions = new EthereumBridgeOptions
     ReconnectDelaySeconds = GetNullableIntFromMany("ETH_RECONNECT_DELAY_SECONDS", "Ethereum:ReconnectDelaySeconds") ?? 5
 };
 var crossChainOptions = GetCrossChainOptions();
+var cacheSyncOptions = GetCacheSyncOptions();
 var services = new ServiceCollection();
 services.AddLogging(builder =>
 {
@@ -144,6 +145,7 @@ services.AddSingleton<IOptions<IntegrityOptions>>(Options.Create(integrityOption
 services.AddSingleton<IOptions<AclOptions>>(Options.Create(aclOptions));
 services.AddSingleton<IOptions<AsyncProcessingOptions>>(Options.Create(asyncProcessingOptions));
 services.AddSingleton<IOptions<SwarmKeyDbOptions>>(Options.Create(privacyOptions));
+services.AddSingleton<IOptions<CacheSyncOptions>>(Options.Create(cacheSyncOptions));
 services.AddSingleton<IEncryptionKeyProvider>(_ => new MutableEncryptionKeyProvider(encryptionOptions));
 services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
 services.AddSingleton<IEthAddressAccessor, AsyncLocalEthAddressAccessor>();
@@ -153,6 +155,26 @@ if (didMode != DidAuthMode.None)
     services.AddSingleton<IDecentralizedIdentityProvider>(
         _ => new EthrDidProvider(new EthrDidProviderOptions { RpcUrl = didRpcUrl }));
 }
+services.AddSingleton<ICacheSyncBus>(sp =>
+{
+    if (!cacheSyncOptions.Enabled || cacheSyncOptions.Peers.Count == 0)
+    {
+        return NoOpCacheSyncBus.Instance;
+    }
+
+    var logger = sp.GetRequiredService<ILogger<RedisCacheSyncBus>>();
+    try
+    {
+        return new RedisCacheSyncBus(cacheSyncOptions.Peers, cacheSyncOptions.Channel, logger);
+    }
+    catch (Exception ex)
+    {
+        logger.LogWarning(
+            ex,
+            "Cache sync bus initialization failed; continuing with local-only cache mode.");
+        return NoOpCacheSyncBus.Instance;
+    }
+});
 IReadinessProbe readinessProbe;
 IShardHealthProvider? shardHealthProvider = null;
 IBackendStatusProvider? backendStatusProvider = null;
@@ -342,6 +364,19 @@ if (privacyOptions.OfflineMode != OfflineMode.Never)
             TimeSpan.FromMilliseconds(privacyOptions.OfflineSyncIntervalMs),
             sp.GetRequiredService<ILogger<OfflineSyncService>>()));
 }
+services.AddSingleton<ICacheSyncStatusProvider>(sp =>
+{
+    if (!cacheSyncOptions.Enabled || sp.GetRequiredService<IKeyValueStore>() is not ICacheSyncParticipant participant)
+    {
+        return NoOpCacheSyncStatusProvider.Instance;
+    }
+
+    return new AntiEntropyService(
+        participant,
+        sp.GetRequiredService<ICacheSyncBus>(),
+        cacheSyncOptions,
+        sp.GetRequiredService<ILogger<AntiEntropyService>>());
+});
 
 using var provider = services.BuildServiceProvider();
 cacheStats = provider.GetRequiredService<ICacheStats>();
@@ -349,9 +384,11 @@ consistencyStatusMetrics = provider.GetService<IConsistencyVerificationStatusPro
 var baseStore = provider.GetRequiredService<IKeyValueStore>();
 var offlineStatusProvider = provider.GetRequiredService<IOfflineStatusProvider>();
 var consistencyStatusProvider = provider.GetRequiredService<IConsistencyVerificationStatusProvider>();
+var cacheSyncStatusProvider = provider.GetService<ICacheSyncStatusProvider>() ?? NoOpCacheSyncStatusProvider.Instance;
 offlineStatusMetrics = offlineStatusProvider;
 CrossChainSyncService? crossChainSyncService = null;
 OfflineSyncService? offlineSyncService = provider.GetService<OfflineSyncService>();
+AntiEntropyService? antiEntropyService = cacheSyncStatusProvider as AntiEntropyService;
 IKeyValueStore commandStore = baseStore;
 if (crossChainOptions.Enabled && crossChainOptions.Chains.Count > 0)
 {
@@ -414,6 +451,11 @@ if (offlineSyncService is not null)
     await offlineSyncService.StartAsync(cts.Token);
 }
 
+if (antiEntropyService is not null)
+{
+    await antiEntropyService.StartAsync(cts.Token);
+}
+
 var monitoringServers = new List<MonitoringHttpServer>();
 var monitoringTasks = new List<Task>();
 if (dashboardEnabled)
@@ -432,6 +474,7 @@ if (dashboardEnabled)
         crossChainSyncService,
         offlineStatusProvider,
         consistencyStatusProvider,
+        cacheSyncStatusProvider,
         privacyMode: privacyOptions.PrivacyMode,
         didMode: privacyOptions.DidMode);
     monitoringServers.Add(dashboardServer);
@@ -454,6 +497,7 @@ if (metricsEnabled && (!dashboardEnabled || metricsPort != dashboardPort))
         crossChainSyncService,
         offlineStatusProvider,
         consistencyStatusProvider,
+        cacheSyncStatusProvider,
         privacyMode: privacyOptions.PrivacyMode,
         didMode: privacyOptions.DidMode);
     monitoringServers.Add(metricsServer);
@@ -476,6 +520,11 @@ if (crossChainSyncService is not null)
 if (offlineSyncService is not null)
 {
     await offlineSyncService.DisposeAsync();
+}
+
+if (antiEntropyService is not null)
+{
+    await antiEntropyService.DisposeAsync();
 }
 
 foreach (var monitoringServer in monitoringServers)
@@ -767,6 +816,20 @@ CrossChainOptions GetCrossChainOptions()
     return options;
 }
 
+CacheSyncOptions GetCacheSyncOptions()
+{
+    var peers = ParseStringArray(GetFirstSetting("SWARM_KEYDB_SYNC_PEERS", "CacheSync:Peers"));
+    return new CacheSyncOptions
+    {
+        Enabled = peers.Count > 0,
+        Peers = peers,
+        SyncIntervalSeconds = Math.Max(1, GetNullableIntFromMany("SWARM_KEYDB_SYNC_INTERVAL_SEC", "CacheSync:IntervalSec") ?? 5),
+        Channel = GetFirstSetting("SWARM_KEYDB_SYNC_CHANNEL", "CacheSync:Channel") ?? "swarm-keydb-sync",
+        NodeId = GetFirstSetting("SWARM_KEYDB_SYNC_NODE_ID", "CacheSync:NodeId")
+                 ?? $"{Environment.MachineName}:{port}"
+    };
+}
+
 IReadOnlyList<int> ParseIntArray(string? json)
 {
     if (string.IsNullOrWhiteSpace(json))
@@ -796,6 +859,33 @@ IReadOnlyList<int> ParseIntArray(string? json)
     return json.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
         .Select(static value => int.Parse(value, System.Globalization.CultureInfo.InvariantCulture))
         .ToArray();
+}
+
+IReadOnlyList<string> ParseStringArray(string? raw)
+{
+    if (string.IsNullOrWhiteSpace(raw))
+    {
+        return [];
+    }
+
+    try
+    {
+        using var document = JsonDocument.Parse(raw);
+        if (document.RootElement.ValueKind == JsonValueKind.Array)
+        {
+            return document.RootElement.EnumerateArray()
+                .Where(static element => element.ValueKind == JsonValueKind.String)
+                .Select(static element => element.GetString())
+                .Where(static value => !string.IsNullOrWhiteSpace(value))
+                .Cast<string>()
+                .ToArray();
+        }
+    }
+    catch (JsonException)
+    {
+    }
+
+    return raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 }
 
 IReadOnlyList<ChainAdapterOptions> ParseCrossChainAdapters(string? json)
