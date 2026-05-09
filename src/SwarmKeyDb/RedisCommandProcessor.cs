@@ -338,6 +338,9 @@ public sealed class RedisCommandProcessor : IDisposable
     /// </summary>
     private async Task<RespValue> ExecTransactionAsync(TransactionState tx, CancellationToken cancellationToken)
     {
+        // Count every EXEC attempt so abort_rate = abort_total / exec_total is meaningful
+        Interlocked.Increment(ref _txExecTotal);
+
         // Syntax error during queuing → abort the whole transaction
         if (tx.HasQueueError)
         {
@@ -361,7 +364,6 @@ public sealed class RedisCommandProcessor : IDisposable
         // Snapshot and clear the queue before executing so that nested commands behave correctly
         var queue = tx.CommandQueue.ToArray();
         tx.Reset();
-        Interlocked.Increment(ref _txExecTotal);
 
         var results = new RespValue[queue.Length];
         for (var i = 0; i < queue.Length; i++)
@@ -387,7 +389,7 @@ public sealed class RedisCommandProcessor : IDisposable
         if (!KnownQueueableCommands.Contains(command))
         {
             tx.HasQueueError = true;
-            return RespValue.Error($"ERR unknown command `{command}`, with args beginning with: ");
+            return RespValue.Error($"ERR unknown command `{command}`");
         }
 
         tx.CommandQueue.Add(request);

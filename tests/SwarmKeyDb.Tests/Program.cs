@@ -3582,7 +3582,7 @@ static async Task RedisMultiUnknownCommandMarksQueueErrorAsync()
         RespCommand("EXEC"));
 
     // The unknown command should return an error during queuing
-    Assert(response.Contains("-ERR unknown command", StringComparison.Ordinal), "Unknown command during MULTI must return error.");
+    Assert(response.Contains("-ERR unknown command `UNKNOWNCMD`", StringComparison.Ordinal), "Unknown command during MULTI must return error.");
     // EXEC must return EXECABORT since there was a queue error
     Assert(response.Contains("-EXECABORT", StringComparison.Ordinal), "EXEC must return EXECABORT when a queue error was set.");
 }

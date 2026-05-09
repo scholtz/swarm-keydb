@@ -164,7 +164,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine("# TYPE swarmkeydb_pubsub_messages_published_total counter");
         builder.AppendLine("# HELP swarmkeydb_pubsub_messages_dropped_total Total messages dropped due to slow or full subscriber buffers.");
         builder.AppendLine("# TYPE swarmkeydb_pubsub_messages_dropped_total counter");
-        builder.AppendLine("# HELP swarmkeydb_transaction_exec_total Total EXEC commands executed (including aborted transactions).");
+        builder.AppendLine("# HELP swarmkeydb_transaction_exec_total Total EXEC invocations (successful and aborted).");
         builder.AppendLine("# TYPE swarmkeydb_transaction_exec_total counter");
         builder.AppendLine("# HELP swarmkeydb_transaction_abort_total Total transactions aborted (EXECABORT or WATCH conflict).");
         builder.AppendLine("# TYPE swarmkeydb_transaction_abort_total counter");
