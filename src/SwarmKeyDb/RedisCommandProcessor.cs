@@ -643,9 +643,6 @@ public sealed class RedisCommandProcessor : IDisposable
 
     private static void AddDouble(ref double target, double delta)
     {
-        var deadlineUtc = blockMilliseconds is > 0
-            ? DateTime.UtcNow.AddMilliseconds(blockMilliseconds.Value)
-            : (DateTime?)null;
         while (true)
         {
             var current = Volatile.Read(ref target);
@@ -1776,6 +1773,9 @@ public sealed class RedisCommandProcessor : IDisposable
             return RespValue.Error("ERR Invalid stream ID specified as stream command argument");
         }
 
+        var deadlineUtc = blockMilliseconds is > 0
+            ? DateTime.UtcNow.AddMilliseconds(blockMilliseconds.Value)
+            : (DateTime?)null;
         while (true)
         {
             var response = await TryReadStreamsAsync(streamStarts, count, cancellationToken).ConfigureAwait(false);
@@ -1794,13 +1794,13 @@ public sealed class RedisCommandProcessor : IDisposable
             {
                 if (blockMilliseconds.Value > 0)
                 {
-                    var remaining = deadlineUtc!.Value - DateTime.UtcNow;
-                    if (remaining <= TimeSpan.Zero)
+                    var remainingTimeout = deadlineUtc!.Value - DateTime.UtcNow;
+                    if (remainingTimeout <= TimeSpan.Zero)
                     {
                         return RespValue.NullArray();
                     }
 
-                    using var timeoutCts = new CancellationTokenSource(remaining);
+                    using var timeoutCts = new CancellationTokenSource(remainingTimeout);
                     using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
                     try
                     {
@@ -2232,13 +2232,13 @@ public sealed class RedisCommandProcessor : IDisposable
             {
                 if (blockMilliseconds.Value > 0)
                 {
-                    var remaining = deadlineUtc!.Value - DateTime.UtcNow;
-                    if (remaining <= TimeSpan.Zero)
+                    var remainingTimeout = deadlineUtc!.Value - DateTime.UtcNow;
+                    if (remainingTimeout <= TimeSpan.Zero)
                     {
                         return RespValue.NullArray();
                     }
 
-                    using var timeoutCts = new CancellationTokenSource(remaining);
+                    using var timeoutCts = new CancellationTokenSource(remainingTimeout);
                     using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
                     try
                     {

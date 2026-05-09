@@ -1095,13 +1095,13 @@ static async Task RedisStreamBlockingReadCancellationCleansUpWaitersAsync()
     var sessionTask = processor.ProcessAsync(sessionInput, sessionOutput, cts.Token);
 
     await WriteRespCommandAsync(sessionInput, "XREAD", "BLOCK", "0", "STREAMS", "cancel:events", "$");
-    await Task.Delay(120, cts.Token);
+    await Task.Delay(120);
     var blocked = processor.GetStreamMetrics();
     AssertEqual(1L, blocked.BlockedReaders);
 
     await sessionInput.DisposeAsync();
-    await sessionTask;
-    await Task.Delay(120, cts.Token);
+    try { await sessionTask; } catch (OperationCanceledException) { }
+    await Task.Delay(120);
 
     var after = processor.GetStreamMetrics();
     AssertEqual(0L, after.BlockedReaders);
