@@ -11,8 +11,8 @@ namespace SwarmKeyDb;
 /// ──────────────
 /// • Uses <see cref="CoreModules.Preset_HardSandbox"/> which removes io, os, package,
 ///   dofile, loadfile, and require before any script code runs.
-/// • Additional nil-assignment ensures the globals are absent even when MoonSharp is
-///   updated and the preset changes.
+/// • Additional nil-assignment ensures the globals load, rawget, rawset, and
+///   collectgarbage are absent even when MoonSharp is updated and the preset changes.
 /// • Scripts receive only KEYS, ARGV, and the redis table.
 ///
 /// Timeout model
@@ -262,7 +262,12 @@ public sealed class ScriptEngine
             var v = cbArgs[i];
             if (v.Type == DataType.Number)
             {
-                cmdArgs.Add(((long)v.Number).ToString());
+                // Preserve the full numeric value as a string (matching Redis behavior).
+                // If the value is an exact integer, format without a decimal point.
+                var n = v.Number;
+                cmdArgs.Add(n == Math.Truncate(n)
+                    ? ((long)n).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    : n.ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
             else
             {

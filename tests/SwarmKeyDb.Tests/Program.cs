@@ -5991,7 +5991,9 @@ static async Task EvalShaAfterScriptLoadAsync()
     var loadResp = await ExecuteAsync(processor, RespCommand("SCRIPT", "LOAD", script));
     // SHA1 is 40 hex chars returned as bulk string: $40\r\n<sha>\r\n
     Assert(loadResp.StartsWith("$40\r\n", StringComparison.Ordinal), $"Expected 40-char SHA1, got: {loadResp}");
-    var sha1 = loadResp.Split("\r\n")[1];
+    var loadParts = loadResp.Split("\r\n");
+    Assert(loadParts.Length >= 2, $"Expected at least 2 RESP lines, got: {loadResp}");
+    var sha1 = loadParts[1];
 
     // Execute via EVALSHA
     var evalResp = await ExecuteAsync(processor, RespCommand("EVALSHA", sha1, "0"));
@@ -6006,7 +6008,9 @@ static async Task ScriptLoadReturnsSha1Async()
 
     var resp = await ExecuteAsync(processor, RespCommand("SCRIPT", "LOAD", script));
     Assert(resp.StartsWith("$40\r\n", StringComparison.Ordinal), "Expected 40-char SHA1 bulk string.");
-    var sha1 = resp.Split("\r\n")[1];
+    var respParts = resp.Split("\r\n");
+    Assert(respParts.Length >= 2, $"Expected at least 2 RESP lines, got: {resp}");
+    var sha1 = respParts[1];
     AssertEqual(expectedSha1, sha1);
 }
 
