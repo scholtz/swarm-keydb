@@ -1,5 +1,10 @@
 # Roadmap for SwarmKeyDb
 
+## Testing
+- [ ] Change the .net tests to NUnit test format and update copilot instructions
+- [ ] Split tests to multiple files according to the topic being tested
+- [ ] Update cicd pipelines to do the tests properly using NUnit testing framework
+
 ## Multi-Instance Availability and Cache Consistency
 - [x] Create a `SwarmKeyDb.SwarmConsistency` NuGet package that validates Swarm and Bee reads with content-hash verification, feed or manifest revision checks, optional quorum policies, and operator-friendly failure diagnostics before values reach callers. (100%)
 - [x] Add consistency verification hooks to every cached `IKeyValueStore` path so cache hits, read-through fetches, and background refreshes evict or reject stale Swarm payloads instead of serving divergent in-memory data. (100%: `ICacheEviction` interface propagated through all decorator stores; `ConsistencyVerificationMiddleware` evicts on verification failure and re-fetches from Swarm; `OnVerificationFailure` callback in `ConsistencyOptions`; `EvictionByVerificationTotal` in `ConsistencyVerificationSnapshot`; `IBackendMetadataProvider` propagated through `EncryptingKeyValueStore`, `CompressingKeyValueStore`, `CrdtKeyValueStore`, `AclKeyValueStore`, `DidAuthKeyValueStore`, `CachingKeyValueStore`, `OfflineCapableKeyValueStore`, and `AsyncQueuedKeyValueStore`; Prometheus metrics `swarmkeydb_cache_verification_pass_total`, `swarmkeydb_cache_verification_fail_total`, `swarmkeydb_cache_eviction_by_verification_total`; `WithConsistencyVerification()` DI extension; full unit + integration test coverage)
