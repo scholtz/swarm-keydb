@@ -37,6 +37,10 @@ var tests = new (string Name, Func<Task> Test)[]
     ("redis backendmeta command returns backend metadata", RedisBackendMetaCommandReturnsMetadataAsync),
     ("redis protocol supports set get exists delete", RedisProtocolRoundTripAsync),
     ("redis protocol supports keys and scan", RedisProtocolKeyIterationAsync),
+    ("redis compatibility commands info command client config", RedisCompatibilityCommandsAsync),
+    ("redis maxmemory noeviction returns oom", RedisMaxMemoryNoEvictionReturnsOomAsync),
+    ("redis parser malformed frame returns protocol error", RedisParserMalformedFrameReturnsProtocolErrorAsync),
+    ("redis incr decrby handles overflow and range errors", RedisIncrDecrByOverflowAndRangeAsync),
     ("redis stream xadd xrange xrevrange and xlen round trip", RedisStreamRoundTripAsync),
     ("redis stream validates id ordering and formatting", RedisStreamIdValidationAsync),
     ("redis stream supports maxlen trimming", RedisStreamMaxLenTrimmingAsync),
@@ -876,6 +880,66 @@ static async Task RedisProtocolKeyIterationAsync()
 
     Assert(response.Contains("*2\r\n$5\r\napp:a\r\n$5\r\napp:b\r\n", StringComparison.Ordinal), "KEYS should return matching app keys.");
     Assert(response.EndsWith("*2\r\n$1\r\n1\r\n*1\r\n$5\r\napp:a\r\n", StringComparison.Ordinal), "SCAN should return next cursor and one key.");
+}
+
+static async Task RedisCompatibilityCommandsAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("INFO", "all") +
+        RespCommand("COMMAND", "COUNT") +
+        RespCommand("COMMAND", "INFO", "GET") +
+        RespCommand("CONFIG", "GET", "maxmemory") +
+        RespCommand("CONFIG", "SET", "maxmemory", "1mb") +
+        RespCommand("CONFIG", "GET", "maxmemory") +
+        RespCommand("CLIENT", "ID"));
+
+    Assert(response.Contains("# Server", StringComparison.Ordinal), "INFO all should include server section.");
+    Assert(response.Contains("get\r\n", StringComparison.Ordinal), "COMMAND results should include GET metadata.");
+    Assert(response.Contains("$3\r\nget\r\n", StringComparison.Ordinal), "COMMAND INFO GET should include get metadata.");
+    Assert(response.Contains("$9\r\nmaxmemory\r\n$1\r\n0\r\n", StringComparison.Ordinal), "Default maxmemory should be 0.");
+    Assert(response.Contains("$9\r\nmaxmemory\r\n$7\r\n1048576\r\n", StringComparison.Ordinal), "CONFIG SET maxmemory 1mb should update runtime config.");
+}
+
+static async Task RedisMaxMemoryNoEvictionReturnsOomAsync()
+{
+    var processor = new RedisCommandProcessor(
+        new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()),
+        compatibilityOptions: new RedisCompatibilityOptions
+        {
+            MaxMemoryBytes = 8,
+            MaxMemoryPolicy = "noeviction"
+        });
+
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "a", "1234") +
+        RespCommand("SET", "b", "5678"));
+
+    Assert(response.Contains("-OOM command not allowed", StringComparison.Ordinal), "Second SET should fail with stable OOM error under noeviction.");
+}
+
+static async Task RedisParserMalformedFrameReturnsProtocolErrorAsync()
+{
+    var processor = CreateProcessor();
+    var malformed = Encoding.UTF8.GetBytes("*1\r\n$4\r\nPING\n");
+    await using var input = new MemoryStream(malformed);
+    await using var output = new MemoryStream();
+    await processor.ProcessAsync(input, output);
+
+    var response = Encoding.UTF8.GetString(output.ToArray());
+    Assert(response.Contains("-ERR Protocol error: invalid RESP frame\r\n", StringComparison.Ordinal), "Malformed RESP must return protocol error and not crash.");
+}
+
+static async Task RedisIncrDecrByOverflowAndRangeAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "counter", "9223372036854775807") +
+        RespCommand("INCR", "counter") +
+        RespCommand("SET", "counter", "x") +
+        RespCommand("DECRBY", "counter", "1"));
+
+    Assert(response.Contains("-ERR value is not an integer or out of range\r\n", StringComparison.Ordinal), "INCR overflow and DECRBY non-integer should return stable range error.");
 }
 
 static async Task RedisStreamRoundTripAsync()

@@ -20,6 +20,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
     private readonly Func<TransactionMetricsSnapshot> _transactionMetricsAccessor;
     private readonly Func<StreamMetricsSnapshot> _streamMetricsAccessor;
     private readonly Func<ScriptMetricsSnapshot> _scriptMetricsAccessor;
+    private readonly Func<CompatibilityMetricsSnapshot> _compatibilityMetricsAccessor;
     private readonly string _privacyMode;
     private long _activeConnections;
     private long _swarmReads;
@@ -41,7 +42,8 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         Func<PubSubManager?>? pubSubManagerAccessor = null,
         Func<TransactionMetricsSnapshot>? transactionMetricsAccessor = null,
         Func<StreamMetricsSnapshot>? streamMetricsAccessor = null,
-        Func<ScriptMetricsSnapshot>? scriptMetricsAccessor = null)
+        Func<ScriptMetricsSnapshot>? scriptMetricsAccessor = null,
+        Func<CompatibilityMetricsSnapshot>? compatibilityMetricsAccessor = null)
     {
         _cacheStatsAccessor = cacheStatsAccessor;
         _offlineStatusAccessor = offlineStatusAccessor ?? (() => NoOpOfflineStatusProvider.Instance);
@@ -51,6 +53,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         _transactionMetricsAccessor = transactionMetricsAccessor ?? (() => EmptyTransactionMetricsSnapshot);
         _streamMetricsAccessor = streamMetricsAccessor ?? (() => EmptyStreamMetricsSnapshot);
         _scriptMetricsAccessor = scriptMetricsAccessor ?? (() => EmptyScriptMetricsSnapshot);
+        _compatibilityMetricsAccessor = compatibilityMetricsAccessor ?? (() => new CompatibilityMetricsSnapshot(0, 0, 0, 0, 0, 0));
         _maxLogEntries = Math.Max(10, maxLogEntries);
         _privacyMode = privacyMode.ToString().ToLowerInvariant();
     }
@@ -212,6 +215,18 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine("# TYPE swarmkeydb_script_timeout_total counter");
         builder.AppendLine("# HELP swarmkeydb_script_exec_duration_seconds Script execution duration histogram.");
         builder.AppendLine("# TYPE swarmkeydb_script_exec_duration_seconds histogram");
+        builder.AppendLine("# HELP swarmkeydb_expiry_scan_duration_seconds Average adaptive expiry scan duration in seconds.");
+        builder.AppendLine("# TYPE swarmkeydb_expiry_scan_duration_seconds gauge");
+        builder.AppendLine("# HELP swarmkeydb_expiry_keys_deleted_total Total keys deleted by adaptive expiry scans.");
+        builder.AppendLine("# TYPE swarmkeydb_expiry_keys_deleted_total counter");
+        builder.AppendLine("# HELP swarmkeydb_expiry_budget_exceeded_total Total expiry scans that hit the cycle budget cap.");
+        builder.AppendLine("# TYPE swarmkeydb_expiry_budget_exceeded_total counter");
+        builder.AppendLine("# HELP swarmkeydb_memory_used_bytes Estimated memory used by key/value payloads.");
+        builder.AppendLine("# TYPE swarmkeydb_memory_used_bytes gauge");
+        builder.AppendLine("# HELP swarmkeydb_memory_limit_bytes Configured max memory limit in bytes (0 means unlimited).");
+        builder.AppendLine("# TYPE swarmkeydb_memory_limit_bytes gauge");
+        builder.AppendLine("# HELP swarmkeydb_eviction_total Total key evictions caused by maxmemory enforcement.");
+        builder.AppendLine("# TYPE swarmkeydb_eviction_total counter");
 
         foreach (var entry in _operations.OrderBy(static item => item.Key, StringComparer.Ordinal))
         {
@@ -239,6 +254,14 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         {
             builder.AppendLine(FormatMetric("swarmkeydb_operation_errors_total", error.Value, ("error_type", error.Key.ToLowerInvariant())));
         }
+
+        var compatibility = _compatibilityMetricsAccessor();
+        builder.AppendLine(FormatMetric("swarmkeydb_expiry_scan_duration_seconds", compatibility.ExpiryScanDurationSeconds));
+        builder.AppendLine(FormatMetric("swarmkeydb_expiry_keys_deleted_total", compatibility.ExpiryKeysDeletedTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_expiry_budget_exceeded_total", compatibility.ExpiryBudgetExceededTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_memory_used_bytes", compatibility.MemoryUsedBytes));
+        builder.AppendLine(FormatMetric("swarmkeydb_memory_limit_bytes", compatibility.MemoryLimitBytes));
+        builder.AppendLine(FormatMetric("swarmkeydb_eviction_total", compatibility.EvictionTotal));
 
         var cacheStats = _cacheStatsAccessor();
         var cacheHits = cacheStats.Hits;

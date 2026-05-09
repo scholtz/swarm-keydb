@@ -1,0 +1,88 @@
+name: Compatibility Issue Watch
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      tracking_issue:
+        description: Tracking issue number to receive summary comment
+        required: false
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  scan-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scan KeyDB + Valkey issues and post summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const trackingIssue = Number(core.getInput('tracking_issue') || process.env.ISSUE_WATCH_TRACKING_ISSUE || 0);
+            const since = new Date(Date.now() - (7 * 24 * 60 * 60 * 1000)).toISOString();
+            const queries = [
+              { name: 'KeyDB', q: `repo:Snapchat/KeyDB is:issue is:open updated:>=${since}` },
+              { name: 'Valkey', q: `repo:valkey-io/valkey is:issue is:open updated:>=${since}` }
+            ];
+
+            const mapItem = (issue) => {
+              const text = `${issue.title}\n${issue.body || ''}`.toLowerCase();
+              if (text.includes('evict') || text.includes('oom') || text.includes('memory')) return 'Memory-pressure controls';
+              if (text.includes('expire') || text.includes('ttl')) return 'Adaptive active expiry budgeting';
+              if (text.includes('resp') || text.includes('parser') || text.includes('protocol')) return 'RESP conformance tests';
+              if (text.includes('info') || text.includes('command') || text.includes('client') || text.includes('config')) return 'Compatibility command coverage';
+              return 'Backlog triage';
+            };
+
+            const findings = [];
+            for (const query of queries) {
+              const result = await github.rest.search.issuesAndPullRequests({
+                q: query.q,
+                per_page: 20,
+                sort: 'updated',
+                order: 'desc'
+              });
+              for (const item of result.data.items) {
+                findings.push({
+                  source: query.name,
+                  title: item.title,
+                  url: item.html_url,
+                  number: item.number,
+                  mapped: mapItem(item)
+                });
+              }
+            }
+
+            const unique = [];
+            const seen = new Set();
+            for (const finding of findings) {
+              if (seen.has(finding.url)) continue;
+              seen.add(finding.url);
+              unique.push(finding);
+            }
+
+            const lines = [
+              '## Weekly compatibility issue watch',
+              '',
+              unique.length === 0
+                ? 'No new KeyDB/Valkey issues matched the watch query this week.'
+                : `Discovered ${unique.length} relevant issue(s):`,
+              ...unique.map(f => `- [${f.source} #${f.number}](${f.url}) — ${f.title} → **${f.mapped}**`)
+            ];
+            const body = lines.join('\n');
+
+            core.summary.addHeading('Issue watch summary').addRaw(body).write();
+
+            if (trackingIssue > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: trackingIssue,
+                body
+              });
+            } else {
+              core.info('No tracking issue configured (set ISSUE_WATCH_TRACKING_ISSUE or workflow_dispatch input).');
+            }

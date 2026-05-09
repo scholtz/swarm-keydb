@@ -29,10 +29,10 @@ Traditional Redis-style deployments still struggle with multi-instance data avai
 - **Current unresolved gaps (active roadmap):**
 	- **Streams retention and resilience hardening:** completed with `XTRIM` (`MAXLEN` + `MINID`), default `XADD` retention config, retention metrics/dashboard coverage, and failure-injection tests for restart recovery, duplicate ACK idempotency, PEL re-delivery, and concurrent-group isolation.
 	- **Scripting safety:** delivered — `EVAL`/`EVALSHA`/`SCRIPT` commands with MoonSharp sandbox (io/os/package stripped), Task-based timeout returning `BUSY`, 10 MiB output cap, stable error replies, and Prometheus metrics (`swarmkeydb_script_eval_total`, `swarmkeydb_script_evalsha_total`, `swarmkeydb_script_error_total`, `swarmkeydb_script_timeout_total`, `swarmkeydb_script_exec_duration_seconds`).
-	- **Operability hardening:** expand command compatibility (`INFO`/`COMMAND`/`CLIENT`/`CONFIG GET`), parser conformance tests, adaptive active-expiry budgeting, and memory-pressure controls.
+	- **Operability hardening:** delivered — compatibility commands (`INFO`/`COMMAND`/`CLIENT`/`CONFIG`), adaptive active-expiry budgeting (`SWARM_KEYDB_EXPIRY_BUDGET_MS`), maxmemory controls (`SWARM_KEYDB_MAX_MEMORY_MB` + policies), parser conformance handling for malformed RESP, and Prometheus metrics for expiry/memory/evictions.
 - **Issue-informed compatibility priorities (next roadmap):**
 	- **Script replication determinism:** add cross-instance script-cache propagation for multi-node deployments so EVALSHA resolves consistently after rolling updates.
-	- **Operability hardening:** Add stronger compatibility and reliability controls for parser edge cases, active-expire budgeting, memory-pressure behavior, and command-level observability based on common KeyDB and Valkey issue themes.
+	- **Issue-watch follow-through:** continue weekly KeyDB/Valkey issue-watch triage and map newly discovered high-impact items to roadmap tasks and conformance tests.
 - **External issue inputs used for prioritization:** KeyDB issues include Pub/Sub and cluster consistency concerns (`#853`, `#845`), `KEYS` operational hangs (`#878`), and memory/eviction instability (`#972`). Valkey issues include stream correctness (`#3429`), command edge-case parsing correctness (`#3483`), and richer command error observability (`#3636`).
 
 ***What are the UX, Privacy, other requirements?***
