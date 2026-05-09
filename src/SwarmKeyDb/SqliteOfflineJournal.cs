@@ -9,7 +9,13 @@ public sealed class SqliteOfflineJournal : IOfflineJournal
     public SqliteOfflineJournal(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        Directory.CreateDirectory(Path.GetDirectoryName(path) ?? ".");
+        var directory = Path.GetDirectoryName(path);
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            throw new ArgumentException("SQLite offline journal path must include a directory.", nameof(path));
+        }
+
+        Directory.CreateDirectory(directory);
         var builder = new SqliteConnectionStringBuilder
         {
             DataSource = path,

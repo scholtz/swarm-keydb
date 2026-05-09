@@ -52,7 +52,6 @@ class SwarmKeyDb:
         self._privacy_mode = privacy_mode
         self._privacy_key = privacy_key
         self._token_to_plain: dict[str, str] = {}
-        self._offline_mode = offline_mode
         self._did_mode = did_mode
         self._did_rpc_url = did_rpc_url
         self._did_method = did_method
