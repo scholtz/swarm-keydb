@@ -465,6 +465,10 @@ public sealed class MonitoringHttpServer : IDisposable
                                                  <button id="resync-trigger-full" type="button">Trigger full resync</button>
                                                </p>
                                                <pre id="resync-result">idle</pre>
+                                                <h2>Pub/Sub Status</h2>
+                                                <p>Active Subscriber Connections: <strong id="pubsub-subscribers">0</strong></p>
+                                                <p>Messages Published (total): <strong id="pubsub-published">0</strong></p>
+                                                <p>Messages Dropped (total): <strong id="pubsub-dropped">0</strong></p>
                                                 <h2>Cross-chain replication health</h2>
                                             <table>
                                               <thead>
@@ -513,6 +517,9 @@ public sealed class MonitoringHttpServer : IDisposable
                                                const resyncResultEl = document.getElementById('resync-result');
                                                const resyncTriggerPartialButton = document.getElementById('resync-trigger-partial');
                                                const resyncTriggerFullButton = document.getElementById('resync-trigger-full');
+                                               const pubSubSubscribersEl = document.getElementById('pubsub-subscribers');
+                                               const pubSubPublishedEl = document.getElementById('pubsub-published');
+                                               const pubSubDroppedEl = document.getElementById('pubsub-dropped');
                                               function parseCounters(metricsText) {
                                                const wanted = [
                                                  'swarmkeydb_operations_total{operation="get",status="success"}',
@@ -533,7 +540,10 @@ public sealed class MonitoringHttpServer : IDisposable
                                                    'swarmkeydb_resync_partial_total',
                                                    'swarmkeydb_resync_full_total',
                                                    'swarmkeydb_resync_duration_seconds',
-                                                   'swarmkeydb_resync_keys_replayed_total'
+                                                   'swarmkeydb_resync_keys_replayed_total',
+                                                   'swarmkeydb_pubsub_subscribers_total',
+                                                   'swarmkeydb_pubsub_messages_published_total',
+                                                   'swarmkeydb_pubsub_messages_dropped_total'
                                                  ];
                                                return metricsText.split('\n').filter(line => wanted.some(prefix => line.startsWith(prefix))).join('\n');
                                              }
@@ -573,6 +583,13 @@ public sealed class MonitoringHttpServer : IDisposable
                                                 const response = await fetch('/metrics');
                                                 const text = await response.text();
                                                 metricsEl.textContent = parseCounters(text);
+                                                const extractMetric = (name) => {
+                                                  const line = text.split('\n').find(l => l.startsWith(name + ' '));
+                                                  return line ? line.split(' ')[1] : '0';
+                                                };
+                                                pubSubSubscribersEl.textContent = extractMetric('swarmkeydb_pubsub_subscribers_total');
+                                                pubSubPublishedEl.textContent = extractMetric('swarmkeydb_pubsub_messages_published_total');
+                                                pubSubDroppedEl.textContent = extractMetric('swarmkeydb_pubsub_messages_dropped_total');
                                               }
                                               async function refreshSyncSummary() {
                                                 const response = await fetch('/sync');
