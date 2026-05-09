@@ -4829,8 +4829,6 @@ static async Task PubSubGlobPatternMatchingAsync()
 
     cts.Cancel();
     try { await task; } catch (OperationCanceledException) { }
-
-    await Task.CompletedTask;
 }
 
 // ---------------------------------------------------------------------------
@@ -5588,21 +5586,21 @@ internal sealed class BlockingStream : Stream
         _dataAvailable.Release();
     }
 
-    public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+    public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
     {
         var data = new byte[count];
         Buffer.BlockCopy(buffer, offset, data, 0, count);
         _queue.Enqueue(data);
         _dataAvailable.Release();
-        await Task.CompletedTask;
+        return Task.CompletedTask;
     }
 
-    public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+    public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
     {
         var data = buffer.ToArray();
         _queue.Enqueue(data);
         _dataAvailable.Release();
-        await Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 
     public override int Read(byte[] buffer, int offset, int count)
