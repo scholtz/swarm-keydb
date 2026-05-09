@@ -1065,10 +1065,13 @@ static async Task RedisStreamXReadBlockingWakeAndTimeoutAsync()
     Assert(wakeOutput.Contains("*1\r\n*2\r\n$12\r\nblock:events\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$1\r\nf\r\n$2\r\nv1\r\n", StringComparison.Ordinal),
         $"Blocking XREAD should wake and return the newly appended entry. Output: {wakeOutput}");
 
+    var wakeOutputLength = wakeOutput.Length;
+
     await WriteRespCommandAsync(sessionInput, "XREAD", "BLOCK", "200", "STREAMS", "block:events", "$");
-    await Task.Delay(300, cts.Token);
-    var timeoutOutput = ReadAllBytes(sessionOutput);
-    Assert(timeoutOutput.EndsWith("*-1\r\n", StringComparison.Ordinal), $"Timed blocking XREAD should return null array on timeout. Output: {timeoutOutput}");
+    var timeoutOutput = await WaitForOutputGrowthAsync(sessionOutput, wakeOutputLength, 1500, cts.Token);
+    Assert(timeoutOutput.Length > wakeOutputLength, $"Timed blocking XREAD should append a timeout response. Output: {timeoutOutput}");
+    var timeoutDelta = timeoutOutput[wakeOutputLength..];
+    Assert(timeoutDelta.Contains("*-1\r\n", StringComparison.Ordinal), $"Timed blocking XREAD should return null array on timeout. Output: {timeoutOutput}");
 
     cts.Cancel();
     try { await sessionTask; } catch (OperationCanceledException) { }
@@ -5695,6 +5698,23 @@ static string ReadAllBytes(MemoryStream stream)
     var text = Encoding.UTF8.GetString(stream.ToArray());
     stream.Position = pos;
     return text;
+}
+
+static async Task<string> WaitForOutputGrowthAsync(MemoryStream stream, int previousLength, int timeoutMs, CancellationToken cancellationToken)
+{
+    var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+    while (DateTime.UtcNow < deadline)
+    {
+        var text = ReadAllBytes(stream);
+        if (text.Length > previousLength)
+        {
+            return text;
+        }
+
+        await Task.Delay(20, cancellationToken);
+    }
+
+    return ReadAllBytes(stream);
 }
 
 /// <summary>
