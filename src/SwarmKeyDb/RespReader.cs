@@ -32,6 +32,16 @@ public sealed class RespReader
     private async Task<RespValue> ReadArrayAsync(CancellationToken cancellationToken)
     {
         var count = int.Parse(await ReadLineAsync(cancellationToken).ConfigureAwait(false));
+        if (count == -1)
+        {
+            return RespValue.NullArray();
+        }
+
+        if (count < -1)
+        {
+            throw new InvalidDataException("RESP array length out of range.");
+        }
+
         var values = new List<RespValue>(count);
         for (var i = 0; i < count; i++)
         {
@@ -46,9 +56,14 @@ public sealed class RespReader
     private async Task<RespValue> ReadBulkStringAsync(CancellationToken cancellationToken)
     {
         var length = int.Parse(await ReadLineAsync(cancellationToken).ConfigureAwait(false));
-        if (length < 0)
+        if (length == -1)
         {
             return RespValue.BulkString((byte[]?)null);
+        }
+
+        if (length < -1)
+        {
+            throw new InvalidDataException("RESP bulk string length out of range.");
         }
 
         var buffer = new byte[length];

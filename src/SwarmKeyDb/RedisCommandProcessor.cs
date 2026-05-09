@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
@@ -12,6 +14,7 @@ public sealed class RedisCommandProcessor : IDisposable
 {
     private const string WrongTypeError = "WRONGTYPE Operation against a key holding the wrong kind of value";
     private const string BusyGroupError = "BUSYGROUP Consumer Group name already exists";
+    private const string OomError = "OOM command not allowed when used memory > 'maxmemory'.";
     private static readonly byte[] StreamValueMagicPrefix = "SKDBSTREAM1:"u8.ToArray();
     private static readonly JsonSerializerOptions StreamJsonOptions = new()
     {
@@ -30,7 +33,24 @@ public sealed class RedisCommandProcessor : IDisposable
     private readonly PubSubManager? _pubSubManager;
     private readonly ILogger<RedisCommandProcessor> _logger;
     private readonly StreamTrimOptions _streamTrimOptions;
+    private readonly RedisCompatibilityOptions _compatibilityOptions;
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
+    private readonly ConcurrentDictionary<long, ClientConnection> _clientConnections = new();
+    private readonly ConcurrentDictionary<string, long> _keySizes = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, long> _keyLastAccessUnixMs = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTimeOffset?> _keyExpiryHints = new(StringComparer.Ordinal);
+    private static readonly AsyncLocal<ClientContext?> CurrentClientContext = new();
+    private long _nextClientId;
+    private long _nextExpiryRunUnixMs;
+    private long _expiryScanCount;
+    private double _expiryScanDurationSecondsSum;
+    private long _expiryKeysDeletedTotal;
+    private long _expiryBudgetExceededTotal;
+    private long _evictionTotal;
+    private long _totalCommandsProcessed;
+    private readonly Random _random = new();
+
+    private static readonly IReadOnlyDictionary<string, CommandSpec> CommandSpecs = CreateCommandSpecs();
 
     // Scripting
     private readonly ScriptEngine _scriptEngine;
@@ -89,7 +109,8 @@ public sealed class RedisCommandProcessor : IDisposable
         PubSubManager? pubSubManager = null,
         StreamTrimOptions? streamTrimOptions = null,
         ScriptEngine? scriptEngine = null,
-        ScriptCache? scriptCache = null)
+        ScriptCache? scriptCache = null,
+        RedisCompatibilityOptions? compatibilityOptions = null)
     {
         _store = store;
         _ethAddressAccessor = ethAddressAccessor;
@@ -105,6 +126,7 @@ public sealed class RedisCommandProcessor : IDisposable
         _streamTrimOptions = streamTrimOptions ?? new StreamTrimOptions();
         _scriptEngine = scriptEngine ?? new ScriptEngine();
         _scriptCache = scriptCache ?? new ScriptCache();
+        _compatibilityOptions = compatibilityOptions ?? new RedisCompatibilityOptions();
     }
 
     public async Task ProcessAsync(Stream input, Stream output, CancellationToken cancellationToken = default)
@@ -126,6 +148,9 @@ public sealed class RedisCommandProcessor : IDisposable
 
         // Per-connection pub/sub state
         var connectionId = Guid.NewGuid().ToString("N");
+        var clientId = Interlocked.Increment(ref _nextClientId);
+        var clientConnection = new ClientConnection(clientId, ResolveRemoteEndpoint(output));
+        _clientConnections[clientId] = clientConnection;
         var channelSubs = new HashSet<string>(StringComparer.Ordinal);
         var patternSubs = new HashSet<string>(StringComparer.Ordinal);
         // Bounded push channel: DropWrite so a slow subscriber doesn't block the publisher
@@ -176,6 +201,11 @@ public sealed class RedisCommandProcessor : IDisposable
                     {
                         break;
                     }
+                    catch (Exception ex) when (ex is InvalidDataException or FormatException or OverflowException)
+                    {
+                        await writer.WriteAsync(RespValue.Error("ERR Protocol error: invalid RESP frame"), cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
                 }
                 else
                 {
@@ -187,12 +217,19 @@ public sealed class RedisCommandProcessor : IDisposable
                     {
                         break;
                     }
+                    catch (Exception ex) when (ex is InvalidDataException or FormatException or OverflowException)
+                    {
+                        await writer.WriteAsync(RespValue.Error("ERR Protocol error: invalid RESP frame"), cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
                 }
 
                 if (request is null)
                 {
                     break;
                 }
+
+                CurrentClientContext.Value = new ClientContext(clientId);
 
                 if (_ethAddressAccessor is not null)
                 {
@@ -207,6 +244,14 @@ public sealed class RedisCommandProcessor : IDisposable
                 var command = request.Type == RespType.Array && request.Items is { Count: > 0 }
                     ? request.Items[0].AsString().ToUpperInvariant()
                     : string.Empty;
+                _clientConnections.AddOrUpdate(
+                    clientId,
+                    _ => clientConnection,
+                    (_, state) => state with
+                    {
+                        LastCommand = command,
+                        LastSeenUtc = DateTimeOffset.UtcNow
+                    });
 
                 // Handle pub/sub commands that require direct access to the writer and connection state
                 if (_pubSubManager is not null && command is "SUBSCRIBE" or "UNSUBSCRIBE" or "PSUBSCRIBE" or "PUNSUBSCRIBE")
@@ -272,6 +317,9 @@ public sealed class RedisCommandProcessor : IDisposable
             {
                 _pubSubManager.RemoveConnection(connectionId);
             }
+
+            _clientConnections.TryRemove(clientId, out _);
+            CurrentClientContext.Value = null;
 
             pushChannel.Writer.TryComplete();
 
@@ -358,10 +406,11 @@ public sealed class RedisCommandProcessor : IDisposable
     private static readonly HashSet<string> KnownQueueableCommands = new(StringComparer.OrdinalIgnoreCase)
     {
         "PING", "ECHO", "AUTHADDR", "AUTHDID",
-        "SET", "SETEX", "PSETEX", "GET",
+        "SET", "SETEX", "PSETEX", "GET", "INCR", "INCRBY", "DECR", "DECRBY",
         "DEL", "MDEL", "MGET", "MSET", "MSETNX",
         "EXISTS", "EXPIRE", "PEXPIRE", "EXPIREAT",
         "TTL", "PTTL", "PERSIST",
+        "INFO", "COMMAND", "CLIENT", "CONFIG",
         "XADD", "XTRIM", "XRANGE", "XREVRANGE", "XLEN", "XREAD",
         "XGROUP", "XREADGROUP", "XACK", "XPENDING", "XCLAIM", "XAUTOCLAIM",
         "KEYS", "SCAN", "TYPE",
@@ -525,6 +574,10 @@ public sealed class RedisCommandProcessor : IDisposable
             case "SET":
             case "SETEX":
             case "PSETEX":
+            case "INCR":
+            case "INCRBY":
+            case "DECR":
+            case "DECRBY":
             case "EXPIRE":
             case "PEXPIRE":
             case "EXPIREAT":
@@ -831,9 +884,15 @@ public sealed class RedisCommandProcessor : IDisposable
         command = args[0].AsString().ToUpperInvariant();
         try
         {
+            await MaybeRunAdaptiveExpiryAsync(cancellationToken).ConfigureAwait(false);
+
             response = command switch
             {
                 "PING" => args.Count > 1 ? RespValue.BulkString(args[1].Bytes) : RespValue.SimpleString("PONG"),
+                "INFO" => await InfoAsync(args, cancellationToken).ConfigureAwait(false),
+                "COMMAND" => CommandCommand(args),
+                "CLIENT" => ClientCommand(args),
+                "CONFIG" => ConfigCommand(args),
                 "ECHO" => RequireArity(args, 2) ?? RespValue.BulkString(args[1].Bytes),
                 "AUTHADDR" => SetCallerAddress(args),
                 "AUTHDID" => await SetDidContextAsync(args, cancellationToken).ConfigureAwait(false),
@@ -841,6 +900,10 @@ public sealed class RedisCommandProcessor : IDisposable
                 "SETEX" => await SetExAsync(args, milliseconds: false, cancellationToken).ConfigureAwait(false),
                 "PSETEX" => await SetExAsync(args, milliseconds: true, cancellationToken).ConfigureAwait(false),
                 "GET" => await GetAsync(args, cancellationToken).ConfigureAwait(false),
+                "INCR" => await IncrByAsync(args, 1, cancellationToken).ConfigureAwait(false),
+                "INCRBY" => await IncrByAsync(args, null, cancellationToken).ConfigureAwait(false),
+                "DECR" => await IncrByAsync(args, -1, cancellationToken).ConfigureAwait(false),
+                "DECRBY" => await DecrByAsync(args, cancellationToken).ConfigureAwait(false),
                 "DEL" => await DelAsync(args, cancellationToken).ConfigureAwait(false),
                 "MDEL" => await MDelAsync(args, cancellationToken).ConfigureAwait(false),
                 "MGET" => await MGetAsync(args, cancellationToken).ConfigureAwait(false),
@@ -903,6 +966,7 @@ public sealed class RedisCommandProcessor : IDisposable
             response = RespValue.Error("ERR value is not an integer or out of range");
         }
 
+        Interlocked.Increment(ref _totalCommandsProcessed);
         if (response.Type == RespType.Error)
         {
             _logger.LogWarning("Command {Command} failed with protocol error: {Error}.", command, response.Text);
@@ -1091,15 +1155,26 @@ public sealed class RedisCommandProcessor : IDisposable
             return RespValue.Error(setError);
         }
 
-        await _store.PutAsync(args[1].AsString(), args[2].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
+        var key = args[1].AsString();
+        var value = args[2].Bytes ?? Array.Empty<byte>();
+        if (!await EnsureWritableMemoryAsync(key, value.Length, ttl is not null, cancellationToken).ConfigureAwait(false))
+        {
+            return RespValue.Error(OomError);
+        }
+
+        await _store.PutAsync(key, value, cancellationToken).ConfigureAwait(false);
         if (ttl is { } expiry)
         {
-            var (updated, ttlError) = await TrySetTtlAsync(args[1].AsString(), expiry, cancellationToken).ConfigureAwait(false);
+            var (_, ttlError) = await TrySetTtlAsync(key, expiry, cancellationToken).ConfigureAwait(false);
             if (ttlError is not null)
             {
                 return ttlError;
             }
         }
+
+        _keySizes[key] = value.Length;
+        _keyLastAccessUnixMs[key] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        _keyExpiryHints[key] = ttl is null ? null : DateTimeOffset.UtcNow.Add(ttl.Value);
 
         return RespValue.SimpleString("OK");
     }
@@ -1122,12 +1197,23 @@ public sealed class RedisCommandProcessor : IDisposable
             return RespValue.Error("ERR value is not an integer or out of range");
         }
 
-        await _store.PutAsync(args[1].AsString(), args[3].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
-        var (_, ttlError) = await TrySetTtlAsync(args[1].AsString(), ttl, cancellationToken).ConfigureAwait(false);
+        var key = args[1].AsString();
+        var value = args[3].Bytes ?? Array.Empty<byte>();
+        if (!await EnsureWritableMemoryAsync(key, value.Length, hasExpiry: true, cancellationToken).ConfigureAwait(false))
+        {
+            return RespValue.Error(OomError);
+        }
+
+        await _store.PutAsync(key, value, cancellationToken).ConfigureAwait(false);
+        var (_, ttlError) = await TrySetTtlAsync(key, ttl, cancellationToken).ConfigureAwait(false);
         if (ttlError is not null)
         {
             return ttlError;
         }
+
+        _keySizes[key] = value.Length;
+        _keyLastAccessUnixMs[key] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        _keyExpiryHints[key] = DateTimeOffset.UtcNow.Add(ttl);
 
         return RespValue.SimpleString("OK");
     }
@@ -1140,7 +1226,74 @@ public sealed class RedisCommandProcessor : IDisposable
             return arityError;
         }
 
-        return RespValue.BulkString(await _store.GetAsync(args[1].AsString(), cancellationToken).ConfigureAwait(false));
+        var key = args[1].AsString();
+        var value = await _store.GetAsync(key, cancellationToken).ConfigureAwait(false);
+        if (value is not null)
+        {
+            _keySizes[key] = value.Length;
+            _keyLastAccessUnixMs[key] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        }
+
+        return RespValue.BulkString(value);
+    }
+
+    private async Task<RespValue> IncrByAsync(IReadOnlyList<RespValue> args, long? fixedDelta, CancellationToken cancellationToken)
+    {
+        if (fixedDelta is null && args.Count != 3)
+        {
+            return RespValue.Error($"ERR wrong number of arguments for '{args[0].AsString()}'");
+        }
+
+        if (fixedDelta is not null && args.Count != 2)
+        {
+            return RespValue.Error($"ERR wrong number of arguments for '{args[0].AsString()}'");
+        }
+
+        var key = args[1].AsString();
+        var delta = fixedDelta ?? long.Parse(args[2].AsString());
+        var current = await _store.GetAsync(key, cancellationToken).ConfigureAwait(false);
+        var currentValue = 0L;
+        if (current is not null && !long.TryParse(System.Text.Encoding.UTF8.GetString(current), out currentValue))
+        {
+            return RespValue.Error("ERR value is not an integer or out of range");
+        }
+
+        checked
+        {
+            currentValue += delta;
+        }
+
+        var serialized = System.Text.Encoding.UTF8.GetBytes(currentValue.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (!await EnsureWritableMemoryAsync(key, serialized.Length, _keyExpiryHints.ContainsKey(key) && _keyExpiryHints[key] is not null, cancellationToken).ConfigureAwait(false))
+        {
+            return RespValue.Error(OomError);
+        }
+
+        await _store.PutAsync(key, serialized, cancellationToken).ConfigureAwait(false);
+        _keySizes[key] = serialized.Length;
+        _keyLastAccessUnixMs[key] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        return RespValue.IntegerValue(currentValue);
+    }
+
+    private async Task<RespValue> DecrByAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        var arityError = RequireArity(args, 3);
+        if (arityError is not null)
+        {
+            return arityError;
+        }
+
+        if (!long.TryParse(args[2].AsString(), out var decrement))
+        {
+            return RespValue.Error("ERR value is not an integer or out of range");
+        }
+
+        checked
+        {
+            decrement = -decrement;
+        }
+
+        return await IncrByAsync(new[] { args[0], args[1], RespValue.BulkString(decrement.ToString(System.Globalization.CultureInfo.InvariantCulture)) }, null, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<RespValue> DelAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
@@ -1165,6 +1318,9 @@ public sealed class RedisCommandProcessor : IDisposable
         {
             if (await _store.DeleteAsync(args[i].AsString(), cancellationToken).ConfigureAwait(false))
             {
+                _keySizes.TryRemove(args[i].AsString(), out _);
+                _keyLastAccessUnixMs.TryRemove(args[i].AsString(), out _);
+                _keyExpiryHints.TryRemove(args[i].AsString(), out _);
                 deleted++;
             }
         }
@@ -1200,7 +1356,17 @@ public sealed class RedisCommandProcessor : IDisposable
         {
             for (var i = 1; i < args.Count; i += 2)
             {
-                await _store.PutAsync(args[i].AsString(), args[i + 1].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
+                var key = args[i].AsString();
+                var value = args[i + 1].Bytes ?? Array.Empty<byte>();
+                if (!await EnsureWritableMemoryAsync(key, value.Length, false, cancellationToken).ConfigureAwait(false))
+                {
+                    return RespValue.Error(OomError);
+                }
+
+                await _store.PutAsync(key, value, cancellationToken).ConfigureAwait(false);
+                _keySizes[key] = value.Length;
+                _keyLastAccessUnixMs[key] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                _keyExpiryHints[key] = null;
             }
         }
         finally
@@ -1231,7 +1397,17 @@ public sealed class RedisCommandProcessor : IDisposable
 
             for (var i = 1; i < args.Count; i += 2)
             {
-                await _store.PutAsync(args[i].AsString(), args[i + 1].Bytes ?? Array.Empty<byte>(), cancellationToken).ConfigureAwait(false);
+                var key = args[i].AsString();
+                var value = args[i + 1].Bytes ?? Array.Empty<byte>();
+                if (!await EnsureWritableMemoryAsync(key, value.Length, false, cancellationToken).ConfigureAwait(false))
+                {
+                    return RespValue.Error(OomError);
+                }
+
+                await _store.PutAsync(key, value, cancellationToken).ConfigureAwait(false);
+                _keySizes[key] = value.Length;
+                _keyLastAccessUnixMs[key] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                _keyExpiryHints[key] = null;
             }
         }
         finally
@@ -1289,13 +1465,28 @@ public sealed class RedisCommandProcessor : IDisposable
             var ttl = expiresAt - DateTimeOffset.UtcNow;
             if (ttl <= TimeSpan.Zero)
             {
-                return RespValue.IntegerValue(await _store.DeleteAsync(args[1].AsString(), cancellationToken).ConfigureAwait(false) ? 1 : 0);
+                var keyToDelete = args[1].AsString();
+                var deleted = await _store.DeleteAsync(keyToDelete, cancellationToken).ConfigureAwait(false);
+                if (deleted)
+                {
+                    _keySizes.TryRemove(keyToDelete, out _);
+                    _keyLastAccessUnixMs.TryRemove(keyToDelete, out _);
+                    _keyExpiryHints.TryRemove(keyToDelete, out _);
+                }
+
+                return RespValue.IntegerValue(deleted ? 1 : 0);
             }
 
-            var (absoluteUpdated, ttlError) = await TrySetTtlAsync(args[1].AsString(), ttl, cancellationToken).ConfigureAwait(false);
+            var key = args[1].AsString();
+            var (absoluteUpdated, ttlError) = await TrySetTtlAsync(key, ttl, cancellationToken).ConfigureAwait(false);
             if (ttlError is not null)
             {
                 return ttlError;
+            }
+
+            if (absoluteUpdated)
+            {
+                _keyExpiryHints[key] = DateTimeOffset.UtcNow.Add(ttl);
             }
 
             return RespValue.IntegerValue(absoluteUpdated ? 1 : 0);
@@ -1303,7 +1494,16 @@ public sealed class RedisCommandProcessor : IDisposable
 
         if (ttlValue <= 0)
         {
-            return RespValue.IntegerValue(await _store.DeleteAsync(args[1].AsString(), cancellationToken).ConfigureAwait(false) ? 1 : 0);
+            var key = args[1].AsString();
+            var deleted = await _store.DeleteAsync(key, cancellationToken).ConfigureAwait(false);
+            if (deleted)
+            {
+                _keySizes.TryRemove(key, out _);
+                _keyLastAccessUnixMs.TryRemove(key, out _);
+                _keyExpiryHints.TryRemove(key, out _);
+            }
+
+            return RespValue.IntegerValue(deleted ? 1 : 0);
         }
 
         if (!TryParseRelativeTtl(ttlValue, milliseconds, out var relativeTtl))
@@ -1311,10 +1511,16 @@ public sealed class RedisCommandProcessor : IDisposable
             return RespValue.Error("ERR value is not an integer or out of range");
         }
 
-        var (updated, relativeTtlError) = await TrySetTtlAsync(args[1].AsString(), relativeTtl, cancellationToken).ConfigureAwait(false);
+        var keyWithRelativeTtl = args[1].AsString();
+        var (updated, relativeTtlError) = await TrySetTtlAsync(keyWithRelativeTtl, relativeTtl, cancellationToken).ConfigureAwait(false);
         if (relativeTtlError is not null)
         {
             return relativeTtlError;
+        }
+
+        if (updated)
+        {
+            _keyExpiryHints[keyWithRelativeTtl] = DateTimeOffset.UtcNow.Add(relativeTtl);
         }
 
         return RespValue.IntegerValue(updated ? 1 : 0);
@@ -1353,7 +1559,14 @@ public sealed class RedisCommandProcessor : IDisposable
             return arityError;
         }
 
-        return RespValue.IntegerValue(await _store.RemoveTtlAsync(args[1].AsString(), cancellationToken).ConfigureAwait(false) ? 1 : 0);
+        var key = args[1].AsString();
+        var removed = await _store.RemoveTtlAsync(key, cancellationToken).ConfigureAwait(false);
+        if (removed)
+        {
+            _keyExpiryHints[key] = null;
+        }
+
+        return RespValue.IntegerValue(removed ? 1 : 0);
     }
 
     private async Task<RespValue> KeysAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
@@ -3357,6 +3570,419 @@ public sealed class RedisCommandProcessor : IDisposable
         return true;
     }
 
+    private async Task<RespValue> InfoAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        if (args.Count > 2)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'INFO'");
+        }
+
+        var section = args.Count == 2 ? args[1].AsString().ToLowerInvariant() : "default";
+        var now = DateTimeOffset.UtcNow;
+        var uptimeSeconds = Math.Max(1, (long)(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds);
+        var connectedClients = _clientConnections.Count;
+        var keys = await _store.ListKeysAsync(cancellationToken).ConfigureAwait(false);
+        var usedMemory = await EstimateUsedMemoryBytesAsync(cancellationToken).ConfigureAwait(false);
+        var withExpiry = 0L;
+        foreach (var key in keys)
+        {
+            var (exists, ttl) = await _store.GetTtlAsync(key, cancellationToken).ConfigureAwait(false);
+            if (exists && ttl is not null)
+            {
+                withExpiry++;
+            }
+        }
+
+        var sections = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["server"] = $"# Server\r\nredis_version:7.0.0\r\nswarmkeydb_version:0.1.0\r\nuptime_in_seconds:{uptimeSeconds}\r\n",
+            ["clients"] = $"# Clients\r\nconnected_clients:{connectedClients}\r\n",
+            ["memory"] = $"# Memory\r\nused_memory:{usedMemory}\r\nmaxmemory:{_compatibilityOptions.MaxMemoryBytes}\r\nmaxmemory_policy:{_compatibilityOptions.MaxMemoryPolicy}\r\n",
+            ["stats"] = $"# Stats\r\ntotal_commands_processed:{Interlocked.Read(ref _totalCommandsProcessed)}\r\nexpired_keys:{Interlocked.Read(ref _expiryKeysDeletedTotal)}\r\nevicted_keys:{Interlocked.Read(ref _evictionTotal)}\r\n",
+            ["replication"] = "# Replication\r\nrole:master\r\nconnected_slaves:0\r\n",
+            ["cpu"] = $"# CPU\r\nused_cpu_sys:0\r\nused_cpu_user:0\r\nused_cpu_sys_children:0\r\nused_cpu_user_children:0\r\n",
+            ["keyspace"] = $"# Keyspace\r\ndb0:keys={keys.Count},expires={withExpiry},avg_ttl=0\r\n"
+        };
+
+        var selected = section switch
+        {
+            "default" or "all" => new[] { "server", "clients", "memory", "stats", "replication", "cpu", "keyspace" },
+            _ => sections.ContainsKey(section) ? new[] { section } : Array.Empty<string>()
+        };
+
+        var payload = string.Concat(selected.Select(name => sections[name]));
+        return RespValue.BulkString(payload);
+    }
+
+    private RespValue CommandCommand(IReadOnlyList<RespValue> args)
+    {
+        if (args.Count == 1)
+        {
+            var rows = CommandSpecs.Values
+                .OrderBy(static spec => spec.Name, StringComparer.Ordinal)
+                .Select(ToCommandSpecResp)
+                .ToArray();
+            return RespValue.Array(rows);
+        }
+
+        var sub = args[1].AsString().ToUpperInvariant();
+        return sub switch
+        {
+            "COUNT" when args.Count == 2 => RespValue.IntegerValue(CommandSpecs.Count),
+            "INFO" => RespValue.Array(args.Skip(2).Select(arg => CommandSpecs.TryGetValue(arg.AsString().ToUpperInvariant(), out var spec) ? ToCommandSpecResp(spec) : RespValue.BulkString((byte[]?)null)).ToArray()),
+            "DOCS" => RespValue.Array(args.Skip(2).Select(arg => CommandSpecs.TryGetValue(arg.AsString().ToUpperInvariant(), out var spec) ? RespValue.Array(new[]
+            {
+                RespValue.BulkString("summary"),
+                RespValue.BulkString($"SwarmKeyDb support for {spec.Name}."),
+                RespValue.BulkString("since"),
+                RespValue.BulkString("1.0")
+            }) : RespValue.BulkString((byte[]?)null)).ToArray()),
+            _ => RespValue.Error("ERR unknown subcommand or wrong number of arguments for 'COMMAND'")
+        };
+    }
+
+    private static RespValue ToCommandSpecResp(CommandSpec spec) => RespValue.Array(new[]
+    {
+        RespValue.BulkString(spec.Name.ToLowerInvariant()),
+        RespValue.IntegerValue(spec.Arity),
+        RespValue.Array(spec.Flags.Select(RespValue.BulkString).ToArray()),
+        RespValue.IntegerValue(1),
+        RespValue.IntegerValue(1),
+        RespValue.IntegerValue(1)
+    });
+
+    private RespValue ClientCommand(IReadOnlyList<RespValue> args)
+    {
+        if (args.Count < 2)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'CLIENT'");
+        }
+
+        var sub = args[1].AsString().ToUpperInvariant();
+        var current = CurrentClientContext.Value;
+        return sub switch
+        {
+            "ID" when args.Count == 2 => RespValue.IntegerValue(current?.ClientId ?? 0),
+            "GETNAME" when args.Count == 2 => RespValue.BulkString(current is not null && _clientConnections.TryGetValue(current.ClientId, out var client) ? client.Name : null),
+            "SETNAME" when args.Count == 3 => SetClientName(current, args[2].AsString()),
+            "LIST" when args.Count == 2 => RespValue.BulkString(string.Join("\n", _clientConnections.Values.OrderBy(static c => c.Id).Select(c => $"id={c.Id} addr={c.Address} name={c.Name ?? ""} cmd={c.LastCommand}")) + "\n"),
+            "INFO" when args.Count == 2 => RespValue.BulkString(BuildCurrentClientInfo(current)),
+            _ => RespValue.Error("ERR unknown subcommand or wrong number of arguments for 'CLIENT'")
+        };
+    }
+
+    private RespValue SetClientName(ClientContext? current, string name)
+    {
+        if (current is null)
+        {
+            return RespValue.Error("ERR CLIENT SETNAME is only available for connected clients");
+        }
+
+        if (string.IsNullOrWhiteSpace(name) || name.Contains(' ', StringComparison.Ordinal))
+        {
+            return RespValue.Error("ERR Client names cannot contain spaces, newlines or special characters.");
+        }
+
+        _clientConnections.AddOrUpdate(
+            current.ClientId,
+            _ => new ClientConnection(current.ClientId, "unknown") { Name = name },
+            (_, state) => state with { Name = name });
+        return RespValue.SimpleString("OK");
+    }
+
+    private string BuildCurrentClientInfo(ClientContext? current)
+    {
+        if (current is null || !_clientConnections.TryGetValue(current.ClientId, out var client))
+        {
+            return "id=0 addr=unknown name= cmd=unknown age=0 idle=0 flags=N db=0";
+        }
+
+        var age = Math.Max(0, (long)(DateTimeOffset.UtcNow - client.ConnectedAtUtc).TotalSeconds);
+        var idle = Math.Max(0, (long)(DateTimeOffset.UtcNow - client.LastSeenUtc).TotalSeconds);
+        return $"id={client.Id} addr={client.Address} name={client.Name ?? ""} age={age} idle={idle} flags=N db=0 cmd={client.LastCommand}";
+    }
+
+    private RespValue ConfigCommand(IReadOnlyList<RespValue> args)
+    {
+        if (args.Count < 2)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'CONFIG'");
+        }
+
+        var sub = args[1].AsString().ToUpperInvariant();
+        return sub switch
+        {
+            "GET" when args.Count == 3 => ConfigGet(args[2].AsString()),
+            "SET" when args.Count == 4 => ConfigSet(args[2].AsString(), args[3].AsString()),
+            "REWRITE" when args.Count == 2 => RespValue.SimpleString("OK"),
+            "RESETSTAT" when args.Count == 2 => ConfigResetStat(),
+            _ => RespValue.Error("ERR wrong number of arguments for 'CONFIG' command")
+        };
+    }
+
+    private RespValue ConfigGet(string pattern)
+    {
+        var values = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["maxmemory"] = _compatibilityOptions.MaxMemoryBytes.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["maxmemory-policy"] = _compatibilityOptions.MaxMemoryPolicy,
+            ["hz"] = _compatibilityOptions.Hz.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["swarm-keydb-expiry-budget-ms"] = _compatibilityOptions.ExpiryBudgetMs.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        };
+
+        var regex = GlobToRegex(pattern);
+        var items = new List<RespValue>();
+        foreach (var pair in values.Where(pair => regex.IsMatch(pair.Key)))
+        {
+            items.Add(RespValue.BulkString(pair.Key));
+            items.Add(RespValue.BulkString(pair.Value));
+        }
+
+        return RespValue.Array(items);
+    }
+
+    private RespValue ConfigSet(string key, string value)
+    {
+        switch (key.ToLowerInvariant())
+        {
+            case "maxmemory":
+                if (!TryParseMemoryBytes(value, out var maxMemory))
+                {
+                    return RespValue.Error("ERR Invalid argument 'maxmemory'");
+                }
+
+                _compatibilityOptions.MaxMemoryBytes = maxMemory;
+                return RespValue.SimpleString("OK");
+
+            case "maxmemory-policy":
+                var normalized = value.ToLowerInvariant();
+                if (!RedisCompatibilityOptions.AllowedMaxMemoryPolicies.Contains(normalized, StringComparer.Ordinal))
+                {
+                    return RespValue.Error("ERR Invalid argument 'maxmemory-policy'");
+                }
+
+                _compatibilityOptions.MaxMemoryPolicy = normalized;
+                return RespValue.SimpleString("OK");
+
+            case "hz":
+                if (!int.TryParse(value, out var hz) || hz <= 0)
+                {
+                    return RespValue.Error("ERR Invalid argument 'hz'");
+                }
+
+                _compatibilityOptions.Hz = hz;
+                return RespValue.SimpleString("OK");
+
+            case "swarm-keydb-expiry-budget-ms":
+                if (!int.TryParse(value, out var budget) || budget <= 0)
+                {
+                    return RespValue.Error("ERR Invalid argument 'swarm-keydb-expiry-budget-ms'");
+                }
+
+                _compatibilityOptions.ExpiryBudgetMs = budget;
+                return RespValue.SimpleString("OK");
+
+            default:
+                return RespValue.Error("ERR Unsupported CONFIG parameter");
+        }
+    }
+
+    private RespValue ConfigResetStat()
+    {
+        Interlocked.Exchange(ref _totalCommandsProcessed, 0);
+        Interlocked.Exchange(ref _expiryKeysDeletedTotal, 0);
+        Interlocked.Exchange(ref _expiryBudgetExceededTotal, 0);
+        Interlocked.Exchange(ref _evictionTotal, 0);
+        return RespValue.SimpleString("OK");
+    }
+
+    private async Task MaybeRunAdaptiveExpiryAsync(CancellationToken cancellationToken)
+    {
+        var nowUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var intervalMs = Math.Max(1, 1000 / Math.Max(1, _compatibilityOptions.Hz));
+        var dueAt = Volatile.Read(ref _nextExpiryRunUnixMs);
+        if (nowUnixMs < dueAt)
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref _nextExpiryRunUnixMs, nowUnixMs + intervalMs);
+        var stopwatch = Stopwatch.StartNew();
+        IReadOnlyList<string> keys;
+        try
+        {
+            keys = await _store.ListKeysAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (AccessDeniedException)
+        {
+            return;
+        }
+
+        foreach (var key in keys)
+        {
+            (bool exists, TimeSpan? ttl) ttlInfo;
+            try
+            {
+                ttlInfo = await _store.GetTtlAsync(key, cancellationToken).ConfigureAwait(false);
+            }
+            catch (AccessDeniedException)
+            {
+                return;
+            }
+
+            var (exists, ttl) = ttlInfo;
+            if (!exists || ttl is null)
+            {
+                continue;
+            }
+
+            _keyExpiryHints[key] = DateTimeOffset.UtcNow.Add(ttl.Value);
+            if (ttl <= TimeSpan.Zero && await _store.DeleteAsync(key, cancellationToken).ConfigureAwait(false))
+            {
+                _keySizes.TryRemove(key, out _);
+                _keyLastAccessUnixMs.TryRemove(key, out _);
+                _keyExpiryHints.TryRemove(key, out _);
+                Interlocked.Increment(ref _expiryKeysDeletedTotal);
+            }
+
+            if (stopwatch.ElapsedMilliseconds >= _compatibilityOptions.ExpiryBudgetMs)
+            {
+                Interlocked.Increment(ref _expiryBudgetExceededTotal);
+                break;
+            }
+        }
+
+        stopwatch.Stop();
+        Interlocked.Increment(ref _expiryScanCount);
+        AddDouble(ref _expiryScanDurationSecondsSum, Math.Max(0D, stopwatch.Elapsed.TotalSeconds));
+    }
+
+    private async Task<long> EstimateUsedMemoryBytesAsync(CancellationToken cancellationToken)
+    {
+        var total = 0L;
+        foreach (var key in await _store.ListKeysAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var value = await _store.GetAsync(key, cancellationToken).ConfigureAwait(false);
+            if (value is null)
+            {
+                continue;
+            }
+
+            var size = key.Length + value.Length;
+            _keySizes[key] = size;
+            total += size;
+        }
+
+        return Math.Max(0, total);
+    }
+
+    private async Task<bool> EnsureWritableMemoryAsync(string key, int newValueLength, bool hasExpiry, CancellationToken cancellationToken)
+    {
+        if (_compatibilityOptions.MaxMemoryBytes <= 0)
+        {
+            return true;
+        }
+
+        var existingSize = _keySizes.TryGetValue(key, out var existing) ? existing : 0L;
+        var targetSize = key.Length + Math.Max(0, newValueLength);
+        var used = await EstimateUsedMemoryBytesAsync(cancellationToken).ConfigureAwait(false);
+        if (used - existingSize + targetSize <= _compatibilityOptions.MaxMemoryBytes)
+        {
+            return true;
+        }
+
+        if (_compatibilityOptions.MaxMemoryPolicy.Equals("noeviction", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        while (used - existingSize + targetSize > _compatibilityOptions.MaxMemoryBytes)
+        {
+            var evictionCandidate = await SelectEvictionCandidateAsync(key, hasExpiry, cancellationToken).ConfigureAwait(false);
+            if (evictionCandidate is null)
+            {
+                return false;
+            }
+
+            if (!await _store.DeleteAsync(evictionCandidate, cancellationToken).ConfigureAwait(false))
+            {
+                return false;
+            }
+
+            _keySizes.TryRemove(evictionCandidate, out _);
+            _keyLastAccessUnixMs.TryRemove(evictionCandidate, out _);
+            _keyExpiryHints.TryRemove(evictionCandidate, out _);
+            Interlocked.Increment(ref _evictionTotal);
+            used = await EstimateUsedMemoryBytesAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        return true;
+    }
+
+    private async Task<string?> SelectEvictionCandidateAsync(string incomingKey, bool incomingHasExpiry, CancellationToken cancellationToken)
+    {
+        var candidates = (await _store.ListKeysAsync(cancellationToken).ConfigureAwait(false))
+            .Where(key => !key.Equals(incomingKey, StringComparison.Ordinal))
+            .ToArray();
+        if (candidates.Length == 0)
+        {
+            return null;
+        }
+
+        var policy = _compatibilityOptions.MaxMemoryPolicy.ToLowerInvariant();
+        var volatileOnly = policy.StartsWith("volatile", StringComparison.Ordinal);
+        var workingSet = volatileOnly
+            ? candidates.Where(HasExpiryHint).ToArray()
+            : candidates;
+        if (workingSet.Length == 0)
+        {
+            return null;
+        }
+
+        return policy switch
+        {
+            "allkeys-random" or "volatile-random" => workingSet[_random.Next(workingSet.Length)],
+            "allkeys-lru" or "volatile-lru" => workingSet.OrderBy(key => _keyLastAccessUnixMs.TryGetValue(key, out var value) ? value : 0L).FirstOrDefault(),
+            "volatile-ttl" => workingSet.OrderBy(key => _keyExpiryHints.TryGetValue(key, out var expiry) && expiry is not null ? expiry.Value.ToUnixTimeMilliseconds() : long.MaxValue).FirstOrDefault(),
+            _ => incomingHasExpiry ? null : workingSet[_random.Next(workingSet.Length)]
+        };
+    }
+
+    private bool HasExpiryHint(string key) =>
+        _keyExpiryHints.TryGetValue(key, out var expiry) && expiry is not null;
+
+    private static bool TryParseMemoryBytes(string input, out long bytes)
+    {
+        bytes = 0;
+        var trimmed = input.Trim();
+        if (long.TryParse(trimmed, out bytes))
+        {
+            return bytes >= 0;
+        }
+
+        var suffixIndex = trimmed.TakeWhile(static c => char.IsDigit(c)).Count();
+        if (suffixIndex == 0 || suffixIndex >= trimmed.Length)
+        {
+            return false;
+        }
+
+        var numberPart = trimmed[..suffixIndex];
+        var suffix = trimmed[suffixIndex..].ToLowerInvariant();
+        if (!long.TryParse(numberPart, out var value) || value < 0)
+        {
+            return false;
+        }
+
+        bytes = suffix switch
+        {
+            "kb" => value * 1024L,
+            "mb" => value * 1024L * 1024L,
+            "gb" => value * 1024L * 1024L * 1024L,
+            _ => -1
+        };
+        return bytes >= 0;
+    }
+
     private static TimeSpan? TryParseSetExpiryOption(IReadOnlyList<RespValue> args, out string? error)
     {
         error = null;
@@ -3663,6 +4289,16 @@ public sealed class RedisCommandProcessor : IDisposable
                 durationSum));
     }
 
+    public CompatibilityMetricsSnapshot GetCompatibilityMetrics() => new(
+        ExpiryScanDurationSeconds: Interlocked.Read(ref _expiryScanCount) == 0
+            ? 0D
+            : Volatile.Read(ref _expiryScanDurationSecondsSum) / Math.Max(1, Interlocked.Read(ref _expiryScanCount)),
+        ExpiryKeysDeletedTotal: Interlocked.Read(ref _expiryKeysDeletedTotal),
+        ExpiryBudgetExceededTotal: Interlocked.Read(ref _expiryBudgetExceededTotal),
+        MemoryUsedBytes: _keySizes.Sum(static pair => pair.Value),
+        MemoryLimitBytes: _compatibilityOptions.MaxMemoryBytes,
+        EvictionTotal: Interlocked.Read(ref _evictionTotal));
+
     private RespValue PublishCommand(IReadOnlyList<RespValue> args)
     {
         var arityError = RequireArity(args, 3);
@@ -3750,7 +4386,7 @@ public sealed class RedisCommandProcessor : IDisposable
     private static string MapCommandToOperation(string command) => command switch
     {
         "GET" => "get",
-        "SET" or "SETEX" or "PSETEX" => "put",
+        "SET" or "SETEX" or "PSETEX" or "INCR" or "INCRBY" or "DECR" or "DECRBY" => "put",
         "DEL" => "delete",
         "KEYS" or "SCAN" => "list",
         "MGET" or "MSET" or "MSETNX" or "MDEL" => "batch",
@@ -3758,9 +4394,68 @@ public sealed class RedisCommandProcessor : IDisposable
         "PUBLISH" => "pubsub",
         "SUBSCRIBE" or "UNSUBSCRIBE" or "PSUBSCRIBE" or "PUNSUBSCRIBE" or "PUBSUB" => "pubsub",
         "MULTI" or "EXEC" or "DISCARD" or "WATCH" or "UNWATCH" => "transaction",
+        "INFO" or "COMMAND" or "CLIENT" or "CONFIG" => "compatibility",
         "EVAL" or "EVALSHA" or "SCRIPT" => "script",
         _ => "other"
     };
+
+    private static IReadOnlyDictionary<string, CommandSpec> CreateCommandSpecs()
+    {
+        var specs = new[]
+        {
+            new CommandSpec("PING", -1, ["fast"]),
+            new CommandSpec("ECHO", 2, ["fast"]),
+            new CommandSpec("SET", -3, ["write"]),
+            new CommandSpec("SETEX", 4, ["write"]),
+            new CommandSpec("PSETEX", 4, ["write"]),
+            new CommandSpec("GET", 2, ["readonly", "fast"]),
+            new CommandSpec("INCR", 2, ["write", "fast"]),
+            new CommandSpec("INCRBY", 3, ["write", "fast"]),
+            new CommandSpec("DECR", 2, ["write", "fast"]),
+            new CommandSpec("DECRBY", 3, ["write", "fast"]),
+            new CommandSpec("DEL", -2, ["write"]),
+            new CommandSpec("MGET", -2, ["readonly"]),
+            new CommandSpec("MSET", -3, ["write"]),
+            new CommandSpec("MSETNX", -3, ["write"]),
+            new CommandSpec("EXISTS", -2, ["readonly"]),
+            new CommandSpec("EXPIRE", 3, ["write"]),
+            new CommandSpec("PEXPIRE", 3, ["write"]),
+            new CommandSpec("EXPIREAT", 3, ["write"]),
+            new CommandSpec("TTL", 2, ["readonly"]),
+            new CommandSpec("PTTL", 2, ["readonly"]),
+            new CommandSpec("PERSIST", 2, ["write"]),
+            new CommandSpec("TYPE", 2, ["readonly"]),
+            new CommandSpec("KEYS", 2, ["readonly"]),
+            new CommandSpec("SCAN", -2, ["readonly"]),
+            new CommandSpec("INFO", -1, ["readonly"]),
+            new CommandSpec("COMMAND", -1, ["readonly"]),
+            new CommandSpec("CLIENT", -2, ["readonly"]),
+            new CommandSpec("CONFIG", -2, ["admin"]),
+            new CommandSpec("BACKUP", 1, ["admin"]),
+            new CommandSpec("RESTOREDB", -2, ["admin"]),
+            new CommandSpec("ROTATEKEY", 3, ["admin"]),
+            new CommandSpec("BACKENDMETA", 2, ["readonly"]),
+            new CommandSpec("SWARM.RESYNC", -1, ["admin"]),
+            new CommandSpec("PUBLISH", 3, ["pubsub"]),
+            new CommandSpec("PUBSUB", -2, ["pubsub"]),
+            new CommandSpec("SUBSCRIBE", -2, ["pubsub"]),
+            new CommandSpec("UNSUBSCRIBE", -1, ["pubsub"]),
+            new CommandSpec("PSUBSCRIBE", -2, ["pubsub"]),
+            new CommandSpec("PUNSUBSCRIBE", -1, ["pubsub"]),
+            new CommandSpec("MULTI", 1, ["transaction"]),
+            new CommandSpec("EXEC", 1, ["transaction"]),
+            new CommandSpec("DISCARD", 1, ["transaction"]),
+            new CommandSpec("WATCH", -2, ["transaction"]),
+            new CommandSpec("UNWATCH", 1, ["transaction"]),
+            new CommandSpec("EVAL", -3, ["scripting"]),
+            new CommandSpec("EVALSHA", -3, ["scripting"]),
+            new CommandSpec("SCRIPT", -2, ["scripting"])
+        };
+        return specs.ToDictionary(static spec => spec.Name, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static string ResolveRemoteEndpoint(Stream stream) =>
+        stream is NetworkStream ? "tcp" : "unknown:0";
 
     private static string ClassifyError(string? errorText)
     {
@@ -3774,6 +4469,27 @@ public sealed class RedisCommandProcessor : IDisposable
             : errorText;
         var token = normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
         return string.IsNullOrWhiteSpace(token) ? "unknown" : token.ToLowerInvariant();
+    }
+
+    private sealed record CommandSpec(string Name, int Arity, IReadOnlyList<string> Flags);
+    private sealed record ClientContext(long ClientId);
+    private sealed record ClientConnection(
+        long Id,
+        string Address,
+        string? Name = null,
+        string LastCommand = "none",
+        DateTimeOffset ConnectedAtUtc = default,
+        DateTimeOffset LastSeenUtc = default)
+    {
+        public ClientConnection(long id, string address) : this(
+            id,
+            address,
+            Name: null,
+            LastCommand: "none",
+            ConnectedAtUtc: DateTimeOffset.UtcNow,
+            LastSeenUtc: DateTimeOffset.UtcNow)
+        {
+        }
     }
 }
 
@@ -3820,3 +4536,11 @@ public sealed record ScriptDurationHistogramSnapshot(
     IReadOnlyList<long> BucketCounts,
     long Count,
     double Sum);
+
+public sealed record CompatibilityMetricsSnapshot(
+    double ExpiryScanDurationSeconds,
+    long ExpiryKeysDeletedTotal,
+    long ExpiryBudgetExceededTotal,
+    long MemoryUsedBytes,
+    long MemoryLimitBytes,
+    long EvictionTotal);

@@ -376,6 +376,29 @@ Transactions metrics exposed on `/metrics`:
 - `swarmkeydb_transaction_queue_depth` (histogram)
 - `swarmkeydb_transaction_exec_duration_seconds` (histogram)
 
+Compatibility/operability metrics now also include:
+
+- `swarmkeydb_expiry_scan_duration_seconds`
+- `swarmkeydb_expiry_keys_deleted_total`
+- `swarmkeydb_expiry_budget_exceeded_total`
+- `swarmkeydb_memory_used_bytes`
+- `swarmkeydb_memory_limit_bytes`
+- `swarmkeydb_eviction_total`
+
+Compatibility commands available for Redis tooling integration:
+
+- `INFO` (`server`, `clients`, `memory`, `stats`, `replication`, `cpu`, `keyspace`)
+- `COMMAND` (`COUNT`, `INFO <cmd>`, `DOCS <cmd>`)
+- `CLIENT` (`LIST`, `GETNAME`, `SETNAME`, `ID`, `INFO`)
+- `CONFIG` (`GET`, `SET`, `REWRITE`, `RESETSTAT`)
+
+Related runtime controls:
+
+- `SWARM_KEYDB_EXPIRY_BUDGET_MS` (default `25`)
+- `SWARM_KEYDB_HZ` (default `10`)
+- `SWARM_KEYDB_MAX_MEMORY_MB` (default `0`, unlimited)
+- `SWARM_KEYDB_MAX_MEMORY_POLICY` (default `noeviction`)
+
 Compatibility note: commands queued under `MULTI` execute against key state at `EXEC` time. If a key expires or is deleted between queueing and execution, `GET` slots in the `EXEC` reply return nil (`$-1`) consistent with Redis 7.x missing-key behavior.
 
 ## Lua Scripting

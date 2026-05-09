@@ -30,6 +30,17 @@ var offlineJournal = GetOfflineJournalFromSettings();
 var offlineSyncIntervalMs = Math.Max(250, GetInt("SWARM_KEYDB_OFFLINE_SYNC_INTERVAL_MS", 5_000));
 var streamDefaultMaxLen = GetNullableLongFromMany("SWARM_KEYDB_STREAM_DEFAULT_MAXLEN", "Stream:DefaultMaxLen");
 var streamDefaultMaxLenApproximate = GetBoolFromMany(defaultValue: true, "SWARM_KEYDB_STREAM_DEFAULT_MAXLEN_APPROXIMATE", "Stream:DefaultMaxLenApproximate");
+var expiryBudgetMs = Math.Max(1, GetInt("SWARM_KEYDB_EXPIRY_BUDGET_MS", 25));
+var maxMemoryMb = GetNullableInt("SWARM_KEYDB_MAX_MEMORY_MB");
+var maxMemoryPolicy = (GetString("SWARM_KEYDB_MAX_MEMORY_POLICY", "noeviction") ?? "noeviction").ToLowerInvariant();
+var redisHz = Math.Max(1, GetInt("SWARM_KEYDB_HZ", 10));
+var compatibilityOptions = new RedisCompatibilityOptions
+{
+    ExpiryBudgetMs = expiryBudgetMs,
+    MaxMemoryBytes = Math.Max(0, (maxMemoryMb ?? 0) * 1024L * 1024L),
+    MaxMemoryPolicy = maxMemoryPolicy,
+    Hz = redisHz
+};
 var privacyOptions = new SwarmKeyDbOptions
 {
     PrivacyMode = privacyMode,
@@ -90,7 +101,8 @@ var monitoringMetrics = new MonitoringMetrics(
             RedisCommandProcessor.ScriptExecDurationBucketUpperBounds,
             new long[RedisCommandProcessor.ScriptExecDurationBucketUpperBounds.Length],
             0,
-            0)));
+            0)),
+    compatibilityMetricsAccessor: () => processorRef?.GetCompatibilityMetrics() ?? new CompatibilityMetricsSnapshot(0, 0, 0, 0, 0, 0));
 
 var cacheOptions = new CacheOptions
 {
@@ -480,9 +492,10 @@ var processor = new RedisCommandProcessor(
     resyncCoordinator,
     pubSubManager,
     privacyOptions.StreamTrim,
-    new ScriptEngine(
+    scriptEngine: new ScriptEngine(
         timeoutMs: Math.Max(100, GetInt("SWARM_KEYDB_SCRIPT_TIMEOUT_MS", 5_000)),
-        logger: provider.GetRequiredService<ILogger<ScriptEngine>>()));
+        logger: provider.GetRequiredService<ILogger<ScriptEngine>>()),
+    compatibilityOptions: compatibilityOptions);
 processorRef = processor;
 var server = new RedisServer(
     bind,
