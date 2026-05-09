@@ -19,6 +19,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
     private readonly Func<PubSubManager?> _pubSubManagerAccessor;
     private readonly Func<TransactionMetricsSnapshot> _transactionMetricsAccessor;
     private readonly Func<StreamMetricsSnapshot> _streamMetricsAccessor;
+    private readonly Func<ScriptMetricsSnapshot> _scriptMetricsAccessor;
     private readonly string _privacyMode;
     private long _activeConnections;
     private long _swarmReads;
@@ -39,7 +40,8 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         PrivacyMode privacyMode = PrivacyMode.None,
         Func<PubSubManager?>? pubSubManagerAccessor = null,
         Func<TransactionMetricsSnapshot>? transactionMetricsAccessor = null,
-        Func<StreamMetricsSnapshot>? streamMetricsAccessor = null)
+        Func<StreamMetricsSnapshot>? streamMetricsAccessor = null,
+        Func<ScriptMetricsSnapshot>? scriptMetricsAccessor = null)
     {
         _cacheStatsAccessor = cacheStatsAccessor;
         _offlineStatusAccessor = offlineStatusAccessor ?? (() => NoOpOfflineStatusProvider.Instance);
@@ -48,6 +50,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         _pubSubManagerAccessor = pubSubManagerAccessor ?? (() => null);
         _transactionMetricsAccessor = transactionMetricsAccessor ?? (() => EmptyTransactionMetricsSnapshot);
         _streamMetricsAccessor = streamMetricsAccessor ?? (() => EmptyStreamMetricsSnapshot);
+        _scriptMetricsAccessor = scriptMetricsAccessor ?? (() => EmptyScriptMetricsSnapshot);
         _maxLogEntries = Math.Max(10, maxLogEntries);
         _privacyMode = privacyMode.ToString().ToLowerInvariant();
     }
@@ -199,6 +202,16 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine("# TYPE swarmkeydb_stream_trimmed_total counter");
         builder.AppendLine("# HELP swarmkeydb_stream_length_bytes Current serialized stream payload size in bytes.");
         builder.AppendLine("# TYPE swarmkeydb_stream_length_bytes gauge");
+        builder.AppendLine("# HELP swarmkeydb_script_eval_total Total EVAL invocations.");
+        builder.AppendLine("# TYPE swarmkeydb_script_eval_total counter");
+        builder.AppendLine("# HELP swarmkeydb_script_evalsha_total Total EVALSHA invocations.");
+        builder.AppendLine("# TYPE swarmkeydb_script_evalsha_total counter");
+        builder.AppendLine("# HELP swarmkeydb_script_error_total Total script errors (runtime + timeout).");
+        builder.AppendLine("# TYPE swarmkeydb_script_error_total counter");
+        builder.AppendLine("# HELP swarmkeydb_script_timeout_total Total scripts terminated by the CPU-time guard.");
+        builder.AppendLine("# TYPE swarmkeydb_script_timeout_total counter");
+        builder.AppendLine("# HELP swarmkeydb_script_exec_duration_seconds Script execution duration histogram.");
+        builder.AppendLine("# TYPE swarmkeydb_script_exec_duration_seconds histogram");
 
         foreach (var entry in _operations.OrderBy(static item => item.Key, StringComparer.Ordinal))
         {
@@ -295,6 +308,13 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
             builder.AppendLine(FormatMetric("swarmkeydb_stream_length_bytes", entry.Value, ("stream", entry.Key)));
         }
 
+        var scriptMetrics = _scriptMetricsAccessor();
+        builder.AppendLine(FormatMetric("swarmkeydb_script_eval_total", scriptMetrics.EvalTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_script_evalsha_total", scriptMetrics.EvalShaTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_script_error_total", scriptMetrics.ErrorTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_script_timeout_total", scriptMetrics.TimeoutTotal));
+        AppendScriptDurationHistogram(builder, "swarmkeydb_script_exec_duration_seconds", scriptMetrics.ExecDuration);
+
         return builder.ToString();
     }
 
@@ -314,8 +334,33 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
             0,
             0));
     private static readonly StreamMetricsSnapshot EmptyStreamMetricsSnapshot = new(0, 0, 0, 0, 0, 0, 0, new Dictionary<string, long>(StringComparer.Ordinal), 0, 0, new Dictionary<string, long>(StringComparer.Ordinal));
+    private static readonly ScriptMetricsSnapshot EmptyScriptMetricsSnapshot = new(
+        0,
+        0,
+        0,
+        0,
+        new ScriptDurationHistogramSnapshot(
+            RedisCommandProcessor.ScriptExecDurationBucketUpperBounds,
+            new long[RedisCommandProcessor.ScriptExecDurationBucketUpperBounds.Length],
+            0,
+            0));
 
     private void AppendHistogramMetrics(StringBuilder builder, string metricName, TransactionHistogramSnapshot histogram)
+    {
+        for (var i = 0; i < histogram.BucketUpperBounds.Count && i < histogram.BucketCounts.Count; i++)
+        {
+            builder.AppendLine(FormatMetric(
+                $"{metricName}_bucket",
+                histogram.BucketCounts[i],
+                ("le", histogram.BucketUpperBounds[i].ToString(CultureInfo.InvariantCulture))));
+        }
+
+        builder.AppendLine(FormatMetric($"{metricName}_bucket", histogram.Count, ("le", "+Inf")));
+        builder.AppendLine(FormatMetric($"{metricName}_sum", histogram.Sum));
+        builder.AppendLine(FormatMetric($"{metricName}_count", histogram.Count));
+    }
+
+    private void AppendScriptDurationHistogram(StringBuilder builder, string metricName, ScriptDurationHistogramSnapshot histogram)
     {
         for (var i = 0; i < histogram.BucketUpperBounds.Count && i < histogram.BucketCounts.Count; i++)
         {

@@ -80,7 +80,17 @@ var monitoringMetrics = new MonitoringMetrics(
             new long[RedisCommandProcessor.TransactionExecDurationBucketUpperBounds.Length],
             0,
             0)),
-    streamMetricsAccessor: () => processorRef?.GetStreamMetrics() ?? new StreamMetricsSnapshot(0, 0, 0, 0, 0, 0, 0, new Dictionary<string, long>(StringComparer.Ordinal), 0, 0, new Dictionary<string, long>(StringComparer.Ordinal)));
+    streamMetricsAccessor: () => processorRef?.GetStreamMetrics() ?? new StreamMetricsSnapshot(0, 0, 0, 0, 0, 0, 0, new Dictionary<string, long>(StringComparer.Ordinal), 0, 0, new Dictionary<string, long>(StringComparer.Ordinal)),
+    scriptMetricsAccessor: () => processorRef?.GetScriptMetrics() ?? new ScriptMetricsSnapshot(
+        0,
+        0,
+        0,
+        0,
+        new ScriptDurationHistogramSnapshot(
+            RedisCommandProcessor.ScriptExecDurationBucketUpperBounds,
+            new long[RedisCommandProcessor.ScriptExecDurationBucketUpperBounds.Length],
+            0,
+            0)));
 
 var cacheOptions = new CacheOptions
 {
@@ -469,7 +479,10 @@ var processor = new RedisCommandProcessor(
     provider.GetService<IDecentralizedIdentityProvider>(),
     resyncCoordinator,
     pubSubManager,
-    privacyOptions.StreamTrim);
+    privacyOptions.StreamTrim,
+    new ScriptEngine(
+        timeoutMs: Math.Max(100, GetInt("SWARM_KEYDB_SCRIPT_TIMEOUT_MS", 5_000)),
+        logger: provider.GetRequiredService<ILogger<ScriptEngine>>()));
 processorRef = processor;
 var server = new RedisServer(
     bind,

@@ -378,6 +378,54 @@ Transactions metrics exposed on `/metrics`:
 
 Compatibility note: commands queued under `MULTI` execute against key state at `EXEC` time. If a key expires or is deleted between queueing and execution, `GET` slots in the `EXEC` reply return nil (`$-1`) consistent with Redis 7.x missing-key behavior.
 
+## Lua Scripting
+
+SwarmKeyDb supports Redis-compatible Lua scripting via `EVAL`, `EVALSHA`, and `SCRIPT` commands, powered by [MoonSharp](https://www.moonsharp.org/) (MIT licence).
+
+Scripts execute atomically — no other command interleaves during a single `EVAL`/`EVALSHA` run.
+
+**Quick start:**
+
+```bash
+# Run a script that sets and returns a key
+redis-cli EVAL "redis.call('SET', KEYS[1], ARGV[1]); return redis.call('GET', KEYS[1])" 1 greeting "hello"
+
+# Cache a script and execute by SHA1
+redis-cli SCRIPT LOAD "return ARGV[1]"
+# → "a9b7f23..." (SHA1)
+redis-cli EVALSHA a9b7f23... 0 "world"
+# → "world"
+
+# Atomic counter with expiry
+redis-cli EVAL "redis.call('INCR', KEYS[1]); redis.call('EXPIRE', KEYS[1], ARGV[1]); return redis.call('GET', KEYS[1])" 1 counter 3600
+```
+
+**Redlock-style distributed lock:**
+
+```lua
+-- Acquire: EVAL "<script>" 1 lock:name owner_id ttl_seconds
+if redis.call("EXISTS", KEYS[1]) == 0 then
+  redis.call("SET", KEYS[1], ARGV[1])
+  redis.call("EXPIRE", KEYS[1], ARGV[2])
+  return 1  -- acquired
+end
+return 0    -- already held
+```
+
+**Rate limiter:**
+
+```lua
+-- EVAL "<script>" 1 rate:user:123 max_count ttl_seconds
+local n = redis.call("INCR", KEYS[1])
+if n == 1 then redis.call("EXPIRE", KEYS[1], ARGV[2]) end
+if tonumber(n) > tonumber(ARGV[1]) then return 0 end
+return 1
+```
+
+**Sandbox:** `io`, `os`, `package`, `dofile`, `loadfile`, `require`, and `load` are stripped. Scripts that exceed `SWARM_KEYDB_SCRIPT_TIMEOUT_MS` (default 5 000 ms) receive `−BUSY Script exceeded time limit` and the command loop continues immediately.
+
+See [docs/lua-scripting.md](docs/lua-scripting.md) for full reference, type-mapping table, and all Prometheus script metrics.
+
 Quick check:
 
 ```bash
