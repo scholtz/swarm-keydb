@@ -116,6 +116,7 @@ var ethereumBridgeOptions = new EthereumBridgeOptions
 };
 var crossChainOptions = GetCrossChainOptions();
 var cacheSyncOptions = GetCacheSyncOptions();
+var resyncOptions = GetResyncOptions();
 var services = new ServiceCollection();
 services.AddLogging(builder =>
 {
@@ -146,7 +147,9 @@ services.AddSingleton<IOptions<AclOptions>>(Options.Create(aclOptions));
 services.AddSingleton<IOptions<AsyncProcessingOptions>>(Options.Create(asyncProcessingOptions));
 services.AddSingleton<IOptions<SwarmKeyDbOptions>>(Options.Create(privacyOptions));
 services.AddSingleton<IOptions<CacheSyncOptions>>(Options.Create(cacheSyncOptions));
+services.AddSingleton<IOptions<ResyncOptions>>(Options.Create(resyncOptions));
 services.AddSingleton<IEncryptionKeyProvider>(_ => new MutableEncryptionKeyProvider(encryptionOptions));
+services.AddSingleton<IResyncMetricsReporter>(_ => monitoringMetrics);
 services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
 services.AddSingleton<IEthAddressAccessor, AsyncLocalEthAddressAccessor>();
 services.AddSingleton<IDidContextAccessor, AsyncLocalDidContextAccessor>();
@@ -377,6 +380,23 @@ services.AddSingleton<ICacheSyncStatusProvider>(sp =>
         cacheSyncOptions,
         sp.GetRequiredService<ILogger<AntiEntropyService>>());
 });
+services.AddSingleton<IResyncCoordinator>(sp =>
+{
+    if (sp.GetRequiredService<IKeyValueStore>() is not ICacheSyncParticipant participant)
+    {
+        return NoOpResyncCoordinator.Instance;
+    }
+
+    return new ResyncCoordinator(
+        participant,
+        sp.GetRequiredService<IKeyValueStore>(),
+        sp.GetRequiredService<ICacheSyncBus>(),
+        cacheSyncOptions,
+        resyncOptions,
+        sp.GetRequiredService<ILogger<ResyncCoordinator>>(),
+        sp.GetRequiredService<IResyncMetricsReporter>());
+});
+services.AddSingleton<IResyncStatusProvider>(sp => sp.GetRequiredService<IResyncCoordinator>());
 
 using var provider = services.BuildServiceProvider();
 cacheStats = provider.GetRequiredService<ICacheStats>();
@@ -385,6 +405,8 @@ var baseStore = provider.GetRequiredService<IKeyValueStore>();
 var offlineStatusProvider = provider.GetRequiredService<IOfflineStatusProvider>();
 var consistencyStatusProvider = provider.GetRequiredService<IConsistencyVerificationStatusProvider>();
 var cacheSyncStatusProvider = provider.GetService<ICacheSyncStatusProvider>() ?? NoOpCacheSyncStatusProvider.Instance;
+var resyncCoordinator = provider.GetService<IResyncCoordinator>() ?? NoOpResyncCoordinator.Instance;
+var resyncStatusProvider = provider.GetService<IResyncStatusProvider>() ?? NoOpResyncCoordinator.Instance;
 offlineStatusMetrics = offlineStatusProvider;
 CrossChainSyncService? crossChainSyncService = null;
 OfflineSyncService? offlineSyncService = provider.GetService<OfflineSyncService>();
@@ -410,7 +432,8 @@ var processor = new RedisCommandProcessor(
     monitoringMetrics,
     provider.GetRequiredService<ILogger<RedisCommandProcessor>>(),
     provider.GetRequiredService<IDidContextAccessor>(),
-    provider.GetService<IDecentralizedIdentityProvider>());
+    provider.GetService<IDecentralizedIdentityProvider>(),
+    resyncCoordinator);
 var server = new RedisServer(
     bind,
     port,
@@ -456,6 +479,20 @@ if (antiEntropyService is not null)
     await antiEntropyService.StartAsync(cts.Token);
 }
 
+if (!ReferenceEquals(resyncCoordinator, NoOpResyncCoordinator.Instance))
+{
+    try
+    {
+        _ = await resyncCoordinator.TriggerResyncAsync(ResyncMode.Auto, cts.Token);
+    }
+    catch (Exception ex)
+    {
+        provider.GetRequiredService<ILoggerFactory>()
+            .CreateLogger("ResyncStartup")
+            .LogWarning(ex, "Startup resync failed. Continuing server startup.");
+    }
+}
+
 var monitoringServers = new List<MonitoringHttpServer>();
 var monitoringTasks = new List<Task>();
 if (dashboardEnabled)
@@ -475,6 +512,8 @@ if (dashboardEnabled)
         offlineStatusProvider,
         consistencyStatusProvider,
         cacheSyncStatusProvider,
+        resyncStatusProvider,
+        resyncCoordinator,
         privacyMode: privacyOptions.PrivacyMode,
         didMode: privacyOptions.DidMode);
     monitoringServers.Add(dashboardServer);
@@ -498,6 +537,8 @@ if (metricsEnabled && (!dashboardEnabled || metricsPort != dashboardPort))
         offlineStatusProvider,
         consistencyStatusProvider,
         cacheSyncStatusProvider,
+        resyncStatusProvider,
+        resyncCoordinator,
         privacyMode: privacyOptions.PrivacyMode,
         didMode: privacyOptions.DidMode);
     monitoringServers.Add(metricsServer);
@@ -827,6 +868,24 @@ CacheSyncOptions GetCacheSyncOptions()
         Channel = GetFirstSetting("SWARM_KEYDB_SYNC_CHANNEL", "CacheSync:Channel") ?? "swarm-keydb-sync",
         NodeId = GetFirstSetting("SWARM_KEYDB_SYNC_NODE_ID", "CacheSync:NodeId")
                  ?? $"{Environment.MachineName}:{port}"
+    };
+}
+
+ResyncOptions GetResyncOptions()
+{
+    var modeText = GetFirstSetting("SWARM_KEYDB_RESYNC_MODE", "Resync:Mode");
+    var mode = string.IsNullOrWhiteSpace(modeText)
+        ? ResyncMode.Auto
+        : Enum.TryParse<ResyncMode>(modeText, ignoreCase: true, out var parsedMode)
+            ? parsedMode
+            : throw new InvalidOperationException("SWARM_KEYDB_RESYNC_MODE must be auto, partial, or full.");
+
+    return new ResyncOptions
+    {
+        Mode = mode,
+        MaxVersionGapForPartialResync = Math.Max(0, GetNullableIntFromMany("SWARM_KEYDB_RESYNC_MAX_VERSION_GAP", "Resync:MaxVersionGapForPartialResync") ?? 128),
+        FullResyncBatchSize = Math.Max(1, GetNullableIntFromMany("SWARM_KEYDB_RESYNC_FULL_BATCH_SIZE", "Resync:FullResyncBatchSize") ?? 256),
+        ResyncTimeoutSeconds = Math.Max(1, GetNullableIntFromMany("SWARM_KEYDB_RESYNC_TIMEOUT_SECONDS", "Resync:TimeoutSeconds") ?? 30)
     };
 }
 

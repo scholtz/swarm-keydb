@@ -18,6 +18,10 @@
 | `SWARM_KEYDB_SYNC_INTERVAL_SEC` | `5` | Anti-entropy reconciliation interval for cross-instance cache version checks. |
 | `SWARM_KEYDB_SYNC_CHANNEL` | `swarm-keydb-sync` | Redis pub/sub channel used for version-stamped cache invalidation events. |
 | `SWARM_KEYDB_SYNC_NODE_ID` | `<machine>:<port>` | Optional stable node identifier used in sync event source metadata. |
+| `SWARM_KEYDB_RESYNC_MODE` | `auto` | Startup/default resync strategy (`auto`, `partial`, `full`). |
+| `SWARM_KEYDB_RESYNC_MAX_VERSION_GAP` | `128` | Maximum version gap allowed for automatic partial resync before falling back to full rebuild. |
+| `SWARM_KEYDB_RESYNC_FULL_BATCH_SIZE` | `256` | Number of keys replayed per full-resync batch. |
+| `SWARM_KEYDB_RESYNC_TIMEOUT_SECONDS` | `30` | Timeout for each resync operation. |
 | `SWARM_KEYDB_OFFLINE_MODE` | `never` | Offline-first mode (`never`, `auto`, `always`). |
 | `SWARM_KEYDB_OFFLINE_JOURNAL` | `memory` | Offline journal backend (`memory`, `sqlite`). |
 | `SWARM_KEYDB_OFFLINE_SYNC_INTERVAL_MS` | `5000` | Replay polling interval used by `OfflineSyncService`. |

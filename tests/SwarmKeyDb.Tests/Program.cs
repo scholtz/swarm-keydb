@@ -92,6 +92,8 @@ var tests = new (string Name, Func<Task> Test)[]
     ("caching store max entries evicts lru", CachingKeyValueStoreMaxEntriesEvictsLruAsync),
     ("cache sync invalidation propagates across instances", CacheSyncInvalidationPropagatesAcrossInstancesAsync),
     ("cache sync anti entropy reconciles after partition", CacheSyncAntiEntropyReconcilesAfterPartitionAsync),
+    ("resync coordinator chooses partial and full based on version gap", ResyncCoordinatorChoosesModeByVersionGapAsync),
+    ("resync coordinator full mode rebuilds from authoritative store", ResyncCoordinatorFullModeRebuildsCacheAsync),
     ("compressing store put stores compressed value", CompressingKeyValueStorePutStoresCompressedValueAsync),
     ("compressing store get returns decompressed value", CompressingKeyValueStoreGetReturnsDecompressedValueAsync),
     ("compressing store skips compression below min size", CompressingKeyValueStoreSkipsCompressionBelowMinSizeAsync),
@@ -145,7 +147,9 @@ var tests = new (string Name, Func<Task> Test)[]
     ("monitoring health and dashboard expose offline queue depth", MonitoringHealthAndDashboardExposeOfflineQueueDepthAsync),
     ("monitoring health and dashboard expose consistency verification metrics", MonitoringHealthAndDashboardExposeConsistencyMetricsAsync),
     ("monitoring health and dashboard expose cache sync metrics", MonitoringHealthAndDashboardExposeCacheSyncMetricsAsync),
+    ("monitoring metrics and dashboard expose resync status", MonitoringMetricsAndDashboardExposeResyncStatusAsync),
     ("redis command logging includes correlation ids", RedisCommandLoggingIncludesCorrelationIdsAsync),
+    ("redis swarm resync command supports modes and errors", RedisSwarmResyncCommandSupportsModesAndErrorsAsync),
     ("redis management commands backup restore and rotate", RedisManagementCommandsBackupRestoreAndRotateAsync),
     ("migrate scan pattern applies prefix filter", MigrateScanPatternAppliesPrefixFilterAsync),
     ("migrate checkpoint store saves and loads", MigrateCheckpointStoreSavesAndLoadsAsync),
@@ -1852,6 +1856,82 @@ static async Task CacheSyncAntiEntropyReconcilesAfterPartitionAsync()
     AssertEqual("v2", Encoding.UTF8.GetString(converged!));
 }
 
+static async Task ResyncCoordinatorChoosesModeByVersionGapAsync()
+{
+    var remote = new CountingKeyValueStore();
+    var bus = new InMemoryCacheSyncBus();
+    var syncA = new CacheSyncOptions { Enabled = true, NodeId = "node-a", Peers = ["node-b"], SyncIntervalSeconds = 1 };
+    var syncB = new CacheSyncOptions { Enabled = true, NodeId = "node-b", Peers = ["node-a"], SyncIntervalSeconds = 1 };
+    var storeA = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: Options.Create(syncA));
+    var storeB = CreateCachingStore(remote, maxEntries: 8, syncBus: bus, syncOptions: Options.Create(syncB));
+
+    await storeA.PutAsync("resync:key", Encoding.UTF8.GetBytes("v1"));
+    _ = await storeB.GetAsync("resync:key");
+
+    var coordinator = new ResyncCoordinator(
+        storeB,
+        storeB,
+        bus,
+        syncB,
+        new ResyncOptions
+        {
+            Mode = ResyncMode.Auto,
+            MaxVersionGapForPartialResync = 4,
+            FullResyncBatchSize = 4,
+            ResyncTimeoutSeconds = 10
+        });
+
+    bus.SetNodeConnected("node-b", false);
+    for (var i = 0; i < 3; i++)
+    {
+        await storeA.PutAsync("resync:key", Encoding.UTF8.GetBytes($"v{i + 2}"));
+    }
+    bus.SetNodeConnected("node-b", true);
+
+    var partial = await coordinator.TriggerResyncAsync(ResyncMode.Auto);
+    AssertEqual(ResyncMode.Partial, partial.Mode);
+    AssertEqual(1, partial.KeysReplayed);
+
+    bus.SetNodeConnected("node-b", false);
+    for (var i = 0; i < 8; i++)
+    {
+        await storeA.PutAsync("resync:key", Encoding.UTF8.GetBytes($"v{i + 10}"));
+    }
+    bus.SetNodeConnected("node-b", true);
+
+    var full = await coordinator.TriggerResyncAsync(ResyncMode.Auto);
+    AssertEqual(ResyncMode.Full, full.Mode);
+    Assert(full.KeysReplayed >= 1, "Full resync should replay at least one key.");
+}
+
+static async Task ResyncCoordinatorFullModeRebuildsCacheAsync()
+{
+    var remote = new CountingKeyValueStore();
+    await remote.PutAsync("restore:key", Encoding.UTF8.GetBytes("v1"));
+    var sync = new CacheSyncOptions { Enabled = true, NodeId = "node-full" };
+    var store = CreateCachingStore(remote, maxEntries: 8, syncBus: NoOpCacheSyncBus.Instance, syncOptions: Options.Create(sync));
+    AssertEqual("v1", Encoding.UTF8.GetString((await store.GetAsync("restore:key"))!));
+
+    await remote.PutAsync("restore:key", Encoding.UTF8.GetBytes("v2"));
+
+    var coordinator = new ResyncCoordinator(
+        store,
+        store,
+        NoOpCacheSyncBus.Instance,
+        sync,
+        new ResyncOptions
+        {
+            Mode = ResyncMode.Full,
+            FullResyncBatchSize = 2,
+            ResyncTimeoutSeconds = 10
+        });
+
+    var result = await coordinator.TriggerResyncAsync(ResyncMode.Full);
+    AssertEqual(ResyncMode.Full, result.Mode);
+    AssertEqual(1, result.KeysReplayed);
+    AssertEqual("v2", Encoding.UTF8.GetString((await store.GetAsync("restore:key"))!));
+}
+
 static async Task MonitoringMetricsEndpointExposesCountersAsync()
 {
     var cacheStats = new FakeCacheStats { Hits = 3, Misses = 1 };
@@ -2100,6 +2180,50 @@ static async Task MonitoringHealthAndDashboardExposeCacheSyncMetricsAsync()
     server.Dispose();
 }
 
+static async Task MonitoringMetricsAndDashboardExposeResyncStatusAsync()
+{
+    var metrics = new MonitoringMetrics(
+        () => NoOpCacheStats.Instance,
+        () => NoOpOfflineStatusProvider.Instance,
+        () => NoOpConsistencyVerificationStatusProvider.Instance);
+    metrics.RecordResync(ResyncMode.Partial, TimeSpan.FromSeconds(1.2), 3);
+    var coordinator = new RecordingResyncCoordinator();
+    var port = TestNetHelpers.GetFreePort();
+    var server = new MonitoringHttpServer(
+        IPAddress.Loopback,
+        port,
+        metrics,
+        new StaticReadinessProbe(ready: true, message: "ready"),
+        metricsEnabled: true,
+        dashboardEnabled: true,
+        NullLogger<MonitoringHttpServer>.Instance,
+        resyncStatusProvider: coordinator,
+        resyncCoordinator: coordinator);
+    using var cts = new CancellationTokenSource();
+    var runTask = server.RunAsync(cts.Token);
+    using var client = new HttpClient();
+
+    var readyPayload = await client.GetStringAsync($"http://127.0.0.1:{port}/ready");
+    Assert(readyPayload.Contains("\"resync\":", StringComparison.Ordinal), "Expected resync object in ready payload.");
+
+    var metricsPayload = await client.GetStringAsync($"http://127.0.0.1:{port}/metrics");
+    Assert(metricsPayload.Contains("swarmkeydb_resync_partial_total", StringComparison.Ordinal), "Expected partial resync metric.");
+    Assert(metricsPayload.Contains("swarmkeydb_resync_keys_replayed_total", StringComparison.Ordinal), "Expected keys replayed metric.");
+
+    var response = await client.PostAsync($"http://127.0.0.1:{port}/admin/resync?mode=full", content: null);
+    var triggerPayload = await response.Content.ReadAsStringAsync();
+    AssertEqual(HttpStatusCode.OK, response.StatusCode);
+    Assert(triggerPayload.Contains("\"mode\":\"full\"", StringComparison.Ordinal), "Expected triggered full resync response.");
+
+    var dashboard = await client.GetStringAsync($"http://127.0.0.1:{port}/dashboard");
+    Assert(dashboard.Contains("Resync Status", StringComparison.Ordinal), "Expected resync section in dashboard HTML.");
+    Assert(dashboard.Contains("resync-trigger-partial", StringComparison.Ordinal), "Expected resync trigger control in dashboard HTML.");
+
+    cts.Cancel();
+    await runTask;
+    server.Dispose();
+}
+
 static async Task RedisCommandLoggingIncludesCorrelationIdsAsync()
 {
     var logger = new CaptureLogger<RedisCommandProcessor>();
@@ -2112,6 +2236,29 @@ static async Task RedisCommandLoggingIncludesCorrelationIdsAsync()
     Assert(logger.Scopes.Count > 0, "Expected at least one logging scope.");
     Assert(logger.Scopes.Any(scope => scope.TryGetValue("correlationId", out var value) && !string.IsNullOrWhiteSpace(value)),
         "Expected correlationId in command logging scope.");
+}
+
+static async Task RedisSwarmResyncCommandSupportsModesAndErrorsAsync()
+{
+    var coordinator = new RecordingResyncCoordinator();
+    var processor = new RedisCommandProcessor(
+        new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()),
+        resyncCoordinator: coordinator);
+
+    var auto = await ExecuteAsync(processor, RespCommand("SWARM.RESYNC"));
+    Assert(auto.Contains("\"status\":\"ok\"", StringComparison.Ordinal), "Expected SWARM.RESYNC auto success payload.");
+
+    var partial = await ExecuteAsync(processor, RespCommand("SWARM.RESYNC", "PARTIAL"));
+    Assert(partial.Contains("\"mode\":\"partial\"", StringComparison.Ordinal), "Expected explicit partial mode in response.");
+
+    var invalidMode = await ExecuteAsync(processor, RespCommand("SWARM.RESYNC", "invalid"));
+    AssertEqual("-ERR invalid resync mode. expected PARTIAL or FULL\r\n", invalidMode);
+
+    var wrongArity = await ExecuteAsync(processor, RespCommand("SWARM.RESYNC", "FULL", "EXTRA"));
+    AssertEqual("-ERR wrong number of arguments for 'SWARM.RESYNC' command\r\n", wrongArity);
+
+    var unavailable = await ExecuteAsync(CreateProcessor(), RespCommand("SWARM.RESYNC"));
+    AssertEqual("-ERR SWARM.RESYNC is not available.\r\n", unavailable);
 }
 
 static async Task RedisManagementCommandsBackupRestoreAndRotateAsync()
@@ -4599,6 +4746,48 @@ internal sealed class StaticCacheSyncStatusProvider : ICacheSyncStatusProvider
     }
 
     public CacheSyncSnapshot GetSnapshot() => _snapshot;
+}
+
+internal sealed class RecordingResyncCoordinator : IResyncCoordinator
+{
+    private ResyncStatusSnapshot _snapshot = new(
+        InProgress: false,
+        CurrentMode: "idle",
+        LastResyncUtc: null,
+        LastMode: "none",
+        KeysReplayedLastRun: 0,
+        KeysReplayedTotal: 0,
+        LastError: null,
+        CorrelationId: null);
+
+    public Action<ResyncLifecycleContext>? OnResyncStarted { get; set; }
+    public Action<ResyncLifecycleContext>? OnResyncCompleted { get; set; }
+    public Action<ResyncLifecycleContext>? OnResyncFailed { get; set; }
+
+    public ResyncStatusSnapshot GetSnapshot() => _snapshot;
+
+    public Task<ResyncOperationResult> TriggerResyncAsync(ResyncMode mode = ResyncMode.Auto, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var normalizedMode = mode == ResyncMode.Auto ? ResyncMode.Partial : mode;
+        var startedAt = DateTimeOffset.UtcNow;
+        var completedAt = startedAt.AddMilliseconds(50);
+        var correlationId = Guid.NewGuid().ToString("N");
+        var keys = normalizedMode == ResyncMode.Full ? 2 : 1;
+        var context = new ResyncLifecycleContext(correlationId, normalizedMode, keys, 0, startedAt, completedAt, null);
+        OnResyncStarted?.Invoke(context with { CompletedAtUtc = null });
+        _snapshot = new ResyncStatusSnapshot(
+            InProgress: false,
+            CurrentMode: "idle",
+            LastResyncUtc: completedAt,
+            LastMode: normalizedMode.ToString().ToLowerInvariant(),
+            KeysReplayedLastRun: keys,
+            KeysReplayedTotal: _snapshot.KeysReplayedTotal + keys,
+            LastError: null,
+            CorrelationId: correlationId);
+        OnResyncCompleted?.Invoke(context);
+        return Task.FromResult(new ResyncOperationResult(normalizedMode, keys, 0, TimeSpan.FromMilliseconds(50), completedAt));
+    }
 }
 
 internal sealed class ToggleConnectivityProbe : IConnectivityProbe
