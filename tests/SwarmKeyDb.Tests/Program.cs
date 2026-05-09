@@ -204,8 +204,13 @@ var tests = new (string Name, Func<Task> Test)[]
     ("redis discard without multi returns error", RedisDiscardWithoutMultiReturnsErrorAsync),
     ("redis multi nested returns error", RedisMultiNestedReturnsErrorAsync),
     ("redis discard clears queued commands", RedisDiscardClearsQueuedCommandsAsync),
+    ("redis pipelined discard exits transaction state", RedisPipelinedDiscardExitsTransactionStateAsync),
     ("redis exec with empty queue returns empty array", RedisExecWithEmptyQueueReturnsEmptyArrayAsync),
     ("redis multi unknown command marks queue error and exec returns execabort", RedisMultiUnknownCommandMarksQueueErrorAsync),
+    ("redis transaction queued commands are cleaned up on disconnect", RedisTransactionQueuedCommandsAreCleanedUpOnDisconnectAsync),
+    ("redis transaction replay after disconnect does not double execute", RedisTransactionReplayAfterDisconnectDoesNotDoubleExecuteAsync),
+    ("redis transaction executes against current key state after expiry", RedisTransactionUsesCurrentStateAfterExpiryAsync),
+    ("redis transaction executes against current key state after deletion", RedisTransactionUsesCurrentStateAfterDeletionAsync),
     ("redis watch exec aborts when key modified by another connection", RedisWatchExecAbortsOnConflictAsync),
     ("redis watch exec succeeds when key not modified", RedisWatchExecSucceedsWhenKeyNotModifiedAsync),
     ("redis unwatch clears watch registrations", RedisUnwatchClearsWatchRegistrationsAsync),
@@ -3562,6 +3567,22 @@ static async Task RedisDiscardClearsQueuedCommandsAsync()
     Assert(response.EndsWith("$8\r\noriginal\r\n", StringComparison.Ordinal), "DISCARD should have discarded the queued SET; GET should return original value.");
 }
 
+static async Task RedisPipelinedDiscardExitsTransactionStateAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "disc:pipe", "before") +
+        RespCommand("MULTI") +
+        RespCommand("SET", "disc:pipe", "after") +
+        RespCommand("DISCARD") +
+        RespCommand("EXEC") +
+        RespCommand("GET", "disc:pipe"));
+
+    Assert(response.Contains("+OK\r\n+OK\r\n+QUEUED\r\n+OK\r\n", StringComparison.Ordinal), "Expected pipelined MULTI queue and DISCARD acknowledgements.");
+    Assert(response.Contains("-ERR EXEC without MULTI", StringComparison.Ordinal), "EXEC after DISCARD in a pipelined batch must fail.");
+    Assert(response.EndsWith("$6\r\nbefore\r\n", StringComparison.Ordinal), "DISCARD should prevent queued mutations from being applied.");
+}
+
 static async Task RedisExecWithEmptyQueueReturnsEmptyArrayAsync()
 {
     var processor = CreateProcessor();
@@ -3585,6 +3606,95 @@ static async Task RedisMultiUnknownCommandMarksQueueErrorAsync()
     Assert(response.Contains("-ERR unknown command `UNKNOWNCMD`", StringComparison.Ordinal), "Unknown command during MULTI must return error.");
     // EXEC must return EXECABORT since there was a queue error
     Assert(response.Contains("-EXECABORT", StringComparison.Ordinal), "EXEC must return EXECABORT when a queue error was set.");
+}
+
+static async Task RedisTransactionQueuedCommandsAreCleanedUpOnDisconnectAsync()
+{
+    var processor = CreateProcessor();
+
+    var (sessionInput, sessionOutput) = CreatePipe();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var sessionTask = processor.ProcessAsync(sessionInput, sessionOutput, cts.Token);
+
+    await WriteRespCommandAsync(sessionInput, "MULTI");
+    await WriteRespCommandAsync(sessionInput, "SET", "disconnect:k", "queued-value");
+    await Task.Delay(100, cts.Token);
+
+    await sessionInput.DisposeAsync();
+    await sessionTask;
+
+    var replayResponse = await ExecuteAsync(processor, RespCommand("EXEC"));
+    Assert(replayResponse.StartsWith("-ERR EXEC without MULTI", StringComparison.Ordinal), "Disconnected transaction state must be cleaned and not leak to future sessions.");
+    var getResponse = await ExecuteAsync(processor, RespCommand("GET", "disconnect:k"));
+    Assert(getResponse.EndsWith("$-1\r\n", StringComparison.Ordinal), "Queued write from disconnected MULTI session must not be applied.");
+}
+
+static async Task RedisTransactionReplayAfterDisconnectDoesNotDoubleExecuteAsync()
+{
+    var processor = CreateProcessor();
+    await ExecuteAsync(processor, RespCommand("SET", "replay:k", "initial"));
+
+    var (sessionInput, sessionOutput) = CreatePipe();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var sessionTask = processor.ProcessAsync(sessionInput, sessionOutput, cts.Token);
+
+    await WriteRespCommandAsync(sessionInput, "MULTI");
+    await WriteRespCommandAsync(sessionInput, "SET", "replay:k", "queued");
+    await Task.Delay(100, cts.Token);
+    await sessionInput.DisposeAsync();
+    await sessionTask;
+
+    var retryResponse = await ExecuteAsync(processor, RespCommand("EXEC") + RespCommand("GET", "replay:k"));
+    Assert(retryResponse.Contains("-ERR EXEC without MULTI", StringComparison.Ordinal), "Retried EXEC on a new connection must not re-use the old queue.");
+    Assert(retryResponse.EndsWith("$7\r\ninitial\r\n", StringComparison.Ordinal), "Retried connection must not double-apply the disconnected transaction.");
+}
+
+static async Task RedisTransactionUsesCurrentStateAfterExpiryAsync()
+{
+    var processor = CreateProcessor();
+    await ExecuteAsync(processor, RespCommand("SETEX", "tx:exp", "1", "v"));
+
+    var (sessionInput, sessionOutput) = CreatePipe();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var sessionTask = processor.ProcessAsync(sessionInput, sessionOutput, cts.Token);
+
+    await WriteRespCommandAsync(sessionInput, "MULTI");
+    await WriteRespCommandAsync(sessionInput, "GET", "tx:exp");
+    await Task.Delay(1200, cts.Token);
+    await WriteRespCommandAsync(sessionInput, "EXEC");
+    await Task.Delay(100, cts.Token);
+
+    cts.Cancel();
+    try { await sessionTask; } catch (OperationCanceledException) { }
+
+    var output = ReadAllBytes(sessionOutput);
+    Assert(output.Contains("*1\r\n$-1\r\n", StringComparison.Ordinal), $"Expired key should return nil in EXEC slot. Output: {output}");
+}
+
+static async Task RedisTransactionUsesCurrentStateAfterDeletionAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    var processor = new RedisCommandProcessor(store);
+    await ExecuteAsync(processor, RespCommand("SET", "tx:del", "v1"));
+
+    var (sessionInput, sessionOutput) = CreatePipe();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var sessionTask = processor.ProcessAsync(sessionInput, sessionOutput, cts.Token);
+
+    await WriteRespCommandAsync(sessionInput, "MULTI");
+    await WriteRespCommandAsync(sessionInput, "GET", "tx:del");
+    await Task.Delay(50, cts.Token);
+
+    await ExecuteAsync(processor, RespCommand("DEL", "tx:del"));
+
+    await WriteRespCommandAsync(sessionInput, "EXEC");
+    await Task.Delay(100, cts.Token);
+
+    cts.Cancel();
+    try { await sessionTask; } catch (OperationCanceledException) { }
+
+    var output = ReadAllBytes(sessionOutput);
+    Assert(output.Contains("*1\r\n$-1\r\n", StringComparison.Ordinal), $"Deleted key should return nil when EXEC runs. Output: {output}");
 }
 
 static async Task RedisWatchExecAbortsOnConflictAsync()
@@ -3732,9 +3842,12 @@ static async Task RedisTransactionMetricsAreTrackedAsync()
         RespCommand("EXEC"));
 
     var metrics = processor.GetTransactionMetrics();
-    Assert(metrics.ExecTotal == 1, $"Expected ExecTotal=1, got {metrics.ExecTotal}.");
-    Assert(metrics.AbortTotal == 0, $"Expected AbortTotal=0, got {metrics.AbortTotal}.");
+    Assert(metrics.StartedTotal == 1, $"Expected StartedTotal=1, got {metrics.StartedTotal}.");
+    Assert(metrics.CommittedTotal == 1, $"Expected CommittedTotal=1, got {metrics.CommittedTotal}.");
+    Assert(metrics.AbortedTotal == 0, $"Expected AbortedTotal=0, got {metrics.AbortedTotal}.");
     Assert(metrics.WatchConflictTotal == 0, $"Expected WatchConflictTotal=0, got {metrics.WatchConflictTotal}.");
+    Assert(metrics.QueueDepth.Count == 1, $"Expected one queue depth observation, got {metrics.QueueDepth.Count}.");
+    Assert(metrics.ExecDuration.Count == 1, $"Expected one exec duration observation, got {metrics.ExecDuration.Count}.");
 
     // Trigger a WATCH conflict abort using a concurrent session
     var store2 = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
@@ -3759,7 +3872,7 @@ static async Task RedisTransactionMetricsAreTrackedAsync()
     try { await sessionTask; } catch (OperationCanceledException) { }
 
     var metrics2 = processor2.GetTransactionMetrics();
-    Assert(metrics2.AbortTotal == 1, $"Expected AbortTotal=1, got {metrics2.AbortTotal}.");
+    Assert(metrics2.AbortedTotal == 1, $"Expected AbortedTotal=1, got {metrics2.AbortedTotal}.");
     Assert(metrics2.WatchConflictTotal == 1, $"Expected WatchConflictTotal=1, got {metrics2.WatchConflictTotal}.");
 }
 
@@ -3792,11 +3905,17 @@ static async Task PrometheusMetricsExposesTransactionTelemetryAsync()
     using var client = new HttpClient();
 
     var payload = await client.GetStringAsync($"http://127.0.0.1:{port}/metrics");
-    Assert(payload.Contains("# HELP swarmkeydb_transaction_exec_total", StringComparison.Ordinal), "Expected transaction_exec HELP.");
-    Assert(payload.Contains("# TYPE swarmkeydb_transaction_exec_total counter", StringComparison.Ordinal), "Expected transaction_exec TYPE.");
-    Assert(payload.Contains("swarmkeydb_transaction_exec_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "Expected exec counter = 1.");
-    Assert(payload.Contains("# HELP swarmkeydb_transaction_abort_total", StringComparison.Ordinal), "Expected transaction_abort HELP.");
+    Assert(payload.Contains("# HELP swarmkeydb_transaction_started_total", StringComparison.Ordinal), "Expected transaction_started HELP.");
+    Assert(payload.Contains("# TYPE swarmkeydb_transaction_started_total counter", StringComparison.Ordinal), "Expected transaction_started TYPE.");
+    Assert(payload.Contains("swarmkeydb_transaction_started_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "Expected started counter = 1.");
+    Assert(payload.Contains("# HELP swarmkeydb_transaction_committed_total", StringComparison.Ordinal), "Expected transaction_committed HELP.");
+    Assert(payload.Contains("swarmkeydb_transaction_committed_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "Expected committed counter = 1.");
+    Assert(payload.Contains("# HELP swarmkeydb_transaction_aborted_total", StringComparison.Ordinal), "Expected transaction_aborted HELP.");
     Assert(payload.Contains("# HELP swarmkeydb_transaction_watch_conflict_total", StringComparison.Ordinal), "Expected watch_conflict HELP.");
+    Assert(payload.Contains("# HELP swarmkeydb_transaction_queue_depth", StringComparison.Ordinal), "Expected queue depth histogram HELP.");
+    Assert(payload.Contains("swarmkeydb_transaction_queue_depth_bucket{le=\"1\",privacy_mode=\"none\"}", StringComparison.Ordinal), "Expected queue depth histogram buckets.");
+    Assert(payload.Contains("# HELP swarmkeydb_transaction_exec_duration_seconds", StringComparison.Ordinal), "Expected exec duration histogram HELP.");
+    Assert(payload.Contains("swarmkeydb_transaction_exec_duration_seconds_count{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "Expected exec duration count.");
 
     cts.Cancel();
     await runTask;

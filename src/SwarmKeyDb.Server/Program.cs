@@ -58,7 +58,21 @@ var monitoringMetrics = new MonitoringMetrics(
     () => cacheSyncStatusMetrics ?? NoOpCacheSyncStatusProvider.Instance,
     privacyMode: privacyOptions.PrivacyMode,
     pubSubManagerAccessor: () => pubSubManager,
-    transactionMetricsAccessor: () => processorRef?.GetTransactionMetrics() ?? new TransactionMetricsSnapshot(0, 0, 0));
+    transactionMetricsAccessor: () => processorRef?.GetTransactionMetrics() ?? new TransactionMetricsSnapshot(
+        0,
+        0,
+        0,
+        0,
+        new TransactionHistogramSnapshot(
+            RedisCommandProcessor.TransactionQueueDepthBucketUpperBounds,
+            new long[RedisCommandProcessor.TransactionQueueDepthBucketUpperBounds.Length],
+            0,
+            0),
+        new TransactionHistogramSnapshot(
+            RedisCommandProcessor.TransactionExecDurationBucketUpperBounds,
+            new long[RedisCommandProcessor.TransactionExecDurationBucketUpperBounds.Length],
+            0,
+            0)));
 
 var cacheOptions = new CacheOptions
 {
