@@ -1,7 +1,9 @@
 # Roadmap for SwarmKeyDb
 
+## K8S helm chart
+- [ ] Create helm charts for smooth deployment to k8s. Create scripts to create new version of the helm chart. I want the helm charts to be published to artifacthub. The files will be in the helm chart folder in this repo and published using github pages.
+
 ## Core Functionality Enhancements
-- [x] Implement CRDTs for conflict-free concurrent writes and merges. (100%)
 - [x] Add support for TTL and expiration of keys. (100%)
 - [x] Enable batch operations for multiple get/put/delete in one call. (100%)
 - [x] Introduce advanced querying capabilities like range scans and filters. (100%)
