@@ -72,7 +72,7 @@ public sealed class ConsistencyVerificationMiddleware :
         var violation = await EvaluateVerificationAsync(key, () => _verifier.VerifyContentHashAsync(reference, expectedHash, cancellationToken), cancellationToken).ConfigureAwait(false);
         if (violation is not null)
         {
-            return await HandleViolationAndRefetchAsync(key, violation, cancellationToken).ConfigureAwait(false);
+            return await EvictCacheAndRefetchAsync(key, violation, cancellationToken).ConfigureAwait(false);
         }
 
         var feedRevision = _options.ExpectedFeedRevisionResolver?.Invoke(key);
@@ -81,7 +81,7 @@ public sealed class ConsistencyVerificationMiddleware :
             violation = await EvaluateVerificationAsync(key, () => _verifier.VerifyFeedRevisionAsync(reference, expectedRevision, cancellationToken), cancellationToken).ConfigureAwait(false);
             if (violation is not null)
             {
-                return await HandleViolationAndRefetchAsync(key, violation, cancellationToken).ConfigureAwait(false);
+                return await EvictCacheAndRefetchAsync(key, violation, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -91,7 +91,7 @@ public sealed class ConsistencyVerificationMiddleware :
             violation = await EvaluateVerificationAsync(key, () => _verifier.VerifyManifestLineageAsync(lineage.ManifestRef, lineage.Ancestors, cancellationToken), cancellationToken).ConfigureAwait(false);
             if (violation is not null)
             {
-                return await HandleViolationAndRefetchAsync(key, violation, cancellationToken).ConfigureAwait(false);
+                return await EvictCacheAndRefetchAsync(key, violation, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -190,11 +190,12 @@ public sealed class ConsistencyVerificationMiddleware :
     }
 
     /// <summary>
-    /// Called when verification fails in warn mode.  Evicts the stale cache entry,
-    /// invokes the operator callback, and re-fetches the value from the backend so
-    /// the next read bypasses the (now-evicted) cache entry.
+    /// Called when verification fails in warn mode.  Evicts the stale cache entry (when
+    /// the inner chain supports it via <see cref="ICacheEviction"/>), invokes the operator
+    /// callback, and re-fetches the value from the backend so the next read bypasses the
+    /// (now-evicted) cache entry.
     /// </summary>
-    private async Task<byte[]?> HandleViolationAndRefetchAsync(string key, VerificationResult violation, CancellationToken cancellationToken)
+    private async Task<byte[]?> EvictCacheAndRefetchAsync(string key, VerificationResult violation, CancellationToken cancellationToken)
     {
         // Evict from the in-memory cache (if the inner chain supports it) so the next
         // read goes through to Swarm instead of serving a stale/divergent cached value.
@@ -204,6 +205,11 @@ public sealed class ConsistencyVerificationMiddleware :
             Interlocked.Increment(ref _cacheEvictionsByVerification);
             _logger.LogInformation(
                 "Evicted cache entry for key {Key} after consistency verification failure.", key);
+        }
+        else
+        {
+            _logger.LogDebug(
+                "Inner store for key {Key} does not implement ICacheEviction; stale cache entry will not be evicted. Verification failures will not trigger cache eviction for this store configuration.", key);
         }
 
         // Invoke the operator-supplied callback (if any) for observability / alerting.
