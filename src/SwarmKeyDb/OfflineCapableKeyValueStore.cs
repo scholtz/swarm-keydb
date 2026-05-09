@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace SwarmKeyDb;
 
-public sealed class OfflineCapableKeyValueStore : IOfflineKeyValueStore, ICacheStats
+public sealed class OfflineCapableKeyValueStore : IOfflineKeyValueStore, ICacheStats, IBackendMetadataProvider, ICacheEviction
 {
     private readonly IKeyValueStore _inner;
     private readonly IOfflineJournal _journal;
@@ -379,6 +379,11 @@ public sealed class OfflineCapableKeyValueStore : IOfflineKeyValueStore, ICacheS
     }
 
     private void MarkOffline(bool isOffline) => Volatile.Write(ref _isOffline, isOffline);
+
+    public Task<string?> GetBackendMetadataAsync(string key, CancellationToken cancellationToken = default) =>
+        (_inner as IBackendMetadataProvider)?.GetBackendMetadataAsync(key, cancellationToken) ?? Task.FromResult<string?>(null);
+
+    public void EvictFromCache(string key) => (_inner as ICacheEviction)?.EvictFromCache(key);
 
     private sealed record LocalCacheEntry(byte[]? Value, DateTimeOffset CachedAtUtc, bool PendingWrite, bool IsDeleted);
 }

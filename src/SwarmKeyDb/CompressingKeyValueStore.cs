@@ -4,7 +4,7 @@ using Microsoft.Extensions.Options;
 
 namespace SwarmKeyDb;
 
-public sealed class CompressingKeyValueStore : IKeyValueStore, IAccessControlVerifier
+public sealed class CompressingKeyValueStore : IKeyValueStore, IAccessControlVerifier, IBackendMetadataProvider
 {
     // GZip magic bytes (RFC 1952)
     private static readonly byte[] GZipMagic = [0x1F, 0x8B];
@@ -166,4 +166,7 @@ public sealed class CompressingKeyValueStore : IKeyValueStore, IAccessControlVer
         decompressed = Array.Empty<byte>();
         return false;
     }
+
+    public Task<string?> GetBackendMetadataAsync(string key, CancellationToken cancellationToken = default) =>
+        (_inner as IBackendMetadataProvider)?.GetBackendMetadataAsync(key, cancellationToken) ?? Task.FromResult<string?>(null);
 }

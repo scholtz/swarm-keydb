@@ -2,7 +2,7 @@ using Microsoft.Extensions.Options;
 
 namespace SwarmKeyDb;
 
-public sealed class AclKeyValueStore : IKeyValueStore, IAccessControlVerifier
+public sealed class AclKeyValueStore : IKeyValueStore, IAccessControlVerifier, IBackendMetadataProvider
 {
     private readonly IKeyValueStore _inner;
     private readonly IEthAddressAccessor _ethAddressAccessor;
@@ -159,6 +159,9 @@ public sealed class AclKeyValueStore : IKeyValueStore, IAccessControlVerifier
 
         return entries;
     }
+
+    public Task<string?> GetBackendMetadataAsync(string key, CancellationToken cancellationToken = default) =>
+        (_inner as IBackendMetadataProvider)?.GetBackendMetadataAsync(key, cancellationToken) ?? Task.FromResult<string?>(null);
 
     private enum Operation
     {

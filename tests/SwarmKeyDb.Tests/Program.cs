@@ -27,6 +27,11 @@ var tests = new (string Name, Func<Task> Test)[]
     ("quorum consistency verifier requires threshold", QuorumConsistencyVerifierRequiresThresholdAsync),
     ("consistency middleware strict mode throws on violation", ConsistencyMiddlewareStrictModeThrowsOnViolationAsync),
     ("consistency middleware warn mode logs and returns value", ConsistencyMiddlewareWarnModeLogsAndReturnsValueAsync),
+    ("consistency middleware warn mode evicts cache entry on failure", ConsistencyMiddlewareWarnModeEvictsCacheEntryOnFailureAsync),
+    ("consistency middleware warn mode invokes on verification failure callback", ConsistencyMiddlewareWarnModeInvokesCallbackAsync),
+    ("consistency middleware eviction counter increments on cache eviction", ConsistencyMiddlewareEvictionCounterIncrementsAsync),
+    ("consistency middleware pass does not evict cache entry", ConsistencyMiddlewarePassDoesNotEvictCacheAsync),
+    ("consistency middleware integration evicts corrupted cache and refetches", ConsistencyMiddlewareIntegrationEvictsCorruptedCacheAsync),
     ("ipfs backend supports put get delete list and scan", IpfsBackendSupportsKeyValueOperationsAsync),
     ("hybrid backend falls back to available storage backend", HybridBackendFallsBackToAvailableStorageAsync),
     ("redis backendmeta command returns backend metadata", RedisBackendMetaCommandReturnsMetadataAsync),
@@ -507,6 +512,211 @@ static async Task ConsistencyMiddlewareWarnModeLogsAndReturnsValueAsync()
     var value = await middleware.GetAsync("profile:name");
     AssertEqual("Ada", Encoding.UTF8.GetString(value!));
     Assert(logger.Messages.Any(message => message.Contains("Consistency verification failed", StringComparison.Ordinal)), "Expected warning log in warn mode.");
+}
+
+static async Task ConsistencyMiddlewareWarnModeEvictsCacheEntryOnFailureAsync()
+{
+    // Set up an in-memory store + caching layer so we can verify eviction behaviour.
+    var baseStore = new MetadataCountingStore();
+    await baseStore.PutAsync("cache:key", Encoding.UTF8.GetBytes("swarm-value"));
+    await baseStore.SetReferenceAsync("cache:key", "ref-evict");
+
+    var cache = new MemoryCache(new MemoryCacheOptions());
+    var cachingStore = new CachingKeyValueStore(
+        baseStore,
+        cache,
+        Options.Create(new CacheOptions { Enabled = true }),
+        NullLogger<CachingKeyValueStore>.Instance);
+
+    // Prime the cache by doing a read.
+    await cachingStore.GetAsync("cache:key");
+    AssertEqual(1, cachingStore.Hits + cachingStore.Misses);
+    AssertEqual(0, cachingStore.Hits); // first read is always a miss
+
+    // Do a second read — should be a cache hit now.
+    _ = await cachingStore.GetAsync("cache:key");
+    AssertEqual(1, cachingStore.Hits);
+
+    // Now wrap with the verification middleware (fail mode = Warn).
+    var failingVerifier = new StaticConsistencyVerifier(VerificationResult.Failed("content-hash", "http://bee.local", TimeSpan.FromMilliseconds(5), "expected", "actual", "hash mismatch"));
+    var logger = new TestLogger<ConsistencyVerificationMiddleware>();
+    var middleware = new ConsistencyVerificationMiddleware(
+        cachingStore,
+        failingVerifier,
+        Options.Create(new ConsistencyOptions { Enabled = true, FailureMode = ConsistencyFailureMode.Warn }),
+        logger);
+
+    // Prime the cache again through the middleware.
+    await middleware.GetAsync("cache:key");
+    var hitsBefore = cachingStore.Hits;
+
+    // Trigger a verification failure — the middleware should evict the cache entry.
+    var evictionsBefore = cachingStore.Evictions;
+    _ = await middleware.GetAsync("cache:key");
+    var evictionsAfter = cachingStore.Evictions;
+
+    Assert(evictionsAfter > evictionsBefore, "Expected cache evictions to increment after a verification failure.");
+    var snapshot = middleware.GetSnapshot();
+    Assert(snapshot.EvictionByVerificationTotal > 0, "Expected EvictionByVerificationTotal to be non-zero.");
+    Assert(snapshot.ViolationCount > 0, "Expected violation count to be non-zero.");
+}
+
+static async Task ConsistencyMiddlewareWarnModeInvokesCallbackAsync()
+{
+    var inner = new MetadataCountingStore();
+    await inner.PutAsync("cb:key", Encoding.UTF8.GetBytes("value"));
+    await inner.SetReferenceAsync("cb:key", "ref-cb");
+
+    var callbackInvoked = false;
+    string? callbackKey = null;
+    VerificationResult? callbackResult = null;
+
+    var verifier = new StaticConsistencyVerifier(VerificationResult.Failed("content-hash", "http://bee.local", TimeSpan.FromMilliseconds(3), "exp", "act", "mismatch"));
+    var options = new ConsistencyOptions
+    {
+        Enabled = true,
+        FailureMode = ConsistencyFailureMode.Warn,
+        OnVerificationFailure = (key, result) =>
+        {
+            callbackInvoked = true;
+            callbackKey = key;
+            callbackResult = result;
+        }
+    };
+    var middleware = new ConsistencyVerificationMiddleware(
+        inner,
+        verifier,
+        Options.Create(options),
+        NullLogger<ConsistencyVerificationMiddleware>.Instance);
+
+    _ = await middleware.GetAsync("cb:key");
+
+    Assert(callbackInvoked, "Expected OnVerificationFailure callback to be invoked.");
+    AssertEqual("cb:key", callbackKey);
+    Assert(callbackResult is not null, "Expected callback to receive a VerificationResult.");
+    Assert(!callbackResult!.IsValid, "Expected callback to receive a failed result.");
+}
+
+static async Task ConsistencyMiddlewareEvictionCounterIncrementsAsync()
+{
+    // Verify EvictionByVerificationTotal increments with a real CachingKeyValueStore.
+    var baseStore = new MetadataCountingStore();
+    await baseStore.PutAsync("evt:key", Encoding.UTF8.GetBytes("val"));
+    await baseStore.SetReferenceAsync("evt:key", "ref-evt");
+
+    var cachingStore = new CachingKeyValueStore(
+        baseStore,
+        new MemoryCache(new MemoryCacheOptions()),
+        Options.Create(new CacheOptions { Enabled = true }),
+        NullLogger<CachingKeyValueStore>.Instance);
+
+    var failingVerifier = new StaticConsistencyVerifier(VerificationResult.Failed("content-hash", "http://bee.local", TimeSpan.FromMilliseconds(2), "exp", "act", "mismatch"));
+    var middleware = new ConsistencyVerificationMiddleware(
+        cachingStore,
+        failingVerifier,
+        Options.Create(new ConsistencyOptions { Enabled = true, FailureMode = ConsistencyFailureMode.Warn }),
+        NullLogger<ConsistencyVerificationMiddleware>.Instance);
+
+    var snapshot0 = middleware.GetSnapshot();
+    AssertEqual(0, snapshot0.EvictionByVerificationTotal);
+
+    _ = await middleware.GetAsync("evt:key");
+    var snapshot1 = middleware.GetSnapshot();
+    AssertEqual(1, snapshot1.EvictionByVerificationTotal);
+
+    _ = await middleware.GetAsync("evt:key");
+    var snapshot2 = middleware.GetSnapshot();
+    AssertEqual(2, snapshot2.EvictionByVerificationTotal);
+}
+
+static async Task ConsistencyMiddlewarePassDoesNotEvictCacheAsync()
+{
+    var baseStore = new MetadataCountingStore();
+    await baseStore.PutAsync("pass:key", Encoding.UTF8.GetBytes("good-value"));
+    await baseStore.SetReferenceAsync("pass:key", "ref-pass");
+
+    var cachingStore = new CachingKeyValueStore(
+        baseStore,
+        new MemoryCache(new MemoryCacheOptions()),
+        Options.Create(new CacheOptions { Enabled = true }),
+        NullLogger<CachingKeyValueStore>.Instance);
+
+    var passingVerifier = new StaticConsistencyVerifier(VerificationResult.Passed("content-hash", "http://bee.local", TimeSpan.FromMilliseconds(1), "a", "a"));
+    var middleware = new ConsistencyVerificationMiddleware(
+        cachingStore,
+        passingVerifier,
+        Options.Create(new ConsistencyOptions { Enabled = true }),
+        NullLogger<ConsistencyVerificationMiddleware>.Instance);
+
+    // Read twice; the second should be a cache hit with no eviction.
+    await middleware.GetAsync("pass:key");
+    await middleware.GetAsync("pass:key");
+
+    var snapshot = middleware.GetSnapshot();
+    AssertEqual(0, snapshot.EvictionByVerificationTotal);
+    AssertEqual(2, snapshot.TotalVerifications);
+    AssertEqual(0, snapshot.ViolationCount);
+    AssertEqual(1, cachingStore.Hits); // second read was a cache hit
+}
+
+static async Task ConsistencyMiddlewareIntegrationEvictsCorruptedCacheAsync()
+{
+    // Integration test: write a key, corrupt the cached value in-memory, then verify
+    // that the next GetAsync evicts the corrupted entry and returns the Swarm value.
+    var swarm = new InMemorySwarmClient();
+    var index = new InMemoryKeyIndex();
+    var baseStore = new SwarmKeyValueStore(swarm, index, new IntegrityOptions { Enabled = false });
+
+    await baseStore.PutAsync("int:key", Encoding.UTF8.GetBytes("real-value"));
+
+    var cache = new MemoryCache(new MemoryCacheOptions());
+    var cachingStore = new CachingKeyValueStore(
+        baseStore,
+        cache,
+        Options.Create(new CacheOptions { Enabled = true }),
+        NullLogger<CachingKeyValueStore>.Instance);
+
+    // Prime the cache.
+    _ = await cachingStore.GetAsync("int:key");
+    AssertEqual(0, cachingStore.Hits);
+
+    // Inject a "corrupted" value directly into the cache to simulate divergence.
+    var corruptEntry = cache.CreateEntry("int:key");
+    corruptEntry.Value = Encoding.UTF8.GetBytes("corrupted-value");
+    corruptEntry.Dispose();
+
+    // Confirm the cache now serves the corrupted value.
+    var cachedValue = await cachingStore.GetAsync("int:key");
+    AssertEqual("corrupted-value", Encoding.UTF8.GetString(cachedValue!));
+    AssertEqual(1, cachingStore.Hits);
+
+    // Set up a verifier that always fails (simulating a Swarm mismatch).
+    var failingVerifier = new StaticConsistencyVerifier(
+        VerificationResult.Failed("content-hash", "http://bee.local", TimeSpan.FromMilliseconds(2), "exp", "act", "hash mismatch"));
+
+    var middleware = new ConsistencyVerificationMiddleware(
+        cachingStore,
+        failingVerifier,
+        Options.Create(new ConsistencyOptions { Enabled = true, FailureMode = ConsistencyFailureMode.Warn }),
+        NullLogger<ConsistencyVerificationMiddleware>.Instance);
+
+    // Reference is only available on SwarmKeyValueStore directly; expose it through the
+    // cache so TryGetBackendReferenceAsync can find it.
+    // SwarmKeyValueStore implements IBackendMetadataProvider; CachingKeyValueStore now
+    // propagates it, so the middleware should find it through the chain.
+    var reference = await ((IBackendMetadataProvider)cachingStore).GetBackendMetadataAsync("int:key");
+    Assert(reference is not null, "Expected backend reference to be available through the CachingKeyValueStore.");
+
+    var evictionsBefore = cachingStore.Evictions;
+
+    // GetAsync through middleware: verification fails → evict → re-fetch from SwarmStore.
+    var result = await middleware.GetAsync("int:key");
+
+    var evictionsAfter = cachingStore.Evictions;
+    Assert(evictionsAfter > evictionsBefore, "Expected cache eviction after verification failure.");
+    AssertEqual("real-value", Encoding.UTF8.GetString(result!));
+    var snapshot = middleware.GetSnapshot();
+    Assert(snapshot.EvictionByVerificationTotal > 0, "Expected eviction counter to increment.");
 }
 
 static async Task HybridBackendFallsBackToAvailableStorageAsync()
@@ -1756,7 +1966,8 @@ static async Task MonitoringHealthAndDashboardExposeConsistencyMetricsAsync()
                 TotalVerifications: 10,
                 ViolationCount: 2,
                 SuccessRate: 0.8,
-                WorstLatencyMs: 42)));
+                WorstLatencyMs: 42,
+                EvictionByVerificationTotal: 0)));
     var port = TestNetHelpers.GetFreePort();
     var server = new MonitoringHttpServer(
         IPAddress.Loopback,
@@ -1772,7 +1983,8 @@ static async Task MonitoringHealthAndDashboardExposeConsistencyMetricsAsync()
                 TotalVerifications: 10,
                 ViolationCount: 2,
                 SuccessRate: 0.8,
-                WorstLatencyMs: 42)));
+                WorstLatencyMs: 42,
+                EvictionByVerificationTotal: 0)));
     using var cts = new CancellationTokenSource();
     var runTask = server.RunAsync(cts.Token);
     using var client = new HttpClient();
