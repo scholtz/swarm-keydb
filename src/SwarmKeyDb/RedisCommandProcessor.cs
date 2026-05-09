@@ -32,6 +32,19 @@ public sealed class RedisCommandProcessor : IDisposable
     private readonly StreamTrimOptions _streamTrimOptions;
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
 
+    // Scripting
+    private readonly ScriptEngine _scriptEngine;
+    private readonly ScriptCache _scriptCache;
+
+    // Scripting telemetry counters
+    private long _scriptEvalTotal;
+    private long _scriptEvalShaTotal;
+    private long _scriptErrorTotal;
+    private long _scriptTimeoutTotal;
+    private readonly long[] _scriptExecDurationBucketCounts = new long[ScriptExecDurationBucketUpperBounds.Length];
+    private long _scriptExecDurationCount;
+    private double _scriptExecDurationSumSeconds;
+
     // Shared key-version tracker for WATCH support (incremented on every successful mutation)
     private readonly ConcurrentDictionary<string, long> _keyVersions = new(StringComparer.Ordinal);
     private long _versionClock;
@@ -60,6 +73,7 @@ public sealed class RedisCommandProcessor : IDisposable
 
     public static readonly double[] TransactionQueueDepthBucketUpperBounds = [0, 1, 2, 4, 8, 16, 32];
     public static readonly double[] TransactionExecDurationBucketUpperBounds = [0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5];
+    public static readonly double[] ScriptExecDurationBucketUpperBounds = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
 
     public RedisCommandProcessor(
         IKeyValueStore store,
@@ -73,7 +87,9 @@ public sealed class RedisCommandProcessor : IDisposable
         IDecentralizedIdentityProvider? didProvider = null,
         IResyncCoordinator? resyncCoordinator = null,
         PubSubManager? pubSubManager = null,
-        StreamTrimOptions? streamTrimOptions = null)
+        StreamTrimOptions? streamTrimOptions = null,
+        ScriptEngine? scriptEngine = null,
+        ScriptCache? scriptCache = null)
     {
         _store = store;
         _ethAddressAccessor = ethAddressAccessor;
@@ -87,6 +103,8 @@ public sealed class RedisCommandProcessor : IDisposable
         _resyncCoordinator = resyncCoordinator;
         _pubSubManager = pubSubManager;
         _streamTrimOptions = streamTrimOptions ?? new StreamTrimOptions();
+        _scriptEngine = scriptEngine ?? new ScriptEngine();
+        _scriptCache = scriptCache ?? new ScriptCache();
     }
 
     public async Task ProcessAsync(Stream input, Stream output, CancellationToken cancellationToken = default)
@@ -857,6 +875,9 @@ public sealed class RedisCommandProcessor : IDisposable
                 "SWARM.RESYNC" => await SwarmResyncAsync(args, cancellationToken).ConfigureAwait(false),
                 "PUBLISH" => PublishCommand(args),
                 "PUBSUB" => PubSubCommand(args),
+                "EVAL" => await EvalAsync(args, cancellationToken).ConfigureAwait(false),
+                "EVALSHA" => await EvalShaAsync(args, cancellationToken).ConfigureAwait(false),
+                "SCRIPT" => await ScriptCommandAsync(args, cancellationToken).ConfigureAwait(false),
                 "QUIT" => RespValue.SimpleString("OK"),
                 _ => RespValue.Error($"ERR unknown command '{command}'")
             };
@@ -3441,6 +3462,207 @@ public sealed class RedisCommandProcessor : IDisposable
         return new Regex("^" + escaped + "$", RegexOptions.CultureInvariant);
     }
 
+    // ─── Scripting: EVAL / EVALSHA / SCRIPT ──────────────────────────────────────
+
+    private async Task<RespValue> EvalAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        // EVAL script numkeys [key [key ...]] [arg [arg ...]]
+        if (args.Count < 3)
+        {
+            return RespValue.Error($"ERR wrong number of arguments for '{args[0].AsString()}'");
+        }
+
+        var script = args[1].AsString();
+        if (!int.TryParse(args[2].AsString(), out var numKeys) || numKeys < 0)
+        {
+            return RespValue.Error("ERR value is not an integer or out of range");
+        }
+
+        if (3 + numKeys > args.Count)
+        {
+            return RespValue.Error("ERR Number of keys can't be greater than number of args");
+        }
+
+        var keys = args.Skip(3).Take(numKeys).Select(static a => a.AsString()).ToList();
+        var argv = args.Skip(3 + numKeys).Select(static a => a.AsString()).ToList();
+
+        Interlocked.Increment(ref _scriptEvalTotal);
+
+        // Cache the script so it can be retrieved by EVALSHA afterwards.
+        _scriptCache.Store(script);
+
+        return await RunScriptAsync(script, keys, argv, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<RespValue> EvalShaAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        // EVALSHA sha1 numkeys [key [key ...]] [arg [arg ...]]
+        if (args.Count < 3)
+        {
+            return RespValue.Error($"ERR wrong number of arguments for '{args[0].AsString()}'");
+        }
+
+        var sha1 = args[1].AsString().ToLowerInvariant();
+        if (!int.TryParse(args[2].AsString(), out var numKeys) || numKeys < 0)
+        {
+            return RespValue.Error("ERR value is not an integer or out of range");
+        }
+
+        var script = _scriptCache.Get(sha1);
+        if (script is null)
+        {
+            return RespValue.Error("NOSCRIPT No matching script. Please use EVAL.");
+        }
+
+        if (3 + numKeys > args.Count)
+        {
+            return RespValue.Error("ERR Number of keys can't be greater than number of args");
+        }
+
+        var keys = args.Skip(3).Take(numKeys).Select(static a => a.AsString()).ToList();
+        var argv = args.Skip(3 + numKeys).Select(static a => a.AsString()).ToList();
+
+        Interlocked.Increment(ref _scriptEvalShaTotal);
+
+        return await RunScriptAsync(script, keys, argv, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<RespValue> ScriptCommandAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        if (args.Count < 2)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'SCRIPT'");
+        }
+
+        var subCommand = args[1].AsString().ToUpperInvariant();
+
+        switch (subCommand)
+        {
+            case "LOAD":
+            {
+                if (args.Count != 3)
+                {
+                    return RespValue.Error("ERR wrong number of arguments for 'SCRIPT|LOAD'");
+                }
+
+                var source = args[2].AsString();
+                var sha1 = _scriptCache.Store(source);
+                return RespValue.BulkString(sha1);
+            }
+
+            case "EXISTS":
+            {
+                if (args.Count < 3)
+                {
+                    return RespValue.Error("ERR wrong number of arguments for 'SCRIPT|EXISTS'");
+                }
+
+                var results = new List<RespValue>(args.Count - 2);
+                for (var i = 2; i < args.Count; i++)
+                {
+                    results.Add(RespValue.IntegerValue(_scriptCache.Exists(args[i].AsString().ToLowerInvariant()) ? 1 : 0));
+                }
+
+                return RespValue.Array(results);
+            }
+
+            case "FLUSH":
+            {
+                // SCRIPT FLUSH [ASYNC|SYNC] — mode is ignored (single-node cache)
+                _scriptCache.Flush();
+                return RespValue.SimpleString("OK");
+            }
+
+            case "KILL":
+            {
+                // SCRIPT KILL terminates a running non-write script.
+                // In this implementation scripts run on Tasks; we cannot kill them mid-flight.
+                // Return NOTBUSY to match Redis when no script is currently running.
+                return RespValue.Error("NOTBUSY No scripts in execution right now.");
+            }
+
+            default:
+                return RespValue.Error($"ERR unknown subcommand '{subCommand}' for 'SCRIPT'");
+        }
+    }
+
+    private async Task<RespValue> RunScriptAsync(
+        string scriptSource,
+        IReadOnlyList<string> keys,
+        IReadOnlyList<string> argv,
+        CancellationToken cancellationToken)
+    {
+        var sw = Stopwatch.StartNew();
+        var result = await _scriptEngine.ExecuteAsync(
+            scriptSource,
+            keys,
+            argv,
+            async (cmd, cmdArgs) =>
+            {
+                // Build a synthetic RESP request and dispatch through ExecuteAsync.
+                var items = new List<RespValue>(1 + cmdArgs.Count) { RespValue.BulkString(cmd) };
+                items.AddRange(cmdArgs.Select(static a => RespValue.BulkString(a)));
+                return await ExecuteAsync(RespValue.Array(items), cancellationToken).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+
+        sw.Stop();
+
+        if (result.Type == RespType.Error)
+        {
+            Interlocked.Increment(ref _scriptErrorTotal);
+            if (result.Text?.StartsWith("BUSY", StringComparison.Ordinal) == true)
+            {
+                Interlocked.Increment(ref _scriptTimeoutTotal);
+            }
+        }
+
+        RecordScriptDuration(sw.Elapsed);
+        return result;
+    }
+
+    private void RecordScriptDuration(TimeSpan elapsed)
+    {
+        var seconds = elapsed.TotalSeconds;
+        lock (_scriptExecDurationBucketCounts)
+        {
+            Interlocked.Increment(ref _scriptExecDurationCount);
+            var currentSum = Volatile.Read(ref _scriptExecDurationSumSeconds);
+            Volatile.Write(ref _scriptExecDurationSumSeconds, currentSum + seconds);
+            for (var i = 0; i < ScriptExecDurationBucketUpperBounds.Length; i++)
+            {
+                if (seconds <= ScriptExecDurationBucketUpperBounds[i])
+                {
+                    Interlocked.Increment(ref _scriptExecDurationBucketCounts[i]);
+                }
+            }
+        }
+    }
+
+    /// <summary>Returns a snapshot of scripting telemetry counters.</summary>
+    public ScriptMetricsSnapshot GetScriptMetrics()
+    {
+        long[] bucketSnapshot;
+        long durationCount;
+        double durationSum;
+        lock (_scriptExecDurationBucketCounts)
+        {
+            bucketSnapshot = (long[])_scriptExecDurationBucketCounts.Clone();
+            durationCount = Interlocked.Read(ref _scriptExecDurationCount);
+            durationSum = Volatile.Read(ref _scriptExecDurationSumSeconds);
+        }
+
+        return new ScriptMetricsSnapshot(
+            Interlocked.Read(ref _scriptEvalTotal),
+            Interlocked.Read(ref _scriptEvalShaTotal),
+            Interlocked.Read(ref _scriptErrorTotal),
+            Interlocked.Read(ref _scriptTimeoutTotal),
+            new ScriptDurationHistogramSnapshot(
+                ScriptExecDurationBucketUpperBounds,
+                bucketSnapshot,
+                durationCount,
+                durationSum));
+    }
+
     private RespValue PublishCommand(IReadOnlyList<RespValue> args)
     {
         var arityError = RequireArity(args, 3);
@@ -3536,6 +3758,7 @@ public sealed class RedisCommandProcessor : IDisposable
         "PUBLISH" => "pubsub",
         "SUBSCRIBE" or "UNSUBSCRIBE" or "PSUBSCRIBE" or "PUNSUBSCRIBE" or "PUBSUB" => "pubsub",
         "MULTI" or "EXEC" or "DISCARD" or "WATCH" or "UNWATCH" => "transaction",
+        "EVAL" or "EVALSHA" or "SCRIPT" => "script",
         _ => "other"
     };
 
@@ -3582,3 +3805,18 @@ public sealed record StreamMetricsSnapshot(
     long TrimmedTotal,
     long StreamLengthBytesTotal,
     IReadOnlyDictionary<string, long> StreamLengthBytesByStream);
+
+/// <summary>Snapshot of scripting telemetry counters.</summary>
+public sealed record ScriptMetricsSnapshot(
+    long EvalTotal,
+    long EvalShaTotal,
+    long ErrorTotal,
+    long TimeoutTotal,
+    ScriptDurationHistogramSnapshot ExecDuration);
+
+/// <summary>Histogram snapshot used for script execution duration telemetry.</summary>
+public sealed record ScriptDurationHistogramSnapshot(
+    IReadOnlyList<double> BucketUpperBounds,
+    IReadOnlyList<long> BucketCounts,
+    long Count,
+    double Sum);

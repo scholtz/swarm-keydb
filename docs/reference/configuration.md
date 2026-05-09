@@ -49,6 +49,7 @@
 | `SWARM_KEYDB_BATCH_FLUSH_INTERVAL_MS` | `100` | Time window used to coalesce queued writes into a batch. |
 | `SWARM_KEYDB_STREAM_DEFAULT_MAXLEN` | unset | Optional default stream retention cap (entries) applied by `XADD` when `MAXLEN` is omitted. |
 | `SWARM_KEYDB_STREAM_DEFAULT_MAXLEN_APPROXIMATE` | `true` | When true, default `XADD` retention trims approximately (bounded to within ~10% over target). |
+| `SWARM_KEYDB_SCRIPT_TIMEOUT_MS` | `5000` | Maximum wall-clock milliseconds a single Lua script (`EVAL`/`EVALSHA`) may run. Scripts exceeding this limit return `-BUSY Script exceeded time limit`. Minimum effective value: 100 ms. |
 | `SWARM_KEYDB_SHARDING_ENABLED` | `false` | Enables shard-aware routing with consistent hashing. |
 | `SWARM_KEYDB_SHARDING_SHARD_COUNT` | derived from configured nodes (min `1`, max `64`) | Number of hash buckets used for key routing. |
 | `SWARM_KEYDB_SHARDING_VIRTUAL_NODES` | `128` | Virtual nodes per shard in the consistent hash ring. |
