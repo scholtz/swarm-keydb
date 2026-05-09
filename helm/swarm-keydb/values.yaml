@@ -1,0 +1,192 @@
+# -- Number of SwarmKeyDb pod replicas.
+replicaCount: 1
+
+image:
+  # -- Container image repository.
+  repository: ghcr.io/scholtz/swarm-keydb
+  # -- Container image pull policy.
+  pullPolicy: IfNotPresent
+  # -- Container image tag. Defaults to chart appVersion when empty.
+  tag: ""
+
+# -- Optional pull secrets for private registries.
+imagePullSecrets: []
+# -- Override chart name.
+nameOverride: ""
+# -- Override fully-qualified release name.
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Create a dedicated service account.
+  create: true
+  # -- Automatically mount the service account token.
+  automount: true
+  # -- Annotations for the service account.
+  annotations: {}
+  # -- Existing service account name to use when create=false.
+  name: ""
+
+# -- Extra pod annotations.
+podAnnotations: {}
+# -- Extra pod labels.
+podLabels: {}
+
+podSecurityContext:
+  # -- Run with a non-root group owner for mounted volumes.
+  fsGroup: 10001
+
+securityContext:
+  # -- Disable privilege escalation for the container.
+  allowPrivilegeEscalation: false
+  # -- Use read-only root filesystem.
+  readOnlyRootFilesystem: true
+  # -- Run as non-root user.
+  runAsNonRoot: true
+  # -- Container user id.
+  runAsUser: 10001
+  capabilities:
+    # -- Drop all Linux capabilities.
+    drop:
+      - ALL
+
+service:
+  # -- Kubernetes Service type.
+  type: ClusterIP
+  # -- Redis-compatible TCP port.
+  port: 6379
+  # -- Dashboard/health HTTP port.
+  dashboardPort: 8080
+  # -- Prometheus metrics HTTP port.
+  metricsPort: 9090
+
+ingress:
+  # -- Enable ingress resource.
+  enabled: false
+  # -- Ingress class name.
+  className: ""
+  # -- Additional ingress annotations.
+  annotations: {}
+  hosts:
+    # -- Example host configuration.
+    - host: swarm-keydb.local
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- TLS configuration list.
+  tls: []
+
+resources:
+  # -- Container resource requests/limits.
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  # -- Enable HorizontalPodAutoscaler.
+  enabled: false
+  # -- Minimum replica count when autoscaling is enabled.
+  minReplicas: 2
+  # -- Maximum replica count when autoscaling is enabled.
+  maxReplicas: 10
+  # -- CPU utilization percentage target.
+  targetCPUUtilizationPercentage: 80
+  # -- Memory utilization percentage target (null to disable).
+  targetMemoryUtilizationPercentage: null
+
+podDisruptionBudget:
+  # -- Enable PodDisruptionBudget.
+  enabled: true
+  # -- Minimum number/percentage of pods available during voluntary disruptions.
+  minAvailable: 1
+  # -- Maximum number/percentage of unavailable pods during voluntary disruptions.
+  maxUnavailable: null
+
+persistence:
+  # -- Enable persistent volume for SWARM_KEYDB_DATA_DIR.
+  enabled: true
+  # -- PVC access modes.
+  accessModes:
+    - ReadWriteOnce
+  # -- Requested PVC size.
+  size: 5Gi
+  # -- PVC storage class. Empty string uses cluster default.
+  storageClass: ""
+
+env:
+  # -- Storage backend (`local`, `bee`, `swarm`, `ipfs`, `hybrid`).
+  backend: bee
+  # -- Bind address for Redis and monitoring servers.
+  bind: 0.0.0.0
+  # -- Redis-compatible TCP port.
+  redisPort: 6379
+  # -- Data directory path inside the container.
+  dataDir: /data
+  # -- Bee API URL used for Swarm uploads/downloads.
+  beeUrl: http://swarm-bee-api:1633
+  # -- Enable Prometheus metrics endpoint.
+  metricsEnabled: true
+  # -- Metrics HTTP port.
+  metricsPort: 9090
+  # -- Enable dashboard/health endpoints.
+  dashboardEnabled: true
+  # -- Dashboard HTTP port.
+  dashboardPort: 8080
+  # -- Server log level.
+  logLevel: Information
+
+secret:
+  # -- Create a Secret managed by this chart.
+  create: true
+  # -- Existing secret name to use when create=false.
+  name: ""
+  # -- Bee postage batch id (required for `bee`/`swarm` backend writes).
+  beePostageBatchId: ""
+  # -- Optional `SWARM_KEYDB_ENCRYPTION_KEY` 32-byte hex value.
+  encryptionKey: ""
+  # -- Optional `SWARM_KEYDB_ENCRYPTION_ETH_KEY` private key value.
+  encryptionEthKey: ""
+  # -- Optional `SWARM_KEYDB_PRIVACY_KEY` 32-byte hex value.
+  privacyKey: ""
+
+# -- Additional environment variables injected into the container.
+# Example:
+# extraEnv:
+#   - name: SWARM_KEYDB_CACHE_ENABLED
+#     value: "true"
+extraEnv: []
+
+# -- Node selector labels.
+nodeSelector: {}
+
+# -- Pod tolerations.
+tolerations: []
+
+# -- Pod affinity rules.
+affinity: {}
+
+livenessProbe:
+  # -- Liveness HTTP path.
+  path: /health
+  # -- Initial delay before liveness probing.
+  initialDelaySeconds: 20
+  # -- Liveness probe interval.
+  periodSeconds: 10
+  # -- Probe timeout in seconds.
+  timeoutSeconds: 3
+  # -- Consecutive failures before restart.
+  failureThreshold: 3
+
+readinessProbe:
+  # -- Readiness HTTP path.
+  path: /ready
+  # -- Initial delay before readiness probing.
+  initialDelaySeconds: 10
+  # -- Readiness probe interval.
+  periodSeconds: 10
+  # -- Probe timeout in seconds.
+  timeoutSeconds: 3
+  # -- Consecutive failures before not ready.
+  failureThreshold: 3

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "swarm-keydb.configMapName" . }}
+  labels:
+    {{- include "swarm-keydb.labels" . | nindent 4 }}
+data:
+  SWARM_KEYDB_BACKEND: {{ .Values.env.backend | quote }}
+  SWARM_KEYDB_BIND: {{ .Values.env.bind | quote }}
+  SWARM_KEYDB_PORT: {{ .Values.env.redisPort | quote }}
+  SWARM_KEYDB_DATA_DIR: {{ .Values.env.dataDir | quote }}
+  BEE_URL: {{ .Values.env.beeUrl | quote }}
+  METRICS_ENABLED: {{ .Values.env.metricsEnabled | quote }}
+  METRICS_PORT: {{ .Values.env.metricsPort | quote }}
+  DASHBOARD_ENABLED: {{ .Values.env.dashboardEnabled | quote }}
+  DASHBOARD_PORT: {{ .Values.env.dashboardPort | quote }}
+  LOG_LEVEL: {{ .Values.env.logLevel | quote }}

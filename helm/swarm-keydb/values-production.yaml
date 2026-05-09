@@ -1,0 +1,42 @@
+replicaCount: 3
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+persistence:
+  enabled: true
+  size: 20Gi
+
+env:
+  backend: bee
+  metricsEnabled: true
+  dashboardEnabled: true
+  logLevel: Information
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 10001
+  capabilities:
+    drop:
+      - ALL
+
+secret:
+  create: false
+  name: swarm-keydb-secrets

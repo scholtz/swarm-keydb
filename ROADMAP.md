@@ -1,7 +1,7 @@
 # Roadmap for SwarmKeyDb
 
 ## K8S helm chart
-- [ ] Create helm charts for smooth deployment to k8s. Create scripts to create new version of the helm chart. I want the helm charts to be published to artifacthub. The files will be in the helm chart folder in this repo and published using github pages.
+- [x] Create helm charts for smooth deployment to k8s. Create scripts to create new version of the helm chart. I want the helm charts to be published to artifacthub. The files will be in the helm chart folder in this repo and published using github pages. (100%)
 
 ## Core Functionality Enhancements
 - [x] Add support for TTL and expiration of keys. (100%)

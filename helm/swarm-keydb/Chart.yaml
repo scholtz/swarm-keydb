@@ -1,0 +1,27 @@
+apiVersion: v2
+name: swarm-keydb
+description: Redis-protocol key-value server backed by Swarm storage.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.24.0-0"
+home: https://github.com/scholtz/swarm-keydb
+icon: https://raw.githubusercontent.com/scholtz/swarm-keydb/main/docs/assets/swarm-keydb-icon.png
+sources:
+  - https://github.com/scholtz/swarm-keydb
+maintainers:
+  - name: scholtz
+    url: https://github.com/scholtz
+annotations:
+  artifacthub.io/license: MIT
+  artifacthub.io/category: database
+  artifacthub.io/changes: |
+    - kind: added
+      description: Initial production Helm chart for SwarmKeyDb with deployment, service, configmap, secret, service account, HPA, PDB, and ingress templates.
+  artifacthub.io/links: |
+    - name: Source
+      url: https://github.com/scholtz/swarm-keydb
+    - name: Documentation
+      url: https://github.com/scholtz/swarm-keydb/tree/main/docs
+    - name: Deployment Guide
+      url: https://github.com/scholtz/swarm-keydb/blob/main/docs/deployment.md

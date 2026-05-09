@@ -46,6 +46,16 @@ kubectl apply -f deploy/k8s/swarm-keydb.yaml
 
 Bee API traffic stays internal to the cluster by default. If you need internet-reachable P2P connectivity, set a public `BEE_NAT_ADDR` and adjust the `swarm-bee-p2p` service for your cluster networking model.
 
+## Helm
+
+The production Helm chart is under `helm/swarm-keydb/`.
+
+```bash
+helm repo add swarm-keydb https://scholtz.github.io/swarm-keydb/
+helm repo update
+helm install my-swarm-keydb swarm-keydb/swarm-keydb --set env.beeUrl=http://swarm-bee-api:1633 --set secret.beePostageBatchId=<your-postage-batch-id>
+```
+
 ## Monitoring
 
 SwarmKeyDb exposes:
