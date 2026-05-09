@@ -17,10 +17,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
     - name: Setup .NET
-      uses: actions/setup-dotnet@v4
+      uses: actions/setup-dotnet@v5
       with:
         dotnet-version: 10.0.x
 
@@ -37,10 +37,14 @@ jobs:
     - name: Restore package project
       run: dotnet restore src/SwarmKeyDb.SwarmConsistency/SwarmKeyDb.SwarmConsistency.csproj
 
+    - name: Build package project
+      run: dotnet build src/SwarmKeyDb.SwarmConsistency/SwarmKeyDb.SwarmConsistency.csproj -c Release --no-restore
+
     - name: Pack NuGet package
       run: |
         dotnet pack src/SwarmKeyDb.SwarmConsistency/SwarmKeyDb.SwarmConsistency.csproj \
           -c Release \
+          --no-build \
           -o ./artifacts/nuget \
           /p:Version=${{ steps.vars.outputs.version }} \
           /p:PackageVersion=${{ steps.vars.outputs.version }}
