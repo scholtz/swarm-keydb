@@ -13,6 +13,7 @@ This folder is the entrypoint for project documentation.
 - `architecture/` explains the storage model and runtime components.
 - `development/` covers local setup, build, and test commands.
 - `development/docker-release-pipeline.md` documents Docker publishing and stable tag promotion workflows for GitHub Actions.
+- `development/nuget-swarmconsistency-pipeline.md` documents GitHub Actions publishing for the `SwarmKeyDb.SwarmConsistency` NuGet package.
 - `deployment/` covers Docker Compose, Kubernetes manifests, and Helm deployment assets.
 - `reference/` documents configuration and environment variables.
 - `development/migration.md` documents Redis-to-SwarmKeyDb migration workflows.
@@ -42,6 +43,7 @@ This folder is the entrypoint for project documentation.
 - `architecture/README.md`
 - `development/README.md`
 - `development/docker-release-pipeline.md`
+- `development/nuget-swarmconsistency-pipeline.md`
 - `deployment/README.md`
 - `development/migration.md`
 - `reference/configuration.md`

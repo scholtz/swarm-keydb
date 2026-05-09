@@ -3,6 +3,7 @@ WORKDIR /src
 COPY SwarmKeyDb.slnx ./
 COPY src/SwarmKeyDb/SwarmKeyDb.csproj src/SwarmKeyDb/
 COPY src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj src/SwarmKeyDb.Server/
+COPY src/SwarmKeyDb.SwarmConsistency/SwarmKeyDb.SwarmConsistency.csproj src/SwarmKeyDb.SwarmConsistency/
 RUN dotnet restore src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
 COPY src ./src
 RUN dotnet publish src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj -c Release -o /app/publish --no-restore

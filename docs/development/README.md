@@ -50,3 +50,7 @@ When runtime behavior, deployment, configuration, or workflows change, update th
 ## CI/CD Docker publishing
 
 See `docs/development/docker-release-pipeline.md` for Docker Hub tag strategy (`zero-day`, `release-YYYYMMDD`, and `latest` promotion), workflow behavior, and required GitHub Actions variables/secrets.
+
+## CI/CD NuGet publishing
+
+See `docs/development/nuget-swarmconsistency-pipeline.md` for the `SwarmKeyDb.SwarmConsistency` package publish workflow, required GitHub settings, and datetime-based versioning.
