@@ -124,8 +124,8 @@ env:
   redisPort: 6379
   # -- Data directory path inside the container.
   dataDir: /data
-  # -- Bee API URL used for Swarm uploads/downloads. Update when Bee service name/namespace differs.
-  beeUrl: http://swarm-bee-api:1633
+  # -- Bee/Swarm endpoint URL. Defaults to public gateway; override with in-cluster Bee service DNS for Bee-backed writes.
+  beeUrl: https://bzz.limo
   # -- Enable Prometheus metrics endpoint.
   metricsEnabled: true
   # -- Metrics HTTP port.

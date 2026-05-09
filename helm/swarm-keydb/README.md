@@ -10,27 +10,35 @@ helm repo update
 helm upgrade --install swarm-keydb swarm-keydb/swarm-keydb \
   --namespace swarm-keydb \
   --create-namespace \
-  --set env.beeUrl=http://swarm-bee-api.swarm-keydb.svc.cluster.local:1633 \
   --set secret.beePostageBatchId=<your-postage-batch-id>
 ```
+
+By default the chart uses `https://bzz.limo` for `env.beeUrl`.
 
 ## Install Bee (Swarm) first
 
 SwarmKeyDb expects a reachable Bee API endpoint before serving `bee` backend writes.
 
-If you deploy Bee with Helm, use your Bee chart repository and install it into the same namespace:
+Use the Bee Helm repo and chart directly:
 
 ```bash
-helm repo add bee <your-bee-helm-repo-url>
+helm repo add ethersphere https://ethersphere.github.io/helm
 helm repo update
-helm upgrade --install swarm-bee bee/<your-bee-chart-name> \
+helm install --generate-name ethersphere/bee \
   --namespace swarm-keydb \
-  --create-namespace \
-  --set service.nameOverride=swarm-bee-api \
-  --set service.port=1633
+  --create-namespace
 ```
 
-If your Bee chart uses a different service name, set `env.beeUrl` to the Bee service DNS name when installing SwarmKeyDb.
+Then point SwarmKeyDb at the Bee service DNS name from your generated release:
+
+```bash
+kubectl -n swarm-keydb get svc
+helm upgrade --install swarm-keydb swarm-keydb/swarm-keydb \
+  --namespace swarm-keydb \
+  --create-namespace \
+  --set env.beeUrl=http://<bee-service-name>.swarm-keydb.svc.cluster.local:1633 \
+  --set secret.beePostageBatchId=<your-postage-batch-id>
+```
 
 ## Required configuration
 

@@ -65,13 +65,18 @@ scrape_configs:
 ## Helm quick reference
 
 ```bash
+helm repo add ethersphere https://ethersphere.github.io/helm
+helm repo update
+helm install --generate-name ethersphere/bee --namespace swarm-keydb --create-namespace
+
 helm repo add swarm-keydb https://scholtz.github.io/swarm-keydb/
 helm repo update
 helm upgrade --install swarm-keydb swarm-keydb/swarm-keydb \
   --namespace swarm-keydb \
   --create-namespace \
-  --set env.beeUrl=http://swarm-bee-api.swarm-keydb.svc.cluster.local:1633 \
   --set secret.beePostageBatchId=<your-postage-batch-id>
 ```
+
+Default chart behavior uses `https://bzz.limo` for `env.beeUrl`. Override it with your Bee service DNS name if you want SwarmKeyDb to use the Bee pod you installed in-cluster.
 
 For a full Bee + SwarmKeyDb Helm walkthrough, see `docs/deployment/README.md`.
