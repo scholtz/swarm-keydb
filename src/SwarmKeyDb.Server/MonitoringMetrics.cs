@@ -14,6 +14,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
     private readonly int _maxLogEntries;
     private readonly Func<ICacheStats> _cacheStatsAccessor;
     private readonly Func<IOfflineStatusProvider> _offlineStatusAccessor;
+    private readonly Func<IConsistencyVerificationStatusProvider> _consistencyStatusAccessor;
     private readonly string _privacyMode;
     private long _activeConnections;
     private long _swarmReads;
@@ -22,11 +23,13 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
     public MonitoringMetrics(
         Func<ICacheStats> cacheStatsAccessor,
         Func<IOfflineStatusProvider>? offlineStatusAccessor = null,
+        Func<IConsistencyVerificationStatusProvider>? consistencyStatusAccessor = null,
         int maxLogEntries = 200,
         PrivacyMode privacyMode = PrivacyMode.None)
     {
         _cacheStatsAccessor = cacheStatsAccessor;
         _offlineStatusAccessor = offlineStatusAccessor ?? (() => NoOpOfflineStatusProvider.Instance);
+        _consistencyStatusAccessor = consistencyStatusAccessor ?? (() => NoOpConsistencyVerificationStatusProvider.Instance);
         _maxLogEntries = Math.Max(10, maxLogEntries);
         _privacyMode = privacyMode.ToString().ToLowerInvariant();
     }
@@ -97,6 +100,16 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
         builder.AppendLine("# TYPE swarmkeydb_offline_queue_depth gauge");
         builder.AppendLine("# HELP swarmkeydb_offline_last_sync_unix_time Last successful offline sync time.");
         builder.AppendLine("# TYPE swarmkeydb_offline_last_sync_unix_time gauge");
+        builder.AppendLine("# HELP swarmkeydb_consistency_verification_total Total consistency verification checks.");
+        builder.AppendLine("# TYPE swarmkeydb_consistency_verification_total counter");
+        builder.AppendLine("# HELP swarmkeydb_consistency_violations_total Total consistency verification violations.");
+        builder.AppendLine("# TYPE swarmkeydb_consistency_violations_total counter");
+        builder.AppendLine("# HELP swarmkeydb_consistency_success_rate Consistency verification success rate.");
+        builder.AppendLine("# TYPE swarmkeydb_consistency_success_rate gauge");
+        builder.AppendLine("# HELP swarmkeydb_consistency_worst_latency_ms Worst consistency verification latency in milliseconds.");
+        builder.AppendLine("# TYPE swarmkeydb_consistency_worst_latency_ms gauge");
+        builder.AppendLine("# HELP swarmkeydb_consistency_last_verification_unix_time Last consistency verification timestamp.");
+        builder.AppendLine("# TYPE swarmkeydb_consistency_last_verification_unix_time gauge");
 
         foreach (var entry in _operations.OrderBy(static item => item.Key, StringComparer.Ordinal))
         {
@@ -142,6 +155,14 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
         builder.AppendLine(FormatMetric(
             "swarmkeydb_offline_last_sync_unix_time",
             offlineStatus.LastSuccessfulSyncUtc?.ToUnixTimeSeconds() ?? 0));
+        var consistency = _consistencyStatusAccessor().GetSnapshot();
+        builder.AppendLine(FormatMetric("swarmkeydb_consistency_verification_total", consistency.TotalVerifications));
+        builder.AppendLine(FormatMetric("swarmkeydb_consistency_violations_total", consistency.ViolationCount));
+        builder.AppendLine(FormatMetric("swarmkeydb_consistency_success_rate", consistency.SuccessRate));
+        builder.AppendLine(FormatMetric("swarmkeydb_consistency_worst_latency_ms", consistency.WorstLatencyMs));
+        builder.AppendLine(FormatMetric(
+            "swarmkeydb_consistency_last_verification_unix_time",
+            consistency.LastVerificationUtc?.ToUnixTimeSeconds() ?? 0));
 
         return builder.ToString();
     }

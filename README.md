@@ -9,6 +9,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 - Secure key rotation plus immutable Swarm backup/restore workflows for encrypted databases.
 - String, JSON, and binary value helpers in the `SwarmKeyDbClient` library.
 - Default-on SHA-256 integrity verification for values stored in Swarm, with typed corruption errors.
+- `SwarmKeyDb.SwarmConsistency` NuGet package for Bee feed/hash/manifest verification with strict/warn middleware modes and quorum policies.
 - Offline-first journaling with cached reads, automatic replay, and conflict hooks for Bee outages.
 - CRDT-backed conflict resolution (LWW register by default, with OR-Set and PN-counter strategies available).
 - Optional cross-chain replication across configured EVM namespaces with per-chain sync status and retries.

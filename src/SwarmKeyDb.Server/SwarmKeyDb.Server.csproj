@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SwarmKeyDb\SwarmKeyDb.csproj" />
+    <ProjectReference Include="..\SwarmKeyDb.SwarmConsistency\SwarmKeyDb.SwarmConsistency.csproj" />
   </ItemGroup>
 
   <ItemGroup>

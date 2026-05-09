@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Console;
 using Microsoft.Extensions.Options;
 using SwarmKeyDb;
+using SwarmKeyDb.SwarmConsistency;
 using SwarmKeyDb.Server;
 
 var appSettings = LoadAppSettings();
@@ -46,9 +47,11 @@ var useJsonLogging = GetBool("JSON_LOGS", !environment.Equals("Development", Str
 
 ICacheStats? cacheStats = null;
 IOfflineStatusProvider? offlineStatusMetrics = null;
+IConsistencyVerificationStatusProvider? consistencyStatusMetrics = null;
 var monitoringMetrics = new MonitoringMetrics(
     () => cacheStats ?? NoOpCacheStats.Instance,
     () => offlineStatusMetrics ?? NoOpOfflineStatusProvider.Instance,
+    () => consistencyStatusMetrics ?? NoOpConsistencyVerificationStatusProvider.Instance,
     privacyMode: privacyOptions.PrivacyMode);
 
 var cacheOptions = new CacheOptions
@@ -82,6 +85,16 @@ var integrityOptions = new IntegrityOptions
 {
     Enabled = GetBool("SWARM_KEYDB_INTEGRITY_ENABLED", true)
 };
+var consistencyEnabled = GetBool("SWARM_KEYDB_CONSISTENCY_ENABLED", false);
+var consistencyFailureMode = Enum.TryParse<ConsistencyFailureMode>(
+    GetString("SWARM_KEYDB_CONSISTENCY_FAILURE_MODE", "Strict"),
+    ignoreCase: true,
+    out var parsedConsistencyFailureMode)
+    ? parsedConsistencyFailureMode
+    : ConsistencyFailureMode.Strict;
+var consistencyQuorumThreshold = Math.Max(1, GetInt("SWARM_KEYDB_CONSISTENCY_QUORUM_THRESHOLD", 1));
+var consistencyFeedOwner = GetString("SWARM_KEYDB_CONSISTENCY_FEED_OWNER", "0000000000000000000000000000000000000000");
+var consistencyBeeNodesRaw = GetSetting("SWARM_KEYDB_CONSISTENCY_BEE_NODES");
 var shardingOptions = GetShardingOptions();
 shardingOptions.Validate();
 var aclOptions = GetAclOptions();
@@ -227,6 +240,18 @@ else
             ownedResources.Add((IDisposable)connectivityProbe);
             ownedResources.Add((IDisposable)swarmClient);
             services.AddSwarmKeyDbStore(_ => new SwarmKeyValueStore(instrumentedClient, index, integrityOptions));
+            if (consistencyEnabled)
+            {
+                services.AddSwarmConsistency(
+                    ResolveConsistencyBeeNodes(beeUrl, consistencyBeeNodesRaw),
+                    options =>
+                    {
+                        options.Enabled = true;
+                        options.FailureMode = consistencyFailureMode;
+                        options.QuorumThreshold = consistencyQuorumThreshold;
+                        options.FeedOwner = consistencyFeedOwner;
+                    });
+            }
             break;
         }
         case "ipfs":
@@ -320,8 +345,10 @@ if (privacyOptions.OfflineMode != OfflineMode.Never)
 
 using var provider = services.BuildServiceProvider();
 cacheStats = provider.GetRequiredService<ICacheStats>();
+consistencyStatusMetrics = provider.GetService<IConsistencyVerificationStatusProvider>();
 var baseStore = provider.GetRequiredService<IKeyValueStore>();
 var offlineStatusProvider = provider.GetRequiredService<IOfflineStatusProvider>();
+var consistencyStatusProvider = provider.GetRequiredService<IConsistencyVerificationStatusProvider>();
 offlineStatusMetrics = offlineStatusProvider;
 CrossChainSyncService? crossChainSyncService = null;
 OfflineSyncService? offlineSyncService = provider.GetService<OfflineSyncService>();
@@ -404,6 +431,7 @@ if (dashboardEnabled)
         ethereumBridge,
         crossChainSyncService,
         offlineStatusProvider,
+        consistencyStatusProvider,
         privacyMode: privacyOptions.PrivacyMode,
         didMode: privacyOptions.DidMode);
     monitoringServers.Add(dashboardServer);
@@ -425,6 +453,7 @@ if (metricsEnabled && (!dashboardEnabled || metricsPort != dashboardPort))
         ethereumBridge,
         crossChainSyncService,
         offlineStatusProvider,
+        consistencyStatusProvider,
         privacyMode: privacyOptions.PrivacyMode,
         didMode: privacyOptions.DidMode);
     monitoringServers.Add(metricsServer);
@@ -652,6 +681,20 @@ bool GetBoolFromMany(bool defaultValue, params string[] names)
     }
 
     return defaultValue;
+}
+
+IReadOnlyList<Uri> ResolveConsistencyBeeNodes(Uri defaultBeeUrl, string? raw)
+{
+    if (string.IsNullOrWhiteSpace(raw))
+    {
+        return [defaultBeeUrl];
+    }
+
+    var values = raw
+        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(static value => new Uri(value))
+        .ToArray();
+    return values.Length == 0 ? [defaultBeeUrl] : values;
 }
 
 AclOptions GetAclOptions()

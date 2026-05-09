@@ -18,7 +18,7 @@
 - [x] Implement offline-first support with automatic sync. (100%: added `OfflineCapableKeyValueStore`, memory/SQLite journals, Bee `/health` connectivity probing, background replay via `OfflineSyncService`, conflict hooks, queue depth monitoring, dashboard status, SDK `offlineMode` options, and offline-first documentation/examples)
 
 ## Multi-Instance Availability and Cache Consistency
-- [ ] Create a `SwarmKeyDb.SwarmConsistency` NuGet package that validates Swarm and Bee reads with content-hash verification, feed or manifest revision checks, optional quorum policies, and operator-friendly failure diagnostics before values reach callers.
+- [x] Create a `SwarmKeyDb.SwarmConsistency` NuGet package that validates Swarm and Bee reads with content-hash verification, feed or manifest revision checks, optional quorum policies, and operator-friendly failure diagnostics before values reach callers. (100%)
 - [ ] Add consistency verification hooks to every cached `IKeyValueStore` path so cache hits, read-through fetches, and background refreshes evict or reject stale Swarm payloads instead of serving divergent in-memory data.
 - [ ] Implement cross-instance cache synchronization with version stamps, invalidation events, and anti-entropy reconciliation so multiple SwarmKeyDb nodes converge after writes, expirations, restarts, and temporary network partitions.
 - [ ] Define partial-resync and full-resync flows for cache state recovery so an instance can cheaply catch up when version history is available and deterministically rebuild from Swarm when it is not.

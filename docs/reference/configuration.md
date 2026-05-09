@@ -21,6 +21,11 @@
 | `SWARM_KEYDB_COMPRESSION_ALGORITHM` | `GZip` | Compression algorithm. |
 | `SWARM_KEYDB_COMPRESSION_MIN_SIZE_BYTES` | `64` | Minimum payload size for compression. |
 | `SWARM_KEYDB_INTEGRITY_ENABLED` | `true` | Enables SHA-256 integrity verification envelopes for stored values. |
+| `SWARM_KEYDB_CONSISTENCY_ENABLED` | `false` | Enables `SwarmKeyDb.SwarmConsistency` verification middleware for Bee-backed reads. |
+| `SWARM_KEYDB_CONSISTENCY_FAILURE_MODE` | `Strict` | Consistency violation behavior (`Strict` throws, `Warn` logs and continues). |
+| `SWARM_KEYDB_CONSISTENCY_QUORUM_THRESHOLD` | `1` | Required number of Bee verifiers that must agree for quorum verification. |
+| `SWARM_KEYDB_CONSISTENCY_FEED_OWNER` | all-zero address | Default Bee feed owner used by feed revision verification. |
+| `SWARM_KEYDB_CONSISTENCY_BEE_NODES` | unset | Comma-separated Bee API base URLs used for quorum verification (falls back to `BEE_URL`). |
 | `SWARM_KEYDB_ENCRYPTION_ENABLED` | `false` | Enables AES-256-GCM encryption. |
 | `SWARM_KEYDB_ENCRYPTION_ALGORITHM` | `AesGcm256` | Encryption algorithm. |
 | `SWARM_KEYDB_ENCRYPTION_KEY` | unset | 32-byte hex key for encryption. |

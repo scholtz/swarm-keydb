@@ -96,6 +96,9 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ICacheStats>(sp => (ICacheStats)sp.GetRequiredService<IKeyValueStore>());
         services.AddSingleton<IOfflineStatusProvider>(sp =>
             sp.GetRequiredService<IKeyValueStore>() as IOfflineStatusProvider ?? NoOpOfflineStatusProvider.Instance);
+        services.AddSingleton<IConsistencyVerificationStatusProvider>(sp =>
+            sp.GetRequiredService<IKeyValueStore>() as IConsistencyVerificationStatusProvider
+            ?? NoOpConsistencyVerificationStatusProvider.Instance);
         return services;
     }
 }
