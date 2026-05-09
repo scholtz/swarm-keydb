@@ -1,0 +1,81 @@
+{
+  "title": "SwarmKeyDb Consistency Health",
+  "uid": "swarmkeydb-consistency-health",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Drift Reconciliation Rate",
+      "targets": [
+        {
+          "expr": "rate(swarmkeydb_cache_drift_total[5m])",
+          "legendFormat": "drift/s"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Resync Frequency",
+      "targets": [
+        {
+          "expr": "increase(swarmkeydb_resync_partial_total[15m])",
+          "legendFormat": "partial"
+        },
+        {
+          "expr": "increase(swarmkeydb_resync_full_total[15m])",
+          "legendFormat": "full"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Verification Failure Rate",
+      "targets": [
+        {
+          "expr": "rate(swarmkeydb_cache_verification_fail_total[5m])",
+          "legendFormat": "verification-failures/s"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Sync Lag (Pending Reconciliations)",
+      "targets": [
+        {
+          "expr": "swarmkeydb_sync_lag_keys",
+          "legendFormat": "lag"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      }
+    }
+  ]
+}

@@ -48,10 +48,12 @@ var useJsonLogging = GetBool("JSON_LOGS", !environment.Equals("Development", Str
 ICacheStats? cacheStats = null;
 IOfflineStatusProvider? offlineStatusMetrics = null;
 IConsistencyVerificationStatusProvider? consistencyStatusMetrics = null;
+ICacheSyncStatusProvider? cacheSyncStatusMetrics = null;
 var monitoringMetrics = new MonitoringMetrics(
     () => cacheStats ?? NoOpCacheStats.Instance,
     () => offlineStatusMetrics ?? NoOpOfflineStatusProvider.Instance,
     () => consistencyStatusMetrics ?? NoOpConsistencyVerificationStatusProvider.Instance,
+    () => cacheSyncStatusMetrics ?? NoOpCacheSyncStatusProvider.Instance,
     privacyMode: privacyOptions.PrivacyMode);
 
 var cacheOptions = new CacheOptions
@@ -408,6 +410,7 @@ var cacheSyncStatusProvider = provider.GetService<ICacheSyncStatusProvider>() ??
 var resyncCoordinator = provider.GetService<IResyncCoordinator>() ?? NoOpResyncCoordinator.Instance;
 var resyncStatusProvider = provider.GetService<IResyncStatusProvider>() ?? NoOpResyncCoordinator.Instance;
 offlineStatusMetrics = offlineStatusProvider;
+cacheSyncStatusMetrics = cacheSyncStatusProvider;
 CrossChainSyncService? crossChainSyncService = null;
 OfflineSyncService? offlineSyncService = provider.GetService<OfflineSyncService>();
 AntiEntropyService? antiEntropyService = cacheSyncStatusProvider as AntiEntropyService;

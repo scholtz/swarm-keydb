@@ -15,6 +15,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
     private readonly Func<ICacheStats> _cacheStatsAccessor;
     private readonly Func<IOfflineStatusProvider> _offlineStatusAccessor;
     private readonly Func<IConsistencyVerificationStatusProvider> _consistencyStatusAccessor;
+    private readonly Func<ICacheSyncStatusProvider> _cacheSyncStatusAccessor;
     private readonly string _privacyMode;
     private long _activeConnections;
     private long _swarmReads;
@@ -23,17 +24,21 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
     private long _resyncFullTotal;
     private long _resyncKeysReplayedTotal;
     private long _resyncDurationMilliseconds;
+    private long _cacheDriftTotal;
+    private long _lastObservedCacheSyncUnixMs;
 
     public MonitoringMetrics(
         Func<ICacheStats> cacheStatsAccessor,
         Func<IOfflineStatusProvider>? offlineStatusAccessor = null,
         Func<IConsistencyVerificationStatusProvider>? consistencyStatusAccessor = null,
+        Func<ICacheSyncStatusProvider>? cacheSyncStatusAccessor = null,
         int maxLogEntries = 200,
         PrivacyMode privacyMode = PrivacyMode.None)
     {
         _cacheStatsAccessor = cacheStatsAccessor;
         _offlineStatusAccessor = offlineStatusAccessor ?? (() => NoOpOfflineStatusProvider.Instance);
         _consistencyStatusAccessor = consistencyStatusAccessor ?? (() => NoOpConsistencyVerificationStatusProvider.Instance);
+        _cacheSyncStatusAccessor = cacheSyncStatusAccessor ?? (() => NoOpCacheSyncStatusProvider.Instance);
         _maxLogEntries = Math.Max(10, maxLogEntries);
         _privacyMode = privacyMode.ToString().ToLowerInvariant();
     }
@@ -143,6 +148,10 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine("# TYPE swarmkeydb_resync_duration_seconds gauge");
         builder.AppendLine("# HELP swarmkeydb_resync_keys_replayed_total Total keys replayed by resync operations.");
         builder.AppendLine("# TYPE swarmkeydb_resync_keys_replayed_total counter");
+        builder.AppendLine("# HELP swarmkeydb_cache_drift_total Total drifted keys reconciled by anti-entropy cycles.");
+        builder.AppendLine("# TYPE swarmkeydb_cache_drift_total counter");
+        builder.AppendLine("# HELP swarmkeydb_sync_lag_keys Current key reconciliation lag (pending reconciliations).");
+        builder.AppendLine("# TYPE swarmkeydb_sync_lag_keys gauge");
 
         foreach (var entry in _operations.OrderBy(static item => item.Key, StringComparer.Ordinal))
         {
@@ -204,8 +213,36 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine(FormatMetric("swarmkeydb_resync_full_total", Interlocked.Read(ref _resyncFullTotal)));
         builder.AppendLine(FormatMetric("swarmkeydb_resync_duration_seconds", Interlocked.Read(ref _resyncDurationMilliseconds) / 1000D));
         builder.AppendLine(FormatMetric("swarmkeydb_resync_keys_replayed_total", Interlocked.Read(ref _resyncKeysReplayedTotal)));
+        var cacheSync = _cacheSyncStatusAccessor().GetSnapshot();
+        UpdateCacheDriftTotal(cacheSync);
+        builder.AppendLine(FormatMetric("swarmkeydb_cache_drift_total", Interlocked.Read(ref _cacheDriftTotal)));
+        builder.AppendLine(FormatMetric("swarmkeydb_sync_lag_keys", Math.Max(0, cacheSync.PendingReconciliations)));
 
         return builder.ToString();
+    }
+
+    private void UpdateCacheDriftTotal(CacheSyncSnapshot snapshot)
+    {
+        if (!snapshot.LastSuccessfulSyncUtc.HasValue)
+        {
+            return;
+        }
+
+        var observedUnixMs = snapshot.LastSuccessfulSyncUtc.Value.ToUnixTimeMilliseconds();
+        while (true)
+        {
+            var lastSeenUnixMs = Interlocked.Read(ref _lastObservedCacheSyncUnixMs);
+            if (observedUnixMs <= lastSeenUnixMs)
+            {
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref _lastObservedCacheSyncUnixMs, observedUnixMs, lastSeenUnixMs) == lastSeenUnixMs)
+            {
+                Interlocked.Add(ref _cacheDriftTotal, Math.Max(0, snapshot.ReconciledKeysLastCycle));
+                return;
+            }
+        }
     }
 
     private string FormatMetric(string name, long value, params (string Label, string Value)[] labels) =>

@@ -32,6 +32,7 @@ Project documentation lives under `docs/`:
 - `docs/offline-first.md`
 - `docs/sdk/`
 - `docs/deployment.md`
+- `docs/operations/cache-consistency-runbook.md`
 - `docs/faq.md`
 
 ## Quickstart (put/get round-trip)
