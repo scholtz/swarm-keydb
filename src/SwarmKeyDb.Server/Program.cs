@@ -21,10 +21,16 @@ var dashboardEnabled = GetBool("DASHBOARD_ENABLED", true);
 var dashboardPort = GetInt("DASHBOARD_PORT", 8080);
 var privacyMode = GetPrivacyModeFromSettings();
 var privacyKeyHex = GetFirstSetting("SWARM_KEYDB_PRIVACY_KEY", "SWARM_KEYDB_ENCRYPTION_ETH_KEY", "Privacy:KeyHex");
+var didMode = GetDidModeFromSettings();
+var didRpcUrl = GetFirstSetting("SWARM_KEYDB_DID_RPC_URL", "Did:RpcUrl");
+var didMethod = GetFirstSetting("SWARM_KEYDB_DID_METHOD", "Did:Method") ?? "ethr";
 var privacyOptions = new SwarmKeyDbOptions
 {
     PrivacyMode = privacyMode,
-    PrivacyKeyHex = privacyKeyHex
+    PrivacyKeyHex = privacyKeyHex,
+    DidMode = didMode,
+    DidRpcUrl = didRpcUrl,
+    DidMethod = didMethod
 };
 
 var logLevel = GetLogLevel("LOG_LEVEL", GetLogLevel("SWARM_KEYDB_LOG_LEVEL", LogLevel.Information));
@@ -113,9 +119,16 @@ services.AddSingleton<IOptions<EncryptionOptions>>(Options.Create(encryptionOpti
 services.AddSingleton<IOptions<IntegrityOptions>>(Options.Create(integrityOptions));
 services.AddSingleton<IOptions<AclOptions>>(Options.Create(aclOptions));
 services.AddSingleton<IOptions<AsyncProcessingOptions>>(Options.Create(asyncProcessingOptions));
+services.AddSingleton<IOptions<SwarmKeyDbOptions>>(Options.Create(privacyOptions));
 services.AddSingleton<IEncryptionKeyProvider>(_ => new MutableEncryptionKeyProvider(encryptionOptions));
 services.AddSingleton<IMemoryCache>(new MemoryCache(new MemoryCacheOptions()));
 services.AddSingleton<IEthAddressAccessor, AsyncLocalEthAddressAccessor>();
+services.AddSingleton<IDidContextAccessor, AsyncLocalDidContextAccessor>();
+if (didMode != DidAuthMode.None)
+{
+    services.AddSingleton<IDecentralizedIdentityProvider>(
+        _ => new EthrDidProvider(new EthrDidProviderOptions { RpcUrl = didRpcUrl }));
+}
 IReadinessProbe readinessProbe;
 IShardHealthProvider? shardHealthProvider = null;
 IBackendStatusProvider? backendStatusProvider = null;
@@ -303,7 +316,9 @@ var processor = new RedisCommandProcessor(
     provider.GetRequiredService<RestoreService>(),
     provider.GetRequiredService<KeyRotationService>(),
     monitoringMetrics,
-    provider.GetRequiredService<ILogger<RedisCommandProcessor>>());
+    provider.GetRequiredService<ILogger<RedisCommandProcessor>>(),
+    provider.GetRequiredService<IDidContextAccessor>(),
+    provider.GetService<IDecentralizedIdentityProvider>());
 var server = new RedisServer(
     bind,
     port,
@@ -355,7 +370,8 @@ if (dashboardEnabled)
         backendStatusProvider,
         ethereumBridge,
         crossChainSyncService,
-        privacyMode: privacyOptions.PrivacyMode);
+        privacyMode: privacyOptions.PrivacyMode,
+        didMode: privacyOptions.DidMode);
     monitoringServers.Add(dashboardServer);
     monitoringTasks.Add(dashboardServer.RunAsync(cts.Token));
 }
@@ -374,7 +390,8 @@ if (metricsEnabled && (!dashboardEnabled || metricsPort != dashboardPort))
         backendStatusProvider,
         ethereumBridge,
         crossChainSyncService,
-        privacyMode: privacyOptions.PrivacyMode);
+        privacyMode: privacyOptions.PrivacyMode,
+        didMode: privacyOptions.DidMode);
     monitoringServers.Add(metricsServer);
     monitoringTasks.Add(metricsServer.RunAsync(cts.Token));
 }
@@ -430,6 +447,17 @@ PrivacyMode GetPrivacyModeFromSettings()
     }
 
     return PrivacyMode.None;
+}
+
+DidAuthMode GetDidModeFromSettings()
+{
+    var configured = GetFirstSetting("SWARM_KEYDB_DID_MODE", "Did:Mode");
+    if (Enum.TryParse<DidAuthMode>(configured, ignoreCase: true, out var mode))
+    {
+        return mode;
+    }
+
+    return DidAuthMode.None;
 }
 
 IKeyIndex BuildKeyIndex(string path)
