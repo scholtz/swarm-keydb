@@ -61,3 +61,17 @@ scrape_configs:
 - Sharded 3-node example (local backend): `examples/sharding/`
 - Kubernetes manifests: `deploy/k8s/`
 - Helm chart: `helm/swarm-keydb/` (published at `https://scholtz.github.io/swarm-keydb/`)
+
+## Helm quick reference
+
+```bash
+helm repo add swarm-keydb https://scholtz.github.io/swarm-keydb/
+helm repo update
+helm upgrade --install swarm-keydb swarm-keydb/swarm-keydb \
+  --namespace swarm-keydb \
+  --create-namespace \
+  --set env.beeUrl=http://swarm-bee-api.swarm-keydb.svc.cluster.local:1633 \
+  --set secret.beePostageBatchId=<your-postage-batch-id>
+```
+
+For a full Bee + SwarmKeyDb Helm walkthrough, see `docs/deployment/README.md`.

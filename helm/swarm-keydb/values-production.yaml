@@ -24,6 +24,7 @@ persistence:
 
 env:
   backend: bee
+  beeUrl: http://swarm-bee-api.swarm-keydb.svc.cluster.local:1633
   metricsEnabled: true
   dashboardEnabled: true
   logLevel: Information
