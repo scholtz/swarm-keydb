@@ -4,7 +4,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 
 ## Features
 
-- Redis-compatible commands for `PING`, `SET`, `SETEX`, `PSETEX`, `GET`, `MGET`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXISTS`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `KEYS`, `SCAN`, `TYPE`, `XADD`, `XRANGE`, `XREVRANGE`, `XLEN`, `SWARM.RESYNC`, and `QUIT`.
+- Redis-compatible commands for `PING`, `SET`, `SETEX`, `PSETEX`, `GET`, `MGET`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXISTS`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `KEYS`, `SCAN`, `TYPE`, `XADD`, `XRANGE`, `XREVRANGE`, `XLEN`, `XREAD`, `XGROUP`, `XREADGROUP`, `XACK`, `XPENDING`, `XCLAIM`, `XAUTOCLAIM`, `SWARM.RESYNC`, and `QUIT`.
 - Connection-scoped Ethereum-address ACL enforcement via `AUTHADDR` for shared databases.
 - Secure key rotation plus immutable Swarm backup/restore workflows for encrypted databases.
 - String, JSON, and binary value helpers in the `SwarmKeyDbClient` library.

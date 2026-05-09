@@ -73,7 +73,7 @@ var monitoringMetrics = new MonitoringMetrics(
             new long[RedisCommandProcessor.TransactionExecDurationBucketUpperBounds.Length],
             0,
             0)),
-    streamMetricsAccessor: () => processorRef?.GetStreamMetrics() ?? new StreamMetricsSnapshot(0, 0, 0, 0, 0));
+    streamMetricsAccessor: () => processorRef?.GetStreamMetrics() ?? new StreamMetricsSnapshot(0, 0, 0, 0, 0, 0, 0, new Dictionary<string, long>(StringComparer.Ordinal)));
 
 var cacheOptions = new CacheOptions
 {
