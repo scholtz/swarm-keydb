@@ -57,6 +57,10 @@ var tests = new (string Name, Func<Task> Test)[]
     ("async fire and forget captures and logs errors", AsyncFireAndForgetCapturesAndLogsErrorsAsync),
     ("async write queue respects configured max concurrency", AsyncWriteQueueRespectsConfiguredMaxConcurrencyAsync),
     ("async batch throughput is at least 2x sequential baseline", AsyncBatchThroughputIsAtLeastTwoXSequentialBaselineAsync),
+    ("offline sync queues writes and replays on reconnect", OfflineSyncQueuesWritesAndReplaysOnReconnectAsync),
+    ("offline get returns cached value metadata when backend is unreachable", OfflineGetReturnsCachedValueMetadataAsync),
+    ("offline sync invokes conflict resolver", OfflineSyncInvokesConflictResolverAsync),
+    ("sqlite offline journal persists entries across restart", SqliteOfflineJournalPersistsEntriesAcrossRestartAsync),
     ("setex rejects non positive ttl", SetExRejectsNonPositiveTtlAsync),
     ("msetnx does not partially write when blocked", MSetNxDoesNotPartiallyWriteWhenBlockedAsync),
     ("pexpire and pttl round trip", PExpireAndPttlRoundTripAsync),
@@ -125,6 +129,7 @@ var tests = new (string Name, Func<Task> Test)[]
     ("monitoring health and readiness endpoints return expected status codes", MonitoringHealthAndReadinessEndpointsAsync),
     ("monitoring health endpoint reports degraded for unhealthy shard", MonitoringHealthEndpointReportsDegradedForUnhealthyShardAsync),
     ("monitoring backend endpoint reports backend connectivity", MonitoringBackendEndpointReportsBackendConnectivityAsync),
+    ("monitoring health and dashboard expose offline queue depth", MonitoringHealthAndDashboardExposeOfflineQueueDepthAsync),
     ("redis command logging includes correlation ids", RedisCommandLoggingIncludesCorrelationIdsAsync),
     ("redis management commands backup restore and rotate", RedisManagementCommandsBackupRestoreAndRotateAsync),
     ("migrate scan pattern applies prefix filter", MigrateScanPatternAppliesPrefixFilterAsync),
@@ -1142,6 +1147,98 @@ static async Task AsyncBatchThroughputIsAtLeastTwoXSequentialBaselineAsync()
         $"Expected >=2x throughput improvement. Baseline: {baselineWatch.Elapsed.TotalMilliseconds:F2} ms, Async: {asyncWatch.Elapsed.TotalMilliseconds:F2} ms.");
 }
 
+static async Task OfflineSyncQueuesWritesAndReplaysOnReconnectAsync()
+{
+    var probe = new ToggleConnectivityProbe(initiallyConnected: false);
+    var remote = new CountingKeyValueStore();
+    var store = CreateOfflineStore(remote, probe);
+
+    var write = await store.PutWithResultAsync("offline:queued", Encoding.UTF8.GetBytes("Ada"));
+    Assert(write.Queued, "Offline write should be queued while connectivity is unavailable.");
+    AssertEqual(1L, store.QueueDepth);
+
+    var cached = await store.GetWithResultAsync("offline:queued");
+    Assert(cached.FromCache, "Queued write should be immediately readable from the local offline cache.");
+    AssertEqual("Ada", Encoding.UTF8.GetString(cached.Value!));
+
+    probe.SetConnected(true);
+    var replayed = await store.SyncPendingOperationsAsync();
+    AssertEqual(1, replayed);
+    AssertEqual(0L, store.QueueDepth);
+    AssertEqual("Ada", Encoding.UTF8.GetString((await remote.GetAsync("offline:queued"))!));
+}
+
+static async Task OfflineGetReturnsCachedValueMetadataAsync()
+{
+    var probe = new ToggleConnectivityProbe(initiallyConnected: true);
+    var remote = new CountingKeyValueStore();
+    var store = CreateOfflineStore(remote, probe);
+
+    var write = await store.PutWithResultAsync("offline:cached", Encoding.UTF8.GetBytes("warm"));
+    Assert(!write.Queued, "Online write should reach the backend immediately.");
+
+    probe.SetConnected(false);
+    var read = await store.GetWithResultAsync("offline:cached");
+    Assert(read.FromCache, "Expected cached read metadata when the backend becomes unreachable.");
+    Assert(read.CachedAt is not null, "Cached read should expose the cache timestamp.");
+    AssertEqual("warm", Encoding.UTF8.GetString(read.Value!));
+}
+
+static async Task OfflineSyncInvokesConflictResolverAsync()
+{
+    var probe = new ToggleConnectivityProbe(initiallyConnected: false);
+    var remote = new CountingKeyValueStore();
+    await remote.PutAsync("offline:conflict", Encoding.UTF8.GetBytes("remote"));
+    OfflineConflictContext? capturedConflict = null;
+    var store = CreateOfflineStore(
+        remote,
+        probe,
+        options: new SwarmKeyDbOptions
+        {
+            OfflineMode = OfflineMode.Auto,
+            OfflineJournal = OfflineJournalType.Memory,
+            OnConflict = context =>
+            {
+                capturedConflict = context;
+                return Encoding.UTF8.GetBytes("resolved");
+            }
+        });
+
+    var queued = await store.PutWithResultAsync("offline:conflict", Encoding.UTF8.GetBytes("local"));
+    Assert(queued.Queued, "Conflicting offline write should be queued while disconnected.");
+
+    probe.SetConnected(true);
+    await store.SyncPendingOperationsAsync();
+
+    Assert(capturedConflict is not null, "Expected custom conflict resolver to be invoked.");
+    AssertEqual("local", Encoding.UTF8.GetString(capturedConflict!.LocalValue!));
+    AssertEqual("remote", Encoding.UTF8.GetString(capturedConflict.RemoteValue!));
+    AssertEqual("resolved", Encoding.UTF8.GetString((await remote.GetAsync("offline:conflict"))!));
+}
+
+static async Task SqliteOfflineJournalPersistsEntriesAcrossRestartAsync()
+{
+    var path = Path.Combine(Path.GetTempPath(), $"swarm-keydb-offline-{Guid.NewGuid():N}.sqlite");
+    try
+    {
+        var journal = new SqliteOfflineJournal(path);
+        await journal.AppendAsync(OfflineOperationType.Put, "offline:sqlite", Encoding.UTF8.GetBytes("persisted"));
+
+        var restarted = new SqliteOfflineJournal(path);
+        var entries = await restarted.ReadBatchAsync(10);
+        AssertEqual(1, entries.Count);
+        AssertEqual("offline:sqlite", entries[0].Key);
+        AssertEqual("persisted", Encoding.UTF8.GetString(entries[0].Value!));
+    }
+    finally
+    {
+        if (File.Exists(path))
+        {
+            File.Delete(path);
+        }
+    }
+}
+
 static async Task SetExRejectsNonPositiveTtlAsync()
 {
     var processor = CreateProcessor();
@@ -1504,6 +1601,37 @@ static async Task MonitoringBackendEndpointReportsBackendConnectivityAsync()
     server.Dispose();
 }
 
+static async Task MonitoringHealthAndDashboardExposeOfflineQueueDepthAsync()
+{
+    var metrics = new MonitoringMetrics(
+        () => NoOpCacheStats.Instance,
+        () => new StaticOfflineStatusProvider(queueDepth: 3, lastSuccessfulSyncUtc: new DateTimeOffset(2026, 05, 09, 00, 00, 00, TimeSpan.Zero)));
+    var port = TestNetHelpers.GetFreePort();
+    var server = new MonitoringHttpServer(
+        IPAddress.Loopback,
+        port,
+        metrics,
+        new StaticReadinessProbe(ready: true, message: "ready"),
+        metricsEnabled: true,
+        dashboardEnabled: true,
+        NullLogger<MonitoringHttpServer>.Instance,
+        offlineStatusProvider: new StaticOfflineStatusProvider(queueDepth: 3, lastSuccessfulSyncUtc: new DateTimeOffset(2026, 05, 09, 00, 00, 00, TimeSpan.Zero)));
+    using var cts = new CancellationTokenSource();
+    var runTask = server.RunAsync(cts.Token);
+    using var client = new HttpClient();
+
+    var healthPayload = await client.GetStringAsync($"http://127.0.0.1:{port}/health");
+    Assert(healthPayload.Contains("\"offline_queue_depth\":3", StringComparison.Ordinal), "Expected offline queue depth in health payload.");
+
+    var dashboard = await client.GetStringAsync($"http://127.0.0.1:{port}/dashboard");
+    Assert(dashboard.Contains("Offline Queue", StringComparison.Ordinal), "Expected offline queue section in dashboard.");
+    Assert(dashboard.Contains("offline-queue-depth", StringComparison.Ordinal), "Expected offline queue element in dashboard HTML.");
+
+    cts.Cancel();
+    await runTask;
+    server.Dispose();
+}
+
 static async Task RedisCommandLoggingIncludesCorrelationIdsAsync()
 {
     var logger = new CaptureLogger<RedisCommandProcessor>();
@@ -1593,6 +1721,28 @@ static AsyncQueuedKeyValueStore CreateAsyncQueuedStore(
             BatchFlushIntervalMs = flushIntervalMs
         },
         logger ?? NullLogger<AsyncQueuedKeyValueStore>.Instance);
+
+static OfflineCapableKeyValueStore CreateOfflineStore(
+    CountingKeyValueStore remote,
+    ToggleConnectivityProbe probe,
+    SwarmKeyDbOptions? options = null)
+{
+    IOfflineJournal journal = options?.OfflineJournal == OfflineJournalType.Sqlite
+        ? new SqliteOfflineJournal(Path.Combine(Path.GetTempPath(), $"swarm-keydb-offline-{Guid.NewGuid():N}.sqlite"))
+        : new InMemoryOfflineJournal();
+
+    return
+    new(
+        new ConnectivityBoundKeyValueStore(remote, probe),
+        journal,
+        probe,
+        options ?? new SwarmKeyDbOptions
+        {
+            OfflineMode = OfflineMode.Auto,
+            OfflineJournal = OfflineJournalType.Memory
+        },
+        NullLogger<OfflineCapableKeyValueStore>.Instance);
+}
 
 static CompressingKeyValueStore CreateCompressingStore(IKeyValueStore inner, bool enabled = true, CompressionAlgorithm algorithm = CompressionAlgorithm.GZip, int minSizeBytes = 0)
 {
@@ -3881,6 +4031,84 @@ internal sealed class StaticBackendStatusProvider : IBackendStatusProvider
 
     public Task<IReadOnlyList<BackendStatus>> GetStatusAsync(CancellationToken cancellationToken = default) =>
         Task.FromResult(_statuses);
+}
+
+internal sealed class StaticOfflineStatusProvider : IOfflineStatusProvider
+{
+    public StaticOfflineStatusProvider(long queueDepth, DateTimeOffset? lastSuccessfulSyncUtc, bool isOffline = false, OfflineMode mode = OfflineMode.Auto)
+    {
+        QueueDepth = queueDepth;
+        LastSuccessfulSyncUtc = lastSuccessfulSyncUtc;
+        IsOffline = isOffline;
+        Mode = mode;
+    }
+
+    public long QueueDepth { get; }
+    public DateTimeOffset? LastSuccessfulSyncUtc { get; }
+    public bool IsOffline { get; }
+    public OfflineMode Mode { get; }
+}
+
+internal sealed class ToggleConnectivityProbe : IConnectivityProbe
+{
+    private volatile bool _connected;
+
+    public ToggleConnectivityProbe(bool initiallyConnected)
+    {
+        _connected = initiallyConnected;
+    }
+
+    public void SetConnected(bool connected) => _connected = connected;
+
+    public Task<bool> IsConnectedAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(_connected);
+    }
+}
+
+internal sealed class ConnectivityBoundKeyValueStore : IKeyValueStore
+{
+    private readonly CountingKeyValueStore _inner;
+    private readonly ToggleConnectivityProbe _probe;
+
+    public ConnectivityBoundKeyValueStore(CountingKeyValueStore inner, ToggleConnectivityProbe probe)
+    {
+        _inner = inner;
+        _probe = probe;
+    }
+
+    public async Task PutAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default)
+    {
+        await EnsureConnectedAsync(cancellationToken);
+        await _inner.PutAsync(key, value, cancellationToken);
+    }
+
+    public async Task<byte[]?> GetAsync(string key, CancellationToken cancellationToken = default)
+    {
+        await EnsureConnectedAsync(cancellationToken);
+        return await _inner.GetAsync(key, cancellationToken);
+    }
+
+    public async Task<bool> DeleteAsync(string key, CancellationToken cancellationToken = default)
+    {
+        await EnsureConnectedAsync(cancellationToken);
+        return await _inner.DeleteAsync(key, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<string>> ListKeysAsync(CancellationToken cancellationToken = default)
+    {
+        await EnsureConnectedAsync(cancellationToken);
+        return await _inner.ListKeysAsync(cancellationToken);
+    }
+
+    private async Task EnsureConnectedAsync(CancellationToken cancellationToken)
+    {
+        if (!await _probe.IsConnectedAsync(cancellationToken))
+        {
+            throw new HttpRequestException("simulated offline");
+        }
+    }
 }
 
 internal sealed class CaptureLogger<T> : ILogger<T>

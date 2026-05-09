@@ -13,14 +13,20 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
     private readonly ConcurrentQueue<MonitoringLogEntry> _logs = new();
     private readonly int _maxLogEntries;
     private readonly Func<ICacheStats> _cacheStatsAccessor;
+    private readonly Func<IOfflineStatusProvider> _offlineStatusAccessor;
     private readonly string _privacyMode;
     private long _activeConnections;
     private long _swarmReads;
     private long _swarmWrites;
 
-    public MonitoringMetrics(Func<ICacheStats> cacheStatsAccessor, int maxLogEntries = 200, PrivacyMode privacyMode = PrivacyMode.None)
+    public MonitoringMetrics(
+        Func<ICacheStats> cacheStatsAccessor,
+        Func<IOfflineStatusProvider>? offlineStatusAccessor = null,
+        int maxLogEntries = 200,
+        PrivacyMode privacyMode = PrivacyMode.None)
     {
         _cacheStatsAccessor = cacheStatsAccessor;
+        _offlineStatusAccessor = offlineStatusAccessor ?? (() => NoOpOfflineStatusProvider.Instance);
         _maxLogEntries = Math.Max(10, maxLogEntries);
         _privacyMode = privacyMode.ToString().ToLowerInvariant();
     }
@@ -87,6 +93,10 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
         builder.AppendLine("# TYPE swarmkeydb_swarm_reads_total counter");
         builder.AppendLine("# HELP swarmkeydb_swarm_writes_total Total Swarm writes.");
         builder.AppendLine("# TYPE swarmkeydb_swarm_writes_total counter");
+        builder.AppendLine("# HELP swarmkeydb_offline_queue_depth Pending offline journal entries.");
+        builder.AppendLine("# TYPE swarmkeydb_offline_queue_depth gauge");
+        builder.AppendLine("# HELP swarmkeydb_offline_last_sync_unix_time Last successful offline sync time.");
+        builder.AppendLine("# TYPE swarmkeydb_offline_last_sync_unix_time gauge");
 
         foreach (var entry in _operations.OrderBy(static item => item.Key, StringComparer.Ordinal))
         {
@@ -127,6 +137,11 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
         builder.AppendLine(FormatMetric("swarmkeydb_active_connections", Interlocked.Read(ref _activeConnections)));
         builder.AppendLine(FormatMetric("swarmkeydb_swarm_reads_total", Interlocked.Read(ref _swarmReads)));
         builder.AppendLine(FormatMetric("swarmkeydb_swarm_writes_total", Interlocked.Read(ref _swarmWrites)));
+        var offlineStatus = _offlineStatusAccessor();
+        builder.AppendLine(FormatMetric("swarmkeydb_offline_queue_depth", offlineStatus.QueueDepth));
+        builder.AppendLine(FormatMetric(
+            "swarmkeydb_offline_last_sync_unix_time",
+            offlineStatus.LastSuccessfulSyncUtc?.ToUnixTimeSeconds() ?? 0));
 
         return builder.ToString();
     }

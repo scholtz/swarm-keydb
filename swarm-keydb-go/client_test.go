@@ -279,6 +279,14 @@ func TestDidAuthModeOption(t *testing.T) {
 	}
 }
 
+func TestOfflineModeOption(t *testing.T) {
+	backend := newMockRedis()
+	client := NewWithRedisClientAndOptions(backend, Options{OfflineMode: OfflineModeAuto})
+	if client.offlineMode != OfflineModeAuto {
+		t.Fatalf("expected offlineMode=%s, got %s", OfflineModeAuto, client.offlineMode)
+	}
+}
+
 func TestSetDidWithoutProof(t *testing.T) {
 	ctx := context.Background()
 	backend := newMockRedis()

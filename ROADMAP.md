@@ -15,6 +15,7 @@
 - [x] Optimize indexing for faster key lookups and iterations. (100%)
 - [x] Enable horizontal scaling with sharding across multiple Swarm nodes. (100%)
 - [x] Add asynchronous processing for high-throughput operations. (100%)
+- [x] Implement offline-first support with automatic sync. (100%: added `OfflineCapableKeyValueStore`, memory/SQLite journals, Bee `/health` connectivity probing, background replay via `OfflineSyncService`, conflict hooks, queue depth monitoring, dashboard status, SDK `offlineMode` options, and offline-first documentation/examples)
 
 ## Multi-Instance Availability and Cache Consistency
 - [ ] Create a `SwarmKeyDb.SwarmConsistency` NuGet package that validates Swarm and Bee reads with content-hash verification, feed or manifest revision checks, optional quorum policies, and operator-friendly failure diagnostics before values reach callers.

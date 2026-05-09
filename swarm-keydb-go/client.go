@@ -37,6 +37,8 @@ type Options struct {
 	DidRpcUrl string
 	// DidMethod is the DID method string, e.g. "ethr" (default).
 	DidMethod string
+	// OfflineMode mirrors the C# offline-first option surface.
+	OfflineMode OfflineMode
 }
 
 // DidAuthMode controls whether DID authentication is required for store operations.
@@ -57,6 +59,7 @@ type Client struct {
 	privacyConfigErr error
 	didMode          DidAuthMode
 	didRpcUrl        string
+	offlineMode      OfflineMode
 	currentDid       string
 }
 
@@ -66,6 +69,14 @@ const (
 	PrivacyModeNone             PrivacyMode = "none"
 	PrivacyModeObliviousHashing PrivacyMode = "oblivious_hashing"
 	PrivacyModeFullPSI          PrivacyMode = "full_psi"
+)
+
+type OfflineMode string
+
+const (
+	OfflineModeNever  OfflineMode = "never"
+	OfflineModeAuto   OfflineMode = "auto"
+	OfflineModeAlways OfflineMode = "always"
 )
 
 func New(opts Options) *Client {
@@ -99,6 +110,10 @@ func newClientWithOptions(r RedisClient, opts Options) *Client {
 	if didMode == "" {
 		didMode = DidAuthModeNone
 	}
+	offlineMode := opts.OfflineMode
+	if offlineMode == "" {
+		offlineMode = OfflineModeNever
+	}
 	return &Client{
 		redis:            r,
 		privacyMode:      mode,
@@ -107,6 +122,7 @@ func newClientWithOptions(r RedisClient, opts Options) *Client {
 		privacyConfigErr: privacyConfigErr,
 		didMode:          didMode,
 		didRpcUrl:        opts.DidRpcUrl,
+		offlineMode:      offlineMode,
 	}
 }
 

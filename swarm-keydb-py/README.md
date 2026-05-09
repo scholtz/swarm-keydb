@@ -40,6 +40,16 @@ db = SwarmKeyDb(
 
 Async equivalents are available in `AsyncSwarmKeyDb`.
 
+## Offline-first mode
+
+```python
+from swarm_keydb import OfflineMode, SwarmKeyDb
+
+db = SwarmKeyDb(host='127.0.0.1', port=6379, offline_mode=OfflineMode.AUTO)
+```
+
+Use this alongside a server configured with `SWARM_KEYDB_OFFLINE_MODE=auto` or `always`.
+
 ## Data integrity
 
 The SwarmKeyDb server verifies a SHA-256 integrity envelope on every read by default. If stored Swarm data has been corrupted or tampered with, `get()`/`batch_get()` raise the underlying Redis error from the server, so callers should treat failed reads as integrity-sensitive and handle them explicitly.

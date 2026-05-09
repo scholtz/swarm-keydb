@@ -133,6 +133,11 @@ test('didAuthMode option is stored on instance', () => {
   assert.equal(db.didMode, 'ethr_did');
 });
 
+test('offlineMode option is stored on instance', () => {
+  const db = new SwarmKeyDb({ host: 'localhost', port: 6379, offlineMode: 'auto' }, () => createMockClient());
+  assert.equal(db.offlineMode, 'auto');
+});
+
 test('setDid sends AUTHDID command without proof', async () => {
   const commands = [];
   const mock = createMockClient({

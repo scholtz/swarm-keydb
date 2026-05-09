@@ -10,7 +10,7 @@ Yes. Default local backend works without Bee for development and tests.
 
 ## What does offline mode look like?
 
-With local backend, reads/writes continue while disconnected from Bee. With Bee backend, network outages can fail reads/writes until Bee connectivity returns.
+Set `SWARM_KEYDB_OFFLINE_MODE=auto` (or `always`) to queue Bee-bound writes locally and serve cached reads while Bee is unreachable. When connectivity returns, `OfflineSyncService` replays the journal automatically; `/health` and `/dashboard` expose the current queue depth.
 
 ## Why do I get `ERR Access denied`?
 
