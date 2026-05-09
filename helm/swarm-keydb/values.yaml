@@ -3,7 +3,7 @@ replicaCount: 1
 
 image:
   # -- Container image repository.
-  repository: ghcr.io/scholtz/swarm-keydb
+  repository: scholtz2/swarm-keydb
   # -- Container image pull policy.
   pullPolicy: IfNotPresent
   # -- Container image tag. Defaults to chart appVersion when empty.

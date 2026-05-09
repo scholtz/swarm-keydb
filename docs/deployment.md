@@ -8,14 +8,14 @@ Use this guide for production-style Docker deployment and operational checks.
 ## Docker run
 
 ```bash
-docker build -t swarm-keydb .
+docker pull scholtz2/swarm-keydb:zero-day
 docker run --rm -p 6379:6379 -p 8080:8080 -p 9090:9090 \
   -e SWARM_KEYDB_BACKEND=bee \
   -e BEE_URL=http://host.docker.internal:1633/ \
   -e BEE_POSTAGE_BATCH_ID=<your-postage-batch-id> \
   -e METRICS_ENABLED=true \
   -e DASHBOARD_ENABLED=true \
-  swarm-keydb
+  scholtz2/swarm-keydb:zero-day
 ```
 
 ## Required environment variables

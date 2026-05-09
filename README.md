@@ -97,7 +97,7 @@ Framework connector examples:
 Offline-first walkthrough:
 
 ```bash
-(cd examples/offline-first && docker compose up --build)
+(cd examples/offline-first && docker compose pull && docker compose up)
 ```
 
 ## CLI (`skdb`)
@@ -397,7 +397,7 @@ docker run --rm -p 6379:6379 \
   -e SWARM_KEYDB_COMPRESSION_ALGORITHM=GZip \
   -e SWARM_KEYDB_COMPRESSION_MIN_SIZE_BYTES=64 \
   -v swarm-keydb-data:/data \
-  swarm-keydb
+  scholtz2/swarm-keydb:zero-day
 ```
 
 ### Data integrity verification
@@ -450,7 +450,7 @@ docker run --rm -p 6379:6379 \
   -e SWARM_KEYDB_ENCRYPTION_ENABLED=true \
   -e SWARM_KEYDB_ENCRYPTION_KEY=<64-char-hex-key> \
   -v swarm-keydb-data:/data \
-  swarm-keydb
+  scholtz2/swarm-keydb:zero-day
 ```
 
 **Ethereum keypair–derived key (developer-friendly):**
@@ -460,7 +460,7 @@ docker run --rm -p 6379:6379 \
   -e SWARM_KEYDB_ENCRYPTION_ENABLED=true \
   -e SWARM_KEYDB_ENCRYPTION_ETH_KEY=<64-char-hex-ethereum-private-key> \
   -v swarm-keydb-data:/data \
-  swarm-keydb
+  scholtz2/swarm-keydb:zero-day
 ```
 
 **Round-trip example:**
@@ -534,14 +534,14 @@ dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
 ## Docker
 
 ```bash
-docker build -t swarm-keydb .
-docker run --rm -p 6379:6379 -v swarm-keydb-data:/data swarm-keydb
+docker pull scholtz2/swarm-keydb:zero-day
+docker run --rm -p 6379:6379 -v swarm-keydb-data:/data scholtz2/swarm-keydb:zero-day
 ```
 
 To run SwarmKeyDb with a colocated Bee node, copy `.env.example` to `.env` and start the Compose stack:
 
 ```bash
-docker compose up --build
+docker compose up
 ```
 
 For Bee-backed storage:
@@ -552,7 +552,7 @@ docker run --rm -p 6379:6379 \
   -e BEE_URL=http://host.docker.internal:1633/ \
   -e BEE_POSTAGE_BATCH_ID=<your-postage-batch-id> \
   -v swarm-keydb-data:/data \
-  swarm-keydb
+  scholtz2/swarm-keydb:zero-day
 ```
 
 Migration demo:

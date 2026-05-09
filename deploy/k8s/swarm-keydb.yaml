@@ -42,7 +42,7 @@ spec:
     spec:
       containers:
         - name: swarm-keydb
-          image: swarm-keydb:latest
+          image: scholtz2/swarm-keydb:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: SWARM_KEYDB_BACKEND

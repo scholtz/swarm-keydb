@@ -1,10 +1,6 @@
 services:
   swarm-keydb-sharded:
-    build:
-      context: ../..
-      # Uses the repository root Dockerfile when invoked from examples/sharding.
-      dockerfile: Dockerfile
-    image: swarm-keydb:sharded
+    image: ${SWARM_KEYDB_IMAGE:-scholtz2/swarm-keydb:zero-day}
     container_name: swarm-keydb-sharded
     ports:
       - "6379:6379"

@@ -5,7 +5,8 @@ This example demonstrates how to run SwarmKeyDb with the offline journal enabled
 ## Start the stack
 
 ```bash
-docker compose up --build
+docker compose pull
+docker compose up
 ```
 
 ## Simulate a partition

@@ -6,9 +6,7 @@ services:
     command: ["start", "--verbosity", "warning", "--cache-capacity", "1000000"]
 
   swarm-keydb:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
+    image: ${SWARM_KEYDB_IMAGE:-scholtz2/swarm-keydb:zero-day}
     depends_on:
       - bee
     environment:

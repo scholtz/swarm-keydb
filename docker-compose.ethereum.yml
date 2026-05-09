@@ -5,7 +5,7 @@
 #   - SwarmKeyDb with the Ethereum bridge enabled, pointing to the local node
 #
 # Prerequisites:
-#   1. Build the SwarmKeyDb image: docker build -t swarm-keydb:local .
+#   1. Pull the SwarmKeyDb image: docker pull scholtz2/swarm-keydb:zero-day
 #   2. Deploy the contract:
 #        cd ethereum && npm ci
 #        npx hardhat run scripts/deploy.js --network localhost
@@ -39,7 +39,7 @@ services:
       retries: 10
 
   swarm-keydb:
-    image: ${SWARM_KEYDB_IMAGE:-swarm-keydb:local}
+    image: ${SWARM_KEYDB_IMAGE:-scholtz2/swarm-keydb:zero-day}
     restart: unless-stopped
     depends_on:
       hardhat-node:

@@ -46,3 +46,7 @@ See `docs/development/migration.md` for full, dry-run, prefix-only, resumable, a
 ## Documentation expectation
 
 When runtime behavior, deployment, configuration, or workflows change, update the relevant files in `docs/` and any impacted top-level documentation in the same change.
+
+## CI/CD Docker publishing
+
+See `docs/development/docker-release-pipeline.md` for Docker Hub tag strategy (`zero-day`, `release-YYYYMMDD`, and `latest` promotion), workflow behavior, and required GitHub Actions variables/secrets.

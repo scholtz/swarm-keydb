@@ -11,10 +11,11 @@ The repository includes Docker and Kubernetes assets for running SwarmKeyDb with
 ## Docker Compose
 
 1. Copy `.env.example` to `.env` and update the placeholder values.
-2. Build and start the stack:
+2. Pull and start the stack:
 
 ```bash
-docker compose up --build
+docker compose pull
+docker compose up
 ```
 
 The stack starts:

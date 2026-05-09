@@ -3,6 +3,11 @@
 ## K8S helm chart
 - [x] Create helm charts for smooth deployment to k8s. Create scripts to create new version of the helm chart. I want the helm charts to be published to artifacthub. The files will be in the helm chart folder in this repo and published using github pages. (100%)
 
+## Container Release Automation and Stability
+- [x] Expand CI/CD to run on both pull requests and pushes to main, then publish Docker Hub images for main branch pipelines using `zero-day` plus `release-YYYYMMDD` tags so each day has a deterministic rollback target. (100%)
+- [x] Add a dedicated manual promotion pipeline that validates a chosen `release-YYYYMMDD` tag and retags it to `latest`, ensuring only explicitly approved builds become the default production image channel. (100%)
+- [x] Standardize runtime examples and deployment defaults across docs, Compose, Kubernetes, and Helm to the public `scholtz2/swarm-keydb` image reference so operator setup is consistent between local and production environments. (100%)
+
 ## Core Functionality Enhancements
 - [x] Add support for TTL and expiration of keys. (100%)
 - [x] Enable batch operations for multiple get/put/delete in one call. (100%)

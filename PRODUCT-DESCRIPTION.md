@@ -36,6 +36,8 @@ Traditional Redis-style deployments still struggle with multi-instance data avai
 - **Multi-Instance Cache Coherence:** Keep caches synchronized across SwarmKeyDb instances with version-aware invalidation, anti-entropy reconciliation, and deterministic resync paths so decentralized persistence also improves live availability.
 - **Swarm Consistency Verification SDK:** Publish a NuGet library for Swarm/Bee reads that verifies feed revisions, manifest/index lineage, and content hashes before values are returned or admitted into any local cache.
 - **Monitoring and Observability:** Include logging, metrics, and health checks for production deployments.
+- **Deterministic Docker Release Channels:** Build and publish Docker images in CI/CD with a rolling `zero-day` tag for latest pipeline output and immutable `release-YYYYMMDD` tags for repeatable deployments.
+- **Controlled Stability Promotion:** Add a separate promotion workflow that retags a validated `release-YYYYMMDD` image as `latest` only after operator approval to reduce accidental regressions in production.
 - **Ecosystem Integrations:** Support for integration with other decentralized tools like IPFS, Ethereum smart contracts, and cross-chain data.
 
 ***What are the UX, Privacy, other requirements?***

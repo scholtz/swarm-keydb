@@ -12,6 +12,7 @@ This folder is the entrypoint for project documentation.
 - `faq.md` answers frequent setup/runtime questions.
 - `architecture/` explains the storage model and runtime components.
 - `development/` covers local setup, build, and test commands.
+- `development/docker-release-pipeline.md` documents Docker publishing and stable tag promotion workflows for GitHub Actions.
 - `deployment/` covers Docker Compose, Kubernetes manifests, and Helm deployment assets.
 - `reference/` documents configuration and environment variables.
 - `development/migration.md` documents Redis-to-SwarmKeyDb migration workflows.
@@ -40,6 +41,7 @@ This folder is the entrypoint for project documentation.
 - `faq.md`
 - `architecture/README.md`
 - `development/README.md`
+- `development/docker-release-pipeline.md`
 - `deployment/README.md`
 - `development/migration.md`
 - `reference/configuration.md`

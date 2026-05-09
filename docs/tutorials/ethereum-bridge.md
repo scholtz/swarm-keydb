@@ -183,8 +183,8 @@ curl http://localhost:8080/ethereum/bridge
 A ready-to-use `docker-compose.ethereum.yml` is provided at the root of the repository:
 
 ```bash
-# Build the SwarmKeyDb image first
-docker build -t swarm-keydb:local .
+# Pull the SwarmKeyDb image first
+docker pull scholtz2/swarm-keydb:zero-day
 
 # Set your contract address
 export ETH_CONTRACT_ADDRESS=<YOUR_CONTRACT_ADDRESS>

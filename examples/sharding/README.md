@@ -4,7 +4,8 @@ Start the sharded server:
 
 ```bash
 cd examples/sharding
-docker compose up --build -d
+docker compose pull
+docker compose up -d
 ```
 
 Write/read a few keys:

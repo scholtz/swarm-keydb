@@ -19,10 +19,7 @@ services:
       - bee-data:/var/lib/bee
 
   swarm-keydb:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: ${SWARM_KEYDB_IMAGE:-swarm-keydb:local}
+    image: ${SWARM_KEYDB_IMAGE:-scholtz2/swarm-keydb:zero-day}
     restart: unless-stopped
     depends_on:
       - swarm-bee
