@@ -45,6 +45,8 @@ var tests = new (string Name, Func<Task> Test)[]
     ("redis stream consumer groups support xclaim xautoclaim and delconsumer", RedisStreamConsumerGroupClaimAndPendingAsync),
     ("redis stream consumer groups persist pending entries across processor restart", RedisStreamConsumerGroupPersistenceAcrossRestartAsync),
     ("redis stream consumer groups support setid destroy and busygroup semantics", RedisStreamConsumerGroupAdminCommandsAsync),
+    ("redis stream xread and xreadgroup validate options and syntax", RedisStreamXReadAndGroupValidateOptionsAsync),
+    ("redis stream xreadgroup noack does not create pending entries", RedisStreamXReadGroupNoAckDoesNotCreatePendingAsync),
     ("redis stream xread supports blocking wake and timeout semantics", RedisStreamXReadBlockingWakeAndTimeoutAsync),
     ("redis stream xreadgroup supports blocking wake and fair consumer delivery", RedisStreamXReadGroupBlockingFairWakeAsync),
     ("redis stream blocking read cancellation cleans up waiters", RedisStreamBlockingReadCancellationCleansUpWaitersAsync),
@@ -1004,6 +1006,42 @@ static async Task RedisStreamConsumerGroupAdminCommandsAsync()
     Assert(response.Contains("+OK\r\n:1\r\n", StringComparison.Ordinal), "XGROUP SETID and DESTROY should succeed.");
     Assert(response.Contains("-NOGROUP No such key 'admin:events' or consumer group 'workers' in XREADGROUP with GROUP option\r\n", StringComparison.Ordinal),
         "After XGROUP DESTROY, XREADGROUP should return NOGROUP.");
+}
+
+static async Task RedisStreamXReadAndGroupValidateOptionsAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("XREAD", "COUNT", "0", "STREAMS", "opts:events", "0-0") +
+        RespCommand("XREAD", "BLOCK", "-1", "STREAMS", "opts:events", "0-0") +
+        RespCommand("XREAD", "BLOCK", "10", "STREAMS", "opts:events") +
+        RespCommand("XGROUP", "CREATE", "opts:events", "workers", "0-0", "MKSTREAM") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "COUNT", "0", "STREAMS", "opts:events", ">") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "BLOCK", "-5", "STREAMS", "opts:events", ">") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "UNKNOWN", "STREAMS", "opts:events", ">"));
+
+    var valueErrorCount = response.Split("-ERR value is not an integer or out of range\r\n", StringSplitOptions.None).Length - 1;
+    AssertEqual(4, valueErrorCount);
+    Assert(response.Contains("-ERR syntax error\r\n", StringComparison.Ordinal),
+        "XREAD/XREADGROUP should return syntax errors for malformed option layouts.");
+}
+
+static async Task RedisStreamXReadGroupNoAckDoesNotCreatePendingAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("XADD", "noack:events", "1-0", "f", "v1") +
+        RespCommand("XGROUP", "CREATE", "noack:events", "workers", "0-0") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "NOACK", "STREAMS", "noack:events", ">") +
+        RespCommand("XPENDING", "noack:events", "workers"));
+
+    Assert(response.Contains("*1\r\n*2\r\n$12\r\nnoack:events\r\n*1\r\n*2\r\n$3\r\n1-0\r\n", StringComparison.Ordinal),
+        "NOACK reads should still return stream entries.");
+    Assert(response.Contains("*4\r\n:0\r\n$-1\r\n$-1\r\n*0\r\n", StringComparison.Ordinal),
+        "NOACK reads should not create pending entries.");
+
+    var metrics = processor.GetStreamMetrics();
+    AssertEqual(0L, metrics.PendingEntriesTotal);
 }
 
 static async Task RedisStreamXReadBlockingWakeAndTimeoutAsync()
