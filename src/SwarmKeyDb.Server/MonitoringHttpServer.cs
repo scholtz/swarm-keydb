@@ -20,6 +20,8 @@ public sealed class MonitoringHttpServer : IDisposable
     private readonly IOfflineStatusProvider _offlineStatusProvider;
     private readonly IConsistencyVerificationStatusProvider _consistencyStatusProvider;
     private readonly ICacheSyncStatusProvider _cacheSyncStatusProvider;
+    private readonly IResyncStatusProvider _resyncStatusProvider;
+    private readonly IResyncCoordinator _resyncCoordinator;
     private readonly string _privacyMode;
     private readonly string _didMode;
 
@@ -38,6 +40,8 @@ public sealed class MonitoringHttpServer : IDisposable
         IOfflineStatusProvider? offlineStatusProvider = null,
         IConsistencyVerificationStatusProvider? consistencyStatusProvider = null,
         ICacheSyncStatusProvider? cacheSyncStatusProvider = null,
+        IResyncStatusProvider? resyncStatusProvider = null,
+        IResyncCoordinator? resyncCoordinator = null,
         PrivacyMode privacyMode = PrivacyMode.None,
         DidAuthMode didMode = DidAuthMode.None)
     {
@@ -53,6 +57,8 @@ public sealed class MonitoringHttpServer : IDisposable
         _offlineStatusProvider = offlineStatusProvider ?? NoOpOfflineStatusProvider.Instance;
         _consistencyStatusProvider = consistencyStatusProvider ?? NoOpConsistencyVerificationStatusProvider.Instance;
         _cacheSyncStatusProvider = cacheSyncStatusProvider ?? NoOpCacheSyncStatusProvider.Instance;
+        _resyncStatusProvider = resyncStatusProvider ?? NoOpResyncCoordinator.Instance;
+        _resyncCoordinator = resyncCoordinator ?? NoOpResyncCoordinator.Instance;
         _privacyMode = privacyMode.ToString().ToLowerInvariant();
         _didMode = didMode.ToString().ToLowerInvariant();
         _listener.Prefixes.Add($"http://{(address.Equals(IPAddress.Any) ? "+" : address.ToString())}:{port}/");
@@ -105,6 +111,7 @@ public sealed class MonitoringHttpServer : IDisposable
             var degraded = shardHealth?.Any(static shard => !shard.Ready) == true;
             var consistencySnapshot = _consistencyStatusProvider.GetSnapshot();
             var cacheSyncSnapshot = _cacheSyncStatusProvider.GetSnapshot();
+            var resyncSnapshot = _resyncStatusProvider.GetSnapshot();
             await WriteJsonAsync(
                 context.Response,
                 degraded ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.OK,
@@ -130,6 +137,17 @@ public sealed class MonitoringHttpServer : IDisposable
                         pendingReconciliations = cacheSyncSnapshot.PendingReconciliations,
                         lastError = cacheSyncSnapshot.LastError
                     },
+                    resync = new
+                    {
+                        inProgress = resyncSnapshot.InProgress,
+                        currentMode = resyncSnapshot.CurrentMode,
+                        lastResyncUtc = resyncSnapshot.LastResyncUtc,
+                        lastMode = resyncSnapshot.LastMode,
+                        keysReplayedLastRun = resyncSnapshot.KeysReplayedLastRun,
+                        keysReplayedTotal = resyncSnapshot.KeysReplayedTotal,
+                        lastError = resyncSnapshot.LastError,
+                        correlationId = resyncSnapshot.CorrelationId
+                    },
                     shards = shardHealth?.Select(static shard => new
                     {
                         shard = shard.Shard,
@@ -149,6 +167,7 @@ public sealed class MonitoringHttpServer : IDisposable
                 ? null
                 : await _shardHealthProvider.GetShardHealthAsync(cancellationToken).ConfigureAwait(false);
             var cacheSyncSnapshot = _cacheSyncStatusProvider.GetSnapshot();
+            var resyncSnapshot = _resyncStatusProvider.GetSnapshot();
             await WriteJsonAsync(
                 context.Response,
                 ready ? HttpStatusCode.OK : HttpStatusCode.ServiceUnavailable,
@@ -165,6 +184,17 @@ public sealed class MonitoringHttpServer : IDisposable
                         reconciledKeysLastCycle = cacheSyncSnapshot.ReconciledKeysLastCycle,
                         pendingReconciliations = cacheSyncSnapshot.PendingReconciliations,
                         lastError = cacheSyncSnapshot.LastError
+                    },
+                    resync = new
+                    {
+                        inProgress = resyncSnapshot.InProgress,
+                        currentMode = resyncSnapshot.CurrentMode,
+                        lastResyncUtc = resyncSnapshot.LastResyncUtc,
+                        lastMode = resyncSnapshot.LastMode,
+                        keysReplayedLastRun = resyncSnapshot.KeysReplayedLastRun,
+                        keysReplayedTotal = resyncSnapshot.KeysReplayedTotal,
+                        lastError = resyncSnapshot.LastError,
+                        correlationId = resyncSnapshot.CorrelationId
                     },
                     shards = shardHealth?.Select(static shard => new
                     {
@@ -278,6 +308,53 @@ public sealed class MonitoringHttpServer : IDisposable
             return;
         }
 
+        if (path.Equals("/admin/resync", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!HttpMethodsMatch(context.Request.HttpMethod, "POST"))
+            {
+                await WriteJsonAsync(context.Response, HttpStatusCode.MethodNotAllowed, new { error = "Use POST." }, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            var modeText = context.Request.QueryString["mode"];
+            var parsedMode = modeText?.ToLowerInvariant() switch
+            {
+                null or "" or "auto" => ResyncMode.Auto,
+                "partial" => ResyncMode.Partial,
+                "full" => ResyncMode.Full,
+                _ => (ResyncMode?)null
+            };
+            if (parsedMode is null)
+            {
+                await WriteJsonAsync(context.Response, HttpStatusCode.BadRequest, new { error = "Invalid mode. Use 'partial' or 'full'." }, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            try
+            {
+                var result = await _resyncCoordinator.TriggerResyncAsync(parsedMode.Value, cancellationToken).ConfigureAwait(false);
+                await WriteJsonAsync(
+                    context.Response,
+                    HttpStatusCode.OK,
+                    new
+                    {
+                        status = "ok",
+                        mode = result.Mode.ToString().ToLowerInvariant(),
+                        keysReplayed = result.KeysReplayed,
+                        versionGap = result.VersionGap,
+                        durationSeconds = result.Duration.TotalSeconds,
+                        completedAtUtc = result.CompletedAtUtc
+                    },
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException ex)
+            {
+                await WriteJsonAsync(context.Response, HttpStatusCode.BadRequest, new { error = ex.Message }, cancellationToken).ConfigureAwait(false);
+            }
+
+            return;
+        }
+
         if (_dashboardEnabled && (path.Equals("/dashboard", StringComparison.OrdinalIgnoreCase) || path.Equals("/", StringComparison.OrdinalIgnoreCase)))
         {
             await WriteTextAsync(context.Response, HttpStatusCode.OK, BuildDashboardHtml(_privacyMode, _didMode), "text/html; charset=utf-8", cancellationToken).ConfigureAwait(false);
@@ -308,6 +385,9 @@ public sealed class MonitoringHttpServer : IDisposable
         await response.OutputStream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
         response.Close();
     }
+
+    private static bool HttpMethodsMatch(string? value, string expected) =>
+        string.Equals(value, expected, StringComparison.OrdinalIgnoreCase);
 
     private static string BuildShardPrometheusMetrics(IReadOnlyList<ShardHealthStatus> shardHealth, string privacyMode)
     {
@@ -368,12 +448,24 @@ public sealed class MonitoringHttpServer : IDisposable
                                               <p>Consistency Worst Latency: <strong id="consistency-worst-latency">loading...</strong></p>
                                               <p>Cache Evictions by Verification: <strong id="consistency-eviction-count">loading...</strong></p>
                                               <h2>Cache Sync Status</h2>
-                                              <p>Sync Peers: <strong id="cache-sync-peer-count">loading...</strong></p>
-                                              <p>Last Sync: <strong id="cache-sync-last-sync">loading...</strong></p>
-                                              <p>Reconciled Keys (Last Cycle): <strong id="cache-sync-reconciled">loading...</strong></p>
-                                              <p>Pending Reconciliations: <strong id="cache-sync-pending">loading...</strong></p>
-                                              <p>Last Sync Error: <strong id="cache-sync-last-error">none</strong></p>
-                                               <h2>Cross-chain replication health</h2>
+                                               <p>Sync Peers: <strong id="cache-sync-peer-count">loading...</strong></p>
+                                               <p>Last Sync: <strong id="cache-sync-last-sync">loading...</strong></p>
+                                               <p>Reconciled Keys (Last Cycle): <strong id="cache-sync-reconciled">loading...</strong></p>
+                                               <p>Pending Reconciliations: <strong id="cache-sync-pending">loading...</strong></p>
+                                               <p>Last Sync Error: <strong id="cache-sync-last-error">none</strong></p>
+                                               <h2>Resync Status</h2>
+                                               <p>Current Mode: <strong id="resync-current-mode">idle</strong></p>
+                                               <p>Last Resync: <strong id="resync-last-time">never</strong></p>
+                                               <p>Last Mode: <strong id="resync-last-mode">none</strong></p>
+                                               <p>Keys Replayed (Last Run): <strong id="resync-keys-last">0</strong></p>
+                                               <p>Keys Replayed (Total): <strong id="resync-keys-total">0</strong></p>
+                                               <p>Resync Error: <strong id="resync-last-error">none</strong></p>
+                                               <p>
+                                                 <button id="resync-trigger-partial" type="button">Trigger partial resync</button>
+                                                 <button id="resync-trigger-full" type="button">Trigger full resync</button>
+                                               </p>
+                                               <pre id="resync-result">idle</pre>
+                                                <h2>Cross-chain replication health</h2>
                                             <table>
                                               <thead>
                                                 <tr><th>Chain</th><th>Pending</th><th>Synced</th><th>Failed</th><th>Health</th></tr>
@@ -407,11 +499,20 @@ public sealed class MonitoringHttpServer : IDisposable
                                               const consistencyViolationCountEl = document.getElementById('consistency-violation-count');
                                               const consistencyWorstLatencyEl = document.getElementById('consistency-worst-latency');
                                               const consistencyEvictionCountEl = document.getElementById('consistency-eviction-count');
-                                              const cacheSyncPeerCountEl = document.getElementById('cache-sync-peer-count');
-                                              const cacheSyncLastSyncEl = document.getElementById('cache-sync-last-sync');
-                                              const cacheSyncReconciledEl = document.getElementById('cache-sync-reconciled');
-                                              const cacheSyncPendingEl = document.getElementById('cache-sync-pending');
-                                              const cacheSyncLastErrorEl = document.getElementById('cache-sync-last-error');
+                                               const cacheSyncPeerCountEl = document.getElementById('cache-sync-peer-count');
+                                               const cacheSyncLastSyncEl = document.getElementById('cache-sync-last-sync');
+                                               const cacheSyncReconciledEl = document.getElementById('cache-sync-reconciled');
+                                               const cacheSyncPendingEl = document.getElementById('cache-sync-pending');
+                                               const cacheSyncLastErrorEl = document.getElementById('cache-sync-last-error');
+                                               const resyncCurrentModeEl = document.getElementById('resync-current-mode');
+                                               const resyncLastTimeEl = document.getElementById('resync-last-time');
+                                               const resyncLastModeEl = document.getElementById('resync-last-mode');
+                                               const resyncKeysLastEl = document.getElementById('resync-keys-last');
+                                               const resyncKeysTotalEl = document.getElementById('resync-keys-total');
+                                               const resyncLastErrorEl = document.getElementById('resync-last-error');
+                                               const resyncResultEl = document.getElementById('resync-result');
+                                               const resyncTriggerPartialButton = document.getElementById('resync-trigger-partial');
+                                               const resyncTriggerFullButton = document.getElementById('resync-trigger-full');
                                               function parseCounters(metricsText) {
                                                const wanted = [
                                                  'swarmkeydb_operations_total{operation="get",status="success"}',
@@ -425,11 +526,15 @@ public sealed class MonitoringHttpServer : IDisposable
                                                   'swarmkeydb_swarm_writes_total',
                                                   'swarmkeydb_consistency_success_rate',
                                                   'swarmkeydb_consistency_violations_total',
-                                                  'swarmkeydb_consistency_worst_latency_ms',
-                                                  'swarmkeydb_cache_verification_pass_total',
-                                                  'swarmkeydb_cache_verification_fail_total',
-                                                  'swarmkeydb_cache_eviction_by_verification_total'
-                                                ];
+                                                   'swarmkeydb_consistency_worst_latency_ms',
+                                                   'swarmkeydb_cache_verification_pass_total',
+                                                   'swarmkeydb_cache_verification_fail_total',
+                                                   'swarmkeydb_cache_eviction_by_verification_total',
+                                                   'swarmkeydb_resync_partial_total',
+                                                   'swarmkeydb_resync_full_total',
+                                                   'swarmkeydb_resync_duration_seconds',
+                                                   'swarmkeydb_resync_keys_replayed_total'
+                                                 ];
                                                return metricsText.split('\n').filter(line => wanted.some(prefix => line.startsWith(prefix))).join('\n');
                                              }
                                              async function refreshReady() {
@@ -451,10 +556,19 @@ public sealed class MonitoringHttpServer : IDisposable
                                                   cacheSyncLastSyncEl.textContent = cacheSync.lastSuccessfulSyncUtc
                                                     ? new Date(cacheSync.lastSuccessfulSyncUtc).toLocaleString()
                                                     : 'never';
-                                                  cacheSyncReconciledEl.textContent = String(cacheSync.reconciledKeysLastCycle ?? 0);
-                                                  cacheSyncPendingEl.textContent = String(cacheSync.pendingReconciliations ?? 0);
-                                                  cacheSyncLastErrorEl.textContent = cacheSync.lastError || 'none';
-                                                }
+                                                   cacheSyncReconciledEl.textContent = String(cacheSync.reconciledKeysLastCycle ?? 0);
+                                                   cacheSyncPendingEl.textContent = String(cacheSync.pendingReconciliations ?? 0);
+                                                   cacheSyncLastErrorEl.textContent = cacheSync.lastError || 'none';
+                                                   const resync = data.resync || {};
+                                                   resyncCurrentModeEl.textContent = resync.inProgress ? `running (${resync.currentMode || 'auto'})` : (resync.currentMode || 'idle');
+                                                   resyncLastTimeEl.textContent = resync.lastResyncUtc
+                                                     ? new Date(resync.lastResyncUtc).toLocaleString()
+                                                     : 'never';
+                                                   resyncLastModeEl.textContent = resync.lastMode || 'none';
+                                                   resyncKeysLastEl.textContent = String(resync.keysReplayedLastRun ?? 0);
+                                                   resyncKeysTotalEl.textContent = String(resync.keysReplayedTotal ?? 0);
+                                                   resyncLastErrorEl.textContent = resync.lastError || 'none';
+                                                 }
                                               async function refreshMetrics() {
                                                 const response = await fetch('/metrics');
                                                 const text = await response.text();
@@ -510,10 +624,20 @@ public sealed class MonitoringHttpServer : IDisposable
                                                  logsEl.appendChild(row);
                                                 });
                                               }
+                                              async function triggerResync(mode) {
+                                                resyncResultEl.textContent = `triggering ${mode}...`;
+                                                const response = await fetch(`/admin/resync?mode=${encodeURIComponent(mode)}`, { method: 'POST' });
+                                                const payload = await response.json();
+                                                resyncResultEl.textContent = JSON.stringify(payload, null, 2);
+                                                await refreshReady();
+                                                await refreshMetrics();
+                                              }
                                               async function refreshAll() {
                                                 await Promise.all([refreshReady(), refreshMetrics(), refreshLogs(), refreshSyncSummary(), refreshSyncStatus()]);
                                               }
                                               syncRefreshButton.addEventListener('click', refreshSyncStatus);
+                                              resyncTriggerPartialButton.addEventListener('click', () => triggerResync('partial'));
+                                              resyncTriggerFullButton.addEventListener('click', () => triggerResync('full'));
                                               refreshAll();
                                               setInterval(refreshAll, 3000);
                                             </script>

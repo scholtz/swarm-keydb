@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -15,6 +16,7 @@ public sealed class RedisCommandProcessor : IDisposable
     private readonly RestoreService? _restoreService;
     private readonly KeyRotationService? _keyRotationService;
     private readonly IRedisCommandObserver? _observer;
+    private readonly IResyncCoordinator? _resyncCoordinator;
     private readonly ILogger<RedisCommandProcessor> _logger;
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
 
@@ -27,7 +29,8 @@ public sealed class RedisCommandProcessor : IDisposable
         IRedisCommandObserver? observer = null,
         ILogger<RedisCommandProcessor>? logger = null,
         IDidContextAccessor? didContextAccessor = null,
-        IDecentralizedIdentityProvider? didProvider = null)
+        IDecentralizedIdentityProvider? didProvider = null,
+        IResyncCoordinator? resyncCoordinator = null)
     {
         _store = store;
         _ethAddressAccessor = ethAddressAccessor;
@@ -38,6 +41,7 @@ public sealed class RedisCommandProcessor : IDisposable
         _keyRotationService = keyRotationService;
         _observer = observer;
         _logger = logger ?? NullLogger<RedisCommandProcessor>.Instance;
+        _resyncCoordinator = resyncCoordinator;
     }
 
     public async Task ProcessAsync(Stream input, Stream output, CancellationToken cancellationToken = default)
@@ -174,6 +178,7 @@ public sealed class RedisCommandProcessor : IDisposable
                 "RESTOREDB" => await RestoreDbAsync(args, cancellationToken).ConfigureAwait(false),
                 "ROTATEKEY" => await RotateKeyAsync(args, cancellationToken).ConfigureAwait(false),
                 "BACKENDMETA" => await BackendMetaAsync(args, cancellationToken).ConfigureAwait(false),
+                "SWARM.RESYNC" => await SwarmResyncAsync(args, cancellationToken).ConfigureAwait(false),
                 "QUIT" => RespValue.SimpleString("OK"),
                 _ => RespValue.Error($"ERR unknown command '{command}'")
             };
@@ -336,6 +341,42 @@ public sealed class RedisCommandProcessor : IDisposable
 
         var metadata = await metadataProvider.GetBackendMetadataAsync(args[1].AsString(), cancellationToken).ConfigureAwait(false);
         return metadata is null ? RespValue.BulkString((string?)null) : RespValue.BulkString(metadata);
+    }
+
+    private async Task<RespValue> SwarmResyncAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        if (args.Count > 2)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'SWARM.RESYNC' command");
+        }
+
+        if (_resyncCoordinator is null || ReferenceEquals(_resyncCoordinator, NoOpResyncCoordinator.Instance))
+        {
+            return RespValue.Error("ERR SWARM.RESYNC is not available.");
+        }
+
+        var mode = ResyncMode.Auto;
+        if (args.Count == 2)
+        {
+            mode = args[1].AsString().ToUpperInvariant() switch
+            {
+                "PARTIAL" => ResyncMode.Partial,
+                "FULL" => ResyncMode.Full,
+                _ => throw new ArgumentException("invalid resync mode. expected PARTIAL or FULL")
+            };
+        }
+
+        var result = await _resyncCoordinator.TriggerResyncAsync(mode, cancellationToken).ConfigureAwait(false);
+        var payload = JsonSerializer.Serialize(new
+        {
+            status = "ok",
+            mode = result.Mode.ToString().ToLowerInvariant(),
+            keysReplayed = result.KeysReplayed,
+            versionGap = result.VersionGap,
+            durationSeconds = Math.Round(result.Duration.TotalSeconds, 6),
+            completedAtUtc = result.CompletedAtUtc
+        });
+        return RespValue.BulkString(payload);
     }
 
     private async Task<RespValue> SetAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)

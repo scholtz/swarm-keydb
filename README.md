@@ -4,7 +4,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 
 ## Features
 
-- Redis-compatible commands for `PING`, `SET`, `SETEX`, `PSETEX`, `GET`, `MGET`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXISTS`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `KEYS`, `SCAN`, `TYPE`, and `QUIT`.
+- Redis-compatible commands for `PING`, `SET`, `SETEX`, `PSETEX`, `GET`, `MGET`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXISTS`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `KEYS`, `SCAN`, `TYPE`, `SWARM.RESYNC`, and `QUIT`.
 - Connection-scoped Ethereum-address ACL enforcement via `AUTHADDR` for shared databases.
 - Secure key rotation plus immutable Swarm backup/restore workflows for encrypted databases.
 - String, JSON, and binary value helpers in the `SwarmKeyDbClient` library.
@@ -178,6 +178,7 @@ MSET a 1 b 2 c 3                  -> +OK
 MGET a b missing                  -> *3\r\n$1\r\n1\r\n$1\r\n2\r\n$-1
 PERSIST session:token             -> :1 (or :0 when no TTL exists)
 SET profile:name Ada EX 60        -> +OK
+SWARM.RESYNC PARTIAL              -> {"status":"ok","mode":"partial",...}
 ```
 
 ## Querying
@@ -302,9 +303,13 @@ The server enables an in-memory read-through cache by default for hot keys. Conf
 - `SWARM_KEYDB_SYNC_PEERS` (comma-separated or JSON array of Redis pub/sub endpoints used for cross-instance cache invalidation)
 - `SWARM_KEYDB_SYNC_INTERVAL_SEC` (default `5`, anti-entropy reconciliation interval)
 - `SWARM_KEYDB_SYNC_CHANNEL` (default `swarm-keydb-sync`, Redis pub/sub channel for invalidation events)
+- `SWARM_KEYDB_RESYNC_MODE` (`auto`, `partial`, `full`; default `auto`)
+- `SWARM_KEYDB_RESYNC_MAX_VERSION_GAP` (default `128`, maximum allowed version gap for automatic partial resync)
+- `SWARM_KEYDB_RESYNC_FULL_BATCH_SIZE` (default `256`, deterministic full-resync replay batch size)
+- `SWARM_KEYDB_RESYNC_TIMEOUT_SECONDS` (default `30`, timeout for each resync operation)
 
 Writes (`SET`, `SETEX`, `MSET`, etc.), deletes, and TTL changes invalidate cached entries so subsequent reads refresh from Swarm/index data.
-When `SWARM_KEYDB_SYNC_PEERS` is configured, each write publishes version-stamped invalidation events and anti-entropy reconciliation periodically refreshes stale peers after temporary partitions.
+When `SWARM_KEYDB_SYNC_PEERS` is configured, each write publishes version-stamped invalidation events and anti-entropy reconciliation periodically refreshes stale peers after temporary partitions. Startup and operator-triggered resync now use partial replay when version gaps are small and automatically fall back to deterministic full rebuild when history is unavailable or stale.
 
 ### Async high-throughput write queue
 
@@ -325,8 +330,9 @@ SwarmKeyDb now exposes production observability endpoints:
 - `GET /backend` (per-backend connectivity state for `swarm`, `ipfs`, or `hybrid`)
 - `GET /dashboard` (lightweight HTML dashboard, default port `8080`)
 - `GET /logs` (recent structured command logs with correlation IDs)
+- `POST /admin/resync?mode=partial|full` (manual operator-triggered cache resync)
 
-`/dashboard` now includes a **Cache Sync Status** panel with peer count, last successful sync, reconciled key count for the last cycle, pending reconciliations, and the latest sync error (if any).
+`/dashboard` now includes **Cache Sync Status** and **Resync Status** panels with current mode, last resync time, replay counters, and manual trigger buttons.
 
 Configuration (environment variables override `appsettings.json`):
 

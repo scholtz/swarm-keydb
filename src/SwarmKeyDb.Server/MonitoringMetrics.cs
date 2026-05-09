@@ -5,7 +5,7 @@ using SwarmKeyDb;
 
 namespace SwarmKeyDb.Server;
 
-public sealed class MonitoringMetrics : IRedisCommandObserver
+public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsReporter
 {
     private static readonly double[] LatencyBuckets = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
     private readonly ConcurrentDictionary<string, OperationStats> _operations = new(StringComparer.OrdinalIgnoreCase);
@@ -19,6 +19,10 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
     private long _activeConnections;
     private long _swarmReads;
     private long _swarmWrites;
+    private long _resyncPartialTotal;
+    private long _resyncFullTotal;
+    private long _resyncKeysReplayedTotal;
+    private long _resyncDurationMilliseconds;
 
     public MonitoringMetrics(
         Func<ICacheStats> cacheStatsAccessor,
@@ -41,6 +45,21 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
     public void OnSwarmRead() => Interlocked.Increment(ref _swarmReads);
 
     public void OnSwarmWrite() => Interlocked.Increment(ref _swarmWrites);
+
+    public void RecordResync(ResyncMode mode, TimeSpan duration, int keysReplayed)
+    {
+        if (mode == ResyncMode.Partial)
+        {
+            Interlocked.Increment(ref _resyncPartialTotal);
+        }
+        else if (mode == ResyncMode.Full)
+        {
+            Interlocked.Increment(ref _resyncFullTotal);
+        }
+
+        Interlocked.Add(ref _resyncKeysReplayedTotal, Math.Max(0, keysReplayed));
+        Interlocked.Exchange(ref _resyncDurationMilliseconds, Math.Max(0, (long)duration.TotalMilliseconds));
+    }
 
     public IReadOnlyList<MonitoringLogEntry> GetRecentLogs(int count)
     {
@@ -116,6 +135,14 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
         builder.AppendLine("# TYPE swarmkeydb_cache_verification_fail_total counter");
         builder.AppendLine("# HELP swarmkeydb_cache_eviction_by_verification_total Total cache evictions triggered by a consistency verification failure.");
         builder.AppendLine("# TYPE swarmkeydb_cache_eviction_by_verification_total counter");
+        builder.AppendLine("# HELP swarmkeydb_resync_partial_total Total completed partial resync operations.");
+        builder.AppendLine("# TYPE swarmkeydb_resync_partial_total counter");
+        builder.AppendLine("# HELP swarmkeydb_resync_full_total Total completed full resync operations.");
+        builder.AppendLine("# TYPE swarmkeydb_resync_full_total counter");
+        builder.AppendLine("# HELP swarmkeydb_resync_duration_seconds Duration in seconds for the last completed resync.");
+        builder.AppendLine("# TYPE swarmkeydb_resync_duration_seconds gauge");
+        builder.AppendLine("# HELP swarmkeydb_resync_keys_replayed_total Total keys replayed by resync operations.");
+        builder.AppendLine("# TYPE swarmkeydb_resync_keys_replayed_total counter");
 
         foreach (var entry in _operations.OrderBy(static item => item.Key, StringComparer.Ordinal))
         {
@@ -173,6 +200,10 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
         builder.AppendLine(FormatMetric("swarmkeydb_cache_verification_pass_total", passTotal));
         builder.AppendLine(FormatMetric("swarmkeydb_cache_verification_fail_total", consistency.ViolationCount));
         builder.AppendLine(FormatMetric("swarmkeydb_cache_eviction_by_verification_total", consistency.EvictionByVerificationTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_resync_partial_total", Interlocked.Read(ref _resyncPartialTotal)));
+        builder.AppendLine(FormatMetric("swarmkeydb_resync_full_total", Interlocked.Read(ref _resyncFullTotal)));
+        builder.AppendLine(FormatMetric("swarmkeydb_resync_duration_seconds", Interlocked.Read(ref _resyncDurationMilliseconds) / 1000D));
+        builder.AppendLine(FormatMetric("swarmkeydb_resync_keys_replayed_total", Interlocked.Read(ref _resyncKeysReplayedTotal)));
 
         return builder.ToString();
     }
