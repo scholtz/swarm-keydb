@@ -16,6 +16,7 @@ This folder is the entrypoint for project documentation.
 - `reference/` documents configuration and environment variables.
 - `development/migration.md` documents Redis-to-SwarmKeyDb migration workflows.
 - `privacy-preserving-queries.md` documents oblivious key-token query mode and migration.
+- `../src/SwarmKeyDb.SwarmConsistency/README.md` documents the consistency verification NuGet package.
 - `../examples/` contains runnable C# examples.
 - `../swarm-keydb-js/`, `../swarm-keydb-react/`, `../swarm-keydb-node/`, `../swarm-keydb-py/`, and `../swarm-keydb-go/` contain SDK/connectors with examples and tests.
 

@@ -3,6 +3,7 @@
     <Project Path="src/SwarmKeyDb.Migrate/SwarmKeyDb.Migrate.csproj" />
     <Project Path="src/SwarmKeyDb.Cli/SwarmKeyDb.Cli.csproj" />
     <Project Path="src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj" />
+    <Project Path="src/SwarmKeyDb.SwarmConsistency/SwarmKeyDb.SwarmConsistency.csproj" />
     <Project Path="src/SwarmKeyDb/SwarmKeyDb.csproj" />
   </Folder>
   <Folder Name="/tests/">

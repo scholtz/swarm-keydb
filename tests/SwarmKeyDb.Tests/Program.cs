@@ -10,6 +10,7 @@ using Microsoft.Extensions.Options;
 using SwarmKeyDb;
 using SwarmKeyDb.Cli;
 using SwarmKeyDb.Migrate;
+using SwarmKeyDb.SwarmConsistency;
 using SwarmKeyDb.Server;
 
 var tests = new (string Name, Func<Task> Test)[]
@@ -21,6 +22,11 @@ var tests = new (string Name, Func<Task> Test)[]
     ("batch get detects tampered key", BatchGetDetectsTamperedKeyAsync),
     ("swarm store integrity supports empty and large values", SwarmStoreIntegritySupportsEmptyAndLargeValuesAsync),
     ("bee client parses upload references", BeeClientParsesUploadReferenceAsync),
+    ("bee consistency verifier validates feed revision", BeeConsistencyVerifierValidatesFeedRevisionAsync),
+    ("bee consistency verifier validates content hash mismatch", BeeConsistencyVerifierDetectsHashMismatchAsync),
+    ("quorum consistency verifier requires threshold", QuorumConsistencyVerifierRequiresThresholdAsync),
+    ("consistency middleware strict mode throws on violation", ConsistencyMiddlewareStrictModeThrowsOnViolationAsync),
+    ("consistency middleware warn mode logs and returns value", ConsistencyMiddlewareWarnModeLogsAndReturnsValueAsync),
     ("ipfs backend supports put get delete list and scan", IpfsBackendSupportsKeyValueOperationsAsync),
     ("hybrid backend falls back to available storage backend", HybridBackendFallsBackToAvailableStorageAsync),
     ("redis backendmeta command returns backend metadata", RedisBackendMetaCommandReturnsMetadataAsync),
@@ -130,6 +136,7 @@ var tests = new (string Name, Func<Task> Test)[]
     ("monitoring health endpoint reports degraded for unhealthy shard", MonitoringHealthEndpointReportsDegradedForUnhealthyShardAsync),
     ("monitoring backend endpoint reports backend connectivity", MonitoringBackendEndpointReportsBackendConnectivityAsync),
     ("monitoring health and dashboard expose offline queue depth", MonitoringHealthAndDashboardExposeOfflineQueueDepthAsync),
+    ("monitoring health and dashboard expose consistency verification metrics", MonitoringHealthAndDashboardExposeConsistencyMetricsAsync),
     ("redis command logging includes correlation ids", RedisCommandLoggingIncludesCorrelationIdsAsync),
     ("redis management commands backup restore and rotate", RedisManagementCommandsBackupRestoreAndRotateAsync),
     ("migrate scan pattern applies prefix filter", MigrateScanPatternAppliesPrefixFilterAsync),
@@ -394,6 +401,112 @@ static async Task IpfsBackendSupportsKeyValueOperationsAsync()
     Assert(response.Contains("+OK\r\n$5\r\nvalue\r\n", StringComparison.Ordinal), "IPFS backend should round-trip set/get.");
     Assert(response.Contains("*1\r\n$8\r\nipfs:key\r\n", StringComparison.Ordinal), "IPFS backend should list keys.");
     Assert(response.Contains(":1\r\n$-1\r\n", StringComparison.Ordinal), "IPFS backend should delete keys.");
+}
+
+static async Task BeeConsistencyVerifierValidatesFeedRevisionAsync()
+{
+    var handler = new StubHttpMessageHandler(request =>
+    {
+        AssertEqual("/feeds/1111111111111111111111111111111111111111/aabbcc", request.RequestUri!.AbsolutePath);
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"feedIndex\":\"0x2a\"}")
+        };
+    });
+    using var http = new HttpClient(handler) { BaseAddress = new Uri("http://bee.local/") };
+    var verifier = new BeeConsistencyVerifier(http, new ConsistencyOptions
+    {
+        FeedOwner = "1111111111111111111111111111111111111111"
+    });
+
+    var result = await verifier.VerifyFeedRevisionAsync("aabbcc", 42, CancellationToken.None);
+    Assert(result.IsValid, "Expected feed revision verification to pass.");
+}
+
+static async Task BeeConsistencyVerifierDetectsHashMismatchAsync()
+{
+    var payload = Encoding.UTF8.GetBytes("actual");
+    var expected = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes("expected"));
+    var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+    {
+        Content = new ByteArrayContent(payload)
+    });
+    using var http = new HttpClient(handler) { BaseAddress = new Uri("http://bee.local/") };
+    var verifier = new BeeConsistencyVerifier(http, new ConsistencyOptions());
+
+    var result = await verifier.VerifyContentHashAsync("abc", expected, CancellationToken.None);
+    Assert(!result.IsValid, "Expected content hash verification to fail for mismatched payload.");
+    Assert(result.FailureReason.Contains("mismatch", StringComparison.OrdinalIgnoreCase), "Expected mismatch reason.");
+}
+
+static async Task QuorumConsistencyVerifierRequiresThresholdAsync()
+{
+    var quorum = new QuorumConsistencyVerifier(
+    [
+        new StaticConsistencyVerifier(VerificationResult.Passed("content-hash", "node-1", TimeSpan.FromMilliseconds(3), "a", "a")),
+        new StaticConsistencyVerifier(VerificationResult.Failed("content-hash", "node-2", TimeSpan.FromMilliseconds(5), "a", "b", "mismatch")),
+        new StaticConsistencyVerifier(VerificationResult.Failed("content-hash", "node-3", TimeSpan.FromMilliseconds(4), "a", "b", "mismatch"))
+    ],
+        threshold: 2);
+
+    var threw = false;
+    try
+    {
+        _ = await quorum.VerifyContentHashAsync("ref", [1], CancellationToken.None);
+    }
+    catch (QuorumNotMetException ex)
+    {
+        threw = true;
+        AssertEqual(2, ex.Threshold);
+        AssertEqual(1, ex.Succeeded);
+    }
+
+    Assert(threw, "Expected quorum verifier to throw when threshold is not met.");
+}
+
+static async Task ConsistencyMiddlewareStrictModeThrowsOnViolationAsync()
+{
+    var inner = new MetadataCountingStore();
+    await inner.PutAsync("profile:name", Encoding.UTF8.GetBytes("Ada"));
+    await inner.SetReferenceAsync("profile:name", "ref-1");
+    var verifier = new StaticConsistencyVerifier(VerificationResult.Failed("content-hash", "http://bee.local", TimeSpan.FromMilliseconds(4), "expected", "actual", "hash mismatch"));
+    var logger = new TestLogger<ConsistencyVerificationMiddleware>();
+    var middleware = new ConsistencyVerificationMiddleware(
+        inner,
+        verifier,
+        Options.Create(new ConsistencyOptions { Enabled = true, FailureMode = ConsistencyFailureMode.Strict }),
+        logger);
+
+    var threw = false;
+    try
+    {
+        _ = await middleware.GetAsync("profile:name");
+    }
+    catch (ConsistencyViolationException ex)
+    {
+        threw = true;
+        AssertEqual("profile:name", ex.Key);
+    }
+
+    Assert(threw, "Expected strict consistency mode to throw on verification failure.");
+}
+
+static async Task ConsistencyMiddlewareWarnModeLogsAndReturnsValueAsync()
+{
+    var inner = new MetadataCountingStore();
+    await inner.PutAsync("profile:name", Encoding.UTF8.GetBytes("Ada"));
+    await inner.SetReferenceAsync("profile:name", "ref-1");
+    var verifier = new StaticConsistencyVerifier(VerificationResult.Failed("content-hash", "http://bee.local", TimeSpan.FromMilliseconds(4), "expected", "actual", "hash mismatch"));
+    var logger = new TestLogger<ConsistencyVerificationMiddleware>();
+    var middleware = new ConsistencyVerificationMiddleware(
+        inner,
+        verifier,
+        Options.Create(new ConsistencyOptions { Enabled = true, FailureMode = ConsistencyFailureMode.Warn }),
+        logger);
+
+    var value = await middleware.GetAsync("profile:name");
+    AssertEqual("Ada", Encoding.UTF8.GetString(value!));
+    Assert(logger.Messages.Any(message => message.Contains("Consistency verification failed", StringComparison.Ordinal)), "Expected warning log in warn mode.");
 }
 
 static async Task HybridBackendFallsBackToAvailableStorageAsync()
@@ -1626,6 +1739,51 @@ static async Task MonitoringHealthAndDashboardExposeOfflineQueueDepthAsync()
     var dashboard = await client.GetStringAsync($"http://127.0.0.1:{port}/dashboard");
     Assert(dashboard.Contains("Offline Queue", StringComparison.Ordinal), "Expected offline queue section in dashboard.");
     Assert(dashboard.Contains("offline-queue-depth", StringComparison.Ordinal), "Expected offline queue element in dashboard HTML.");
+
+    cts.Cancel();
+    await runTask;
+    server.Dispose();
+}
+
+static async Task MonitoringHealthAndDashboardExposeConsistencyMetricsAsync()
+{
+    var metrics = new MonitoringMetrics(
+        () => NoOpCacheStats.Instance,
+        () => NoOpOfflineStatusProvider.Instance,
+        () => new StaticConsistencyVerificationStatusProvider(
+            new ConsistencyVerificationSnapshot(
+                LastVerificationUtc: new DateTimeOffset(2026, 05, 09, 01, 00, 00, TimeSpan.Zero),
+                TotalVerifications: 10,
+                ViolationCount: 2,
+                SuccessRate: 0.8,
+                WorstLatencyMs: 42)));
+    var port = TestNetHelpers.GetFreePort();
+    var server = new MonitoringHttpServer(
+        IPAddress.Loopback,
+        port,
+        metrics,
+        new StaticReadinessProbe(ready: true, message: "ready"),
+        metricsEnabled: true,
+        dashboardEnabled: true,
+        NullLogger<MonitoringHttpServer>.Instance,
+        consistencyStatusProvider: new StaticConsistencyVerificationStatusProvider(
+            new ConsistencyVerificationSnapshot(
+                LastVerificationUtc: new DateTimeOffset(2026, 05, 09, 01, 00, 00, TimeSpan.Zero),
+                TotalVerifications: 10,
+                ViolationCount: 2,
+                SuccessRate: 0.8,
+                WorstLatencyMs: 42)));
+    using var cts = new CancellationTokenSource();
+    var runTask = server.RunAsync(cts.Token);
+    using var client = new HttpClient();
+
+    var healthPayload = await client.GetStringAsync($"http://127.0.0.1:{port}/health");
+    Assert(healthPayload.Contains("\"consistencyVerification\":", StringComparison.Ordinal), "Expected consistency verification object in health payload.");
+    Assert(healthPayload.Contains("\"violationCount\":2", StringComparison.Ordinal), "Expected violation count in health payload.");
+    var metricsPayload = await client.GetStringAsync($"http://127.0.0.1:{port}/metrics");
+    Assert(metricsPayload.Contains("swarmkeydb_consistency_success_rate", StringComparison.Ordinal), "Expected consistency success rate metric.");
+    var dashboard = await client.GetStringAsync($"http://127.0.0.1:{port}/dashboard");
+    Assert(dashboard.Contains("Consistency Success Rate", StringComparison.Ordinal), "Expected consistency section in dashboard HTML.");
 
     cts.Cancel();
     await runTask;
@@ -3931,6 +4089,55 @@ internal sealed class DelayedWriteKeyValueStore : IKeyValueStore
     }
 }
 
+internal sealed class MetadataCountingStore : IKeyValueStore, IBackendMetadataProvider
+{
+    private readonly Dictionary<string, byte[]> _values = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _references = new(StringComparer.Ordinal);
+
+    public Task PutAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default)
+    {
+        _values[key] = value.ToArray();
+        return Task.CompletedTask;
+    }
+
+    public Task<byte[]?> GetAsync(string key, CancellationToken cancellationToken = default) =>
+        Task.FromResult(_values.TryGetValue(key, out var value) ? value.ToArray() : null);
+
+    public Task<bool> DeleteAsync(string key, CancellationToken cancellationToken = default) =>
+        Task.FromResult(_values.Remove(key));
+
+    public Task<IReadOnlyList<string>> ListKeysAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<string>>(_values.Keys.ToArray());
+
+    public Task<string?> GetBackendMetadataAsync(string key, CancellationToken cancellationToken = default) =>
+        Task.FromResult(_references.TryGetValue(key, out var reference) ? reference : null);
+
+    public Task SetReferenceAsync(string key, string reference)
+    {
+        _references[key] = reference;
+        return Task.CompletedTask;
+    }
+}
+
+internal sealed class StaticConsistencyVerifier : ISwarmConsistencyVerifier
+{
+    private readonly VerificationResult _result;
+
+    public StaticConsistencyVerifier(VerificationResult result)
+    {
+        _result = result;
+    }
+
+    public Task<VerificationResult> VerifyFeedRevisionAsync(string topic, ulong expectedRevision, CancellationToken ct) =>
+        Task.FromResult(_result with { VerificationType = "feed-revision" });
+
+    public Task<VerificationResult> VerifyContentHashAsync(string reference, byte[] expectedHash, CancellationToken ct) =>
+        Task.FromResult(_result with { VerificationType = "content-hash" });
+
+    public Task<VerificationResult> VerifyManifestLineageAsync(string manifestRef, IReadOnlyList<string> expectedAncestors, CancellationToken ct) =>
+        Task.FromResult(_result with { VerificationType = "manifest-lineage" });
+}
+
 internal sealed class TestLogger<T> : Microsoft.Extensions.Logging.ILogger<T>
 {
     public List<string> Messages { get; } = [];
@@ -4047,6 +4254,18 @@ internal sealed class StaticOfflineStatusProvider : IOfflineStatusProvider
     public DateTimeOffset? LastSuccessfulSyncUtc { get; }
     public bool IsOffline { get; }
     public OfflineMode Mode { get; }
+}
+
+internal sealed class StaticConsistencyVerificationStatusProvider : IConsistencyVerificationStatusProvider
+{
+    private readonly ConsistencyVerificationSnapshot _snapshot;
+
+    public StaticConsistencyVerificationStatusProvider(ConsistencyVerificationSnapshot snapshot)
+    {
+        _snapshot = snapshot;
+    }
+
+    public ConsistencyVerificationSnapshot GetSnapshot() => _snapshot;
 }
 
 internal sealed class ToggleConnectivityProbe : IConnectivityProbe

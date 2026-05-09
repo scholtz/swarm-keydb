@@ -18,6 +18,7 @@ public sealed class MonitoringHttpServer : IDisposable
     private readonly EthereumBridgeService? _ethereumBridge;
     private readonly CrossChainSyncService? _crossChainSyncService;
     private readonly IOfflineStatusProvider _offlineStatusProvider;
+    private readonly IConsistencyVerificationStatusProvider _consistencyStatusProvider;
     private readonly string _privacyMode;
     private readonly string _didMode;
 
@@ -34,6 +35,7 @@ public sealed class MonitoringHttpServer : IDisposable
         EthereumBridgeService? ethereumBridge = null,
         CrossChainSyncService? crossChainSyncService = null,
         IOfflineStatusProvider? offlineStatusProvider = null,
+        IConsistencyVerificationStatusProvider? consistencyStatusProvider = null,
         PrivacyMode privacyMode = PrivacyMode.None,
         DidAuthMode didMode = DidAuthMode.None)
     {
@@ -47,6 +49,7 @@ public sealed class MonitoringHttpServer : IDisposable
         _ethereumBridge = ethereumBridge;
         _crossChainSyncService = crossChainSyncService;
         _offlineStatusProvider = offlineStatusProvider ?? NoOpOfflineStatusProvider.Instance;
+        _consistencyStatusProvider = consistencyStatusProvider ?? NoOpConsistencyVerificationStatusProvider.Instance;
         _privacyMode = privacyMode.ToString().ToLowerInvariant();
         _didMode = didMode.ToString().ToLowerInvariant();
         _listener.Prefixes.Add($"http://{(address.Equals(IPAddress.Any) ? "+" : address.ToString())}:{port}/");
@@ -97,6 +100,7 @@ public sealed class MonitoringHttpServer : IDisposable
                 ? null
                 : await _shardHealthProvider.GetShardHealthAsync(cancellationToken).ConfigureAwait(false);
             var degraded = shardHealth?.Any(static shard => !shard.Ready) == true;
+            var consistencySnapshot = _consistencyStatusProvider.GetSnapshot();
             await WriteJsonAsync(
                 context.Response,
                 degraded ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.OK,
@@ -105,6 +109,14 @@ public sealed class MonitoringHttpServer : IDisposable
                     status = degraded ? "degraded" : "healthy",
                     offline_queue_depth = _offlineStatusProvider.QueueDepth,
                     last_successful_sync_utc = _offlineStatusProvider.LastSuccessfulSyncUtc,
+                    consistencyVerification = new
+                    {
+                        lastVerificationUtc = consistencySnapshot.LastVerificationUtc,
+                        totalVerifications = consistencySnapshot.TotalVerifications,
+                        successRate = consistencySnapshot.SuccessRate,
+                        violationCount = consistencySnapshot.ViolationCount,
+                        worstLatencyMs = consistencySnapshot.WorstLatencyMs
+                    },
                     shards = shardHealth?.Select(static shard => new
                     {
                         shard = shard.Shard,
@@ -329,7 +341,10 @@ public sealed class MonitoringHttpServer : IDisposable
                                              <p>Readiness: <span id="ready-status">loading...</span></p>
                                              <p>Offline Queue: <strong id="offline-queue-depth">loading...</strong></p>
                                              <p>Last Sync: <strong id="offline-last-sync">loading...</strong></p>
-                                             <h2>Cross-chain replication health</h2>
+                                             <p>Consistency Success Rate: <strong id="consistency-success-rate">loading...</strong></p>
+                                             <p>Consistency Violations: <strong id="consistency-violation-count">loading...</strong></p>
+                                             <p>Consistency Worst Latency: <strong id="consistency-worst-latency">loading...</strong></p>
+                                              <h2>Cross-chain replication health</h2>
                                             <table>
                                               <thead>
                                                 <tr><th>Chain</th><th>Pending</th><th>Synced</th><th>Failed</th><th>Health</th></tr>
@@ -359,6 +374,9 @@ public sealed class MonitoringHttpServer : IDisposable
                                               const logsEl = document.getElementById('logs');
                                               const offlineQueueDepthEl = document.getElementById('offline-queue-depth');
                                               const offlineLastSyncEl = document.getElementById('offline-last-sync');
+                                              const consistencySuccessRateEl = document.getElementById('consistency-success-rate');
+                                              const consistencyViolationCountEl = document.getElementById('consistency-violation-count');
+                                              const consistencyWorstLatencyEl = document.getElementById('consistency-worst-latency');
                                               function parseCounters(metricsText) {
                                                const wanted = [
                                                  'swarmkeydb_operations_total{operation="get",status="success"}',
@@ -366,11 +384,14 @@ public sealed class MonitoringHttpServer : IDisposable
                                                  'swarmkeydb_operations_total{operation="delete",status="success"}',
                                                  'swarmkeydb_operations_total{operation="list",status="success"}',
                                                  'swarmkeydb_operations_total{operation="batch",status="success"}',
-                                                 'swarmkeydb_cache_hit_ratio',
-                                                 'swarmkeydb_active_connections',
-                                                 'swarmkeydb_swarm_reads_total',
-                                                 'swarmkeydb_swarm_writes_total'
-                                               ];
+                                                  'swarmkeydb_cache_hit_ratio',
+                                                  'swarmkeydb_active_connections',
+                                                  'swarmkeydb_swarm_reads_total',
+                                                  'swarmkeydb_swarm_writes_total',
+                                                  'swarmkeydb_consistency_success_rate',
+                                                  'swarmkeydb_consistency_violations_total',
+                                                  'swarmkeydb_consistency_worst_latency_ms'
+                                                ];
                                                return metricsText.split('\n').filter(line => wanted.some(prefix => line.startsWith(prefix))).join('\n');
                                              }
                                              async function refreshReady() {
@@ -378,11 +399,15 @@ public sealed class MonitoringHttpServer : IDisposable
                                                 const data = await response.json();
                                                 readyStatus.textContent = data.status + ' (' + data.message + ')';
                                                 readyStatus.className = response.ok ? 'ok' : 'bad';
-                                                offlineQueueDepthEl.textContent = String(data.offline_queue_depth ?? 0);
-                                                offlineLastSyncEl.textContent = data.last_successful_sync_utc
-                                                  ? new Date(data.last_successful_sync_utc).toLocaleString()
-                                                  : 'never';
-                                              }
+                                                 offlineQueueDepthEl.textContent = String(data.offline_queue_depth ?? 0);
+                                                 offlineLastSyncEl.textContent = data.last_successful_sync_utc
+                                                   ? new Date(data.last_successful_sync_utc).toLocaleString()
+                                                   : 'never';
+                                                 const consistency = data.consistencyVerification || {};
+                                                 consistencySuccessRateEl.textContent = `${Math.round((consistency.successRate ?? 1) * 10000) / 100}%`;
+                                                 consistencyViolationCountEl.textContent = String(consistency.violationCount ?? 0);
+                                                 consistencyWorstLatencyEl.textContent = `${Math.round(consistency.worstLatencyMs ?? 0)} ms`;
+                                               }
                                               async function refreshMetrics() {
                                                 const response = await fetch('/metrics');
                                                 const text = await response.text();
