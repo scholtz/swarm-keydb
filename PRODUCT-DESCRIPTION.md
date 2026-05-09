@@ -25,12 +25,12 @@ Traditional Redis-style deployments still struggle with multi-instance data avai
 
 ***What are the planned features to make it a robust key-value database?***
 
-- **Delivered foundation (implemented):** TTL/expiration, batch operations, range and prefix scans, CRDT merge strategies, encryption, ACL and DID authorization, backup/restore/key rotation, offline-first sync, consistency verification middleware, Docker and Helm release automation, IPFS and Ethereum integrations, cross-chain sync, and SDK/connectors (JS, Python, Go, React, Node).
-- **Current unresolved gap:** Multi-instance cache coherence still needs cross-node invalidation and deterministic resync behavior so horizontal deployments converge after partitions, failovers, and rolling updates.
+- **Delivered foundation (implemented):** TTL/expiration, batch operations, range and prefix scans, CRDT merge strategies, encryption, ACL and DID authorization, backup/restore/key rotation, offline-first sync, consistency verification middleware, cross-instance cache invalidation + anti-entropy + partial/full resync, Redis Pub/Sub parity, Redis transaction semantics (`MULTI`/`EXEC`/`WATCH`), stream core + consumer-group workflows (including blocking `XREAD`/`XREADGROUP` wake/timeout behavior), Docker and Helm release automation, IPFS and Ethereum integrations, cross-chain sync, and SDK/connectors (JS, Python, Go, React, Node).
+- **Current unresolved gaps (active roadmap):**
+	- **Streams retention and resilience hardening:** finalize retention policy behavior and add more failure-injection coverage for crash recovery, duplicate delivery, and re-delivery from pending entries.
+	- **Scripting safety:** implement `EVAL`/`EVALSHA`/script cache support with deterministic sandboxing and runtime guardrails.
+	- **Operability hardening:** expand command compatibility (`INFO`/`COMMAND`/`CLIENT`/`CONFIG GET`), parser conformance tests, adaptive active-expiry budgeting, and memory-pressure controls.
 - **Issue-informed compatibility priorities (next roadmap):**
-	- **Redis Pub/Sub parity:** Add `SUBSCRIBE`/`PSUBSCRIBE`/`PUBLISH`/`PUBSUB` behavior with stable fan-out and failure handling, informed by ecosystem pain points such as KeyDB Pub/Sub worker failures and cluster `NUMSUB` inconsistencies.
-	- **Transaction semantics:** Add `MULTI`/`EXEC`/`WATCH` with optimistic concurrency and clear edge-case behavior around expiry and reconnects.
-	- **Streams support:** Add `XADD`/`XREAD`/consumer-group workflows with restart-safe pending state and replay controls.
 	- **Scripting safety:** Add `EVAL`/`EVALSHA`/script cache support with sandboxing and guardrails motivated by recurring Lua-related vulnerabilities in Redis-compatible servers.
 	- **Operability hardening:** Add stronger compatibility and reliability controls for parser edge cases, active-expire budgeting, memory-pressure behavior, and command-level observability based on common KeyDB and Valkey issue themes.
 - **External issue inputs used for prioritization:** KeyDB issues include Pub/Sub and cluster consistency concerns (`#853`, `#845`), `KEYS` operational hangs (`#878`), and memory/eviction instability (`#972`). Valkey issues include stream correctness (`#3429`), command edge-case parsing correctness (`#3483`), and richer command error observability (`#3636`).

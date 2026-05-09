@@ -189,6 +189,12 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine("# TYPE swarmkeydb_stream_group_count gauge");
         builder.AppendLine("# HELP swarmkeydb_stream_idle_consumer_count Total idle stream consumers.");
         builder.AppendLine("# TYPE swarmkeydb_stream_idle_consumer_count gauge");
+        builder.AppendLine("# HELP swarmkeydb_stream_blocked_readers Current blocked stream readers.");
+        builder.AppendLine("# TYPE swarmkeydb_stream_blocked_readers gauge");
+        builder.AppendLine("# HELP swarmkeydb_stream_blocked_readers_by_stream Current blocked stream readers per stream key.");
+        builder.AppendLine("# TYPE swarmkeydb_stream_blocked_readers_by_stream gauge");
+        builder.AppendLine("# HELP swarmkeydb_stream_xread_wakeup_total Total stream read wakeups.");
+        builder.AppendLine("# TYPE swarmkeydb_stream_xread_wakeup_total counter");
 
         foreach (var entry in _operations.OrderBy(static item => item.Key, StringComparer.Ordinal))
         {
@@ -271,6 +277,12 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine(FormatMetric("swarmkeydb_stream_xclaim_total", streamMetrics.XClaimTotal));
         builder.AppendLine(FormatMetric("swarmkeydb_stream_group_count", streamMetrics.GroupCount));
         builder.AppendLine(FormatMetric("swarmkeydb_stream_idle_consumer_count", streamMetrics.IdleConsumerCount));
+        builder.AppendLine(FormatMetric("swarmkeydb_stream_blocked_readers", streamMetrics.BlockedReaders));
+        builder.AppendLine(FormatMetric("swarmkeydb_stream_xread_wakeup_total", streamMetrics.XReadWakeupTotal));
+        foreach (var entry in streamMetrics.BlockedReadersByStream.OrderBy(static pair => pair.Key, StringComparer.Ordinal))
+        {
+            builder.AppendLine(FormatMetric("swarmkeydb_stream_blocked_readers_by_stream", entry.Value, ("stream", entry.Key)));
+        }
 
         return builder.ToString();
     }
@@ -290,7 +302,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
             new long[RedisCommandProcessor.TransactionExecDurationBucketUpperBounds.Length],
             0,
             0));
-    private static readonly StreamMetricsSnapshot EmptyStreamMetricsSnapshot = new(0, 0, 0, 0, 0);
+    private static readonly StreamMetricsSnapshot EmptyStreamMetricsSnapshot = new(0, 0, 0, 0, 0, 0, 0, new Dictionary<string, long>(StringComparer.Ordinal));
 
     private void AppendHistogramMetrics(StringBuilder builder, string metricName, TransactionHistogramSnapshot histogram)
     {

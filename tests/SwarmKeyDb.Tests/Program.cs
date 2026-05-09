@@ -45,6 +45,11 @@ var tests = new (string Name, Func<Task> Test)[]
     ("redis stream consumer groups support xclaim xautoclaim and delconsumer", RedisStreamConsumerGroupClaimAndPendingAsync),
     ("redis stream consumer groups persist pending entries across processor restart", RedisStreamConsumerGroupPersistenceAcrossRestartAsync),
     ("redis stream consumer groups support setid destroy and busygroup semantics", RedisStreamConsumerGroupAdminCommandsAsync),
+    ("redis stream xread and xreadgroup validate options and syntax", RedisStreamXReadAndGroupValidateOptionsAsync),
+    ("redis stream xreadgroup noack does not create pending entries", RedisStreamXReadGroupNoAckDoesNotCreatePendingAsync),
+    ("redis stream xread supports blocking wake and timeout semantics", RedisStreamXReadBlockingWakeAndTimeoutAsync),
+    ("redis stream xreadgroup supports blocking wake and fair consumer delivery", RedisStreamXReadGroupBlockingFairWakeAsync),
+    ("redis stream blocking read cancellation cleans up waiters", RedisStreamBlockingReadCancellationCleansUpWaitersAsync),
     ("prefix scan returns matching keys", PrefixScanReturnsMatchingKeysAsync),
     ("range scan supports boundaries and reverse order", RangeScanSupportsBoundariesAndReverseOrderAsync),
     ("range scan rejects invalid bounds", RangeScanRejectsInvalidBoundsAsync),
@@ -1001,6 +1006,148 @@ static async Task RedisStreamConsumerGroupAdminCommandsAsync()
     Assert(response.Contains("+OK\r\n:1\r\n", StringComparison.Ordinal), "XGROUP SETID and DESTROY should succeed.");
     Assert(response.Contains("-NOGROUP No such key 'admin:events' or consumer group 'workers' in XREADGROUP with GROUP option\r\n", StringComparison.Ordinal),
         "After XGROUP DESTROY, XREADGROUP should return NOGROUP.");
+}
+
+static async Task RedisStreamXReadAndGroupValidateOptionsAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("XREAD", "COUNT", "0", "STREAMS", "opts:events", "0-0") +
+        RespCommand("XREAD", "BLOCK", "-1", "STREAMS", "opts:events", "0-0") +
+        RespCommand("XREAD", "BLOCK", "10", "STREAMS", "opts:events") +
+        RespCommand("XGROUP", "CREATE", "opts:events", "workers", "0-0", "MKSTREAM") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "COUNT", "0", "STREAMS", "opts:events", ">") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "BLOCK", "-5", "STREAMS", "opts:events", ">") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "UNKNOWN", "STREAMS", "opts:events", ">"));
+
+    var valueErrorCount = response.Split("-ERR value is not an integer or out of range\r\n", StringSplitOptions.None).Length - 1;
+    AssertEqual(4, valueErrorCount);
+    Assert(response.Contains("-ERR syntax error\r\n", StringComparison.Ordinal),
+        "XREAD/XREADGROUP should return syntax errors for malformed option layouts.");
+}
+
+static async Task RedisStreamXReadGroupNoAckDoesNotCreatePendingAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("XADD", "noack:events", "1-0", "f", "v1") +
+        RespCommand("XGROUP", "CREATE", "noack:events", "workers", "0-0") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "NOACK", "STREAMS", "noack:events", ">") +
+        RespCommand("XPENDING", "noack:events", "workers"));
+
+    Assert(response.Contains("*1\r\n*2\r\n$12\r\nnoack:events\r\n*1\r\n*2\r\n$3\r\n1-0\r\n", StringComparison.Ordinal),
+        "NOACK reads should still return stream entries.");
+    Assert(response.Contains("*4\r\n:0\r\n$-1\r\n$-1\r\n*0\r\n", StringComparison.Ordinal),
+        "NOACK reads should not create pending entries.");
+
+    var metrics = processor.GetStreamMetrics();
+    AssertEqual(0L, metrics.PendingEntriesTotal);
+}
+
+static async Task RedisStreamXReadBlockingWakeAndTimeoutAsync()
+{
+    var processor = CreateProcessor();
+    var (sessionInput, sessionOutput) = CreatePipe();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var sessionTask = processor.ProcessAsync(sessionInput, sessionOutput, cts.Token);
+
+    await WriteRespCommandAsync(sessionInput, "XREAD", "BLOCK", "0", "STREAMS", "block:events", "$");
+    await Task.Delay(100, cts.Token);
+    var blockedMetrics = processor.GetStreamMetrics();
+    AssertEqual(1L, blockedMetrics.BlockedReaders);
+    Assert(blockedMetrics.BlockedReadersByStream.TryGetValue("block:events", out var blockedByStream) && blockedByStream == 1,
+        "Blocked reader count per stream should be tracked while waiting.");
+
+    await ExecuteAsync(processor, RespCommand("XADD", "block:events", "1-0", "f", "v1"));
+    await Task.Delay(150, cts.Token);
+
+    var wakeOutput = ReadAllBytes(sessionOutput);
+    Assert(wakeOutput.Contains("*1\r\n*2\r\n$12\r\nblock:events\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$1\r\nf\r\n$2\r\nv1\r\n", StringComparison.Ordinal),
+        $"Blocking XREAD should wake and return the newly appended entry. Output: {wakeOutput}");
+
+    var wakeOutputLength = wakeOutput.Length;
+
+    await WriteRespCommandAsync(sessionInput, "XREAD", "BLOCK", "200", "STREAMS", "block:events", "$");
+    var timeoutOutput = await WaitForOutputGrowthAsync(sessionOutput, wakeOutputLength, 1500, cts.Token);
+    Assert(timeoutOutput.Length > wakeOutputLength, $"Timed blocking XREAD should append a timeout response. Output: {timeoutOutput}");
+    var timeoutDelta = timeoutOutput[wakeOutputLength..];
+    Assert(timeoutDelta.Contains("*-1\r\n", StringComparison.Ordinal), $"Timed blocking XREAD should return null array on timeout. Output: {timeoutOutput}");
+
+    cts.Cancel();
+    try { await sessionTask; } catch (OperationCanceledException) { }
+}
+
+static async Task RedisStreamXReadGroupBlockingFairWakeAsync()
+{
+    var processor = CreateProcessor();
+    await ExecuteAsync(processor,
+        RespCommand("XADD", "fair:events", "0-1", "f", "seed") +
+        RespCommand("XGROUP", "CREATE", "fair:events", "workers", "0-1"));
+
+    var (input1, output1) = CreatePipe();
+    var (input2, output2) = CreatePipe();
+    var (input3, output3) = CreatePipe();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+    var task1 = processor.ProcessAsync(input1, output1, cts.Token);
+    var task2 = processor.ProcessAsync(input2, output2, cts.Token);
+    var task3 = processor.ProcessAsync(input3, output3, cts.Token);
+
+    await WriteRespCommandAsync(input1, "XREADGROUP", "GROUP", "workers", "c1", "BLOCK", "0", "COUNT", "1", "STREAMS", "fair:events", ">");
+    await WriteRespCommandAsync(input2, "XREADGROUP", "GROUP", "workers", "c2", "BLOCK", "0", "COUNT", "1", "STREAMS", "fair:events", ">");
+    await WriteRespCommandAsync(input3, "XREADGROUP", "GROUP", "workers", "c3", "BLOCK", "0", "COUNT", "1", "STREAMS", "fair:events", ">");
+    await Task.Delay(150, cts.Token);
+
+    var blockedMetrics = processor.GetStreamMetrics();
+    AssertEqual(3L, blockedMetrics.BlockedReaders);
+    Assert(blockedMetrics.BlockedReadersByStream.TryGetValue("fair:events", out var blockedByStream) && blockedByStream == 3,
+        "All group consumers should be counted as blocked on the stream.");
+
+    await ExecuteAsync(processor,
+        RespCommand("XADD", "fair:events", "1-0", "f", "v1") +
+        RespCommand("XADD", "fair:events", "2-0", "f", "v2") +
+        RespCommand("XADD", "fair:events", "3-0", "f", "v3"));
+    await Task.Delay(250, cts.Token);
+
+    var out1 = ReadAllBytes(output1);
+    var out2 = ReadAllBytes(output2);
+    var out3 = ReadAllBytes(output3);
+    var matches1 = (out1.Contains("1-0", StringComparison.Ordinal) ? 1 : 0) + (out1.Contains("2-0", StringComparison.Ordinal) ? 1 : 0) + (out1.Contains("3-0", StringComparison.Ordinal) ? 1 : 0);
+    var matches2 = (out2.Contains("1-0", StringComparison.Ordinal) ? 1 : 0) + (out2.Contains("2-0", StringComparison.Ordinal) ? 1 : 0) + (out2.Contains("3-0", StringComparison.Ordinal) ? 1 : 0);
+    var matches3 = (out3.Contains("1-0", StringComparison.Ordinal) ? 1 : 0) + (out3.Contains("2-0", StringComparison.Ordinal) ? 1 : 0) + (out3.Contains("3-0", StringComparison.Ordinal) ? 1 : 0);
+    Assert(matches1 == 1 && matches2 == 1 && matches3 == 1, $"Each blocked consumer should receive exactly one new entry. Outputs: {out1} || {out2} || {out3}");
+
+    var pending = await ExecuteAsync(processor, RespCommand("XPENDING", "fair:events", "workers"));
+    Assert(pending.Contains("*4\r\n:3\r\n$3\r\n1-0\r\n$3\r\n3-0\r\n*3\r\n", StringComparison.Ordinal), $"Expected 3 pending entries after fair wake-up distribution. Output: {pending}");
+    Assert(pending.Contains("$2\r\nc1\r\n:1\r\n", StringComparison.Ordinal), "Consumer c1 should own one pending entry.");
+    Assert(pending.Contains("$2\r\nc2\r\n:1\r\n", StringComparison.Ordinal), "Consumer c2 should own one pending entry.");
+    Assert(pending.Contains("$2\r\nc3\r\n:1\r\n", StringComparison.Ordinal), "Consumer c3 should own one pending entry.");
+
+    cts.Cancel();
+    try { await task1; } catch (OperationCanceledException) { }
+    try { await task2; } catch (OperationCanceledException) { }
+    try { await task3; } catch (OperationCanceledException) { }
+}
+
+static async Task RedisStreamBlockingReadCancellationCleansUpWaitersAsync()
+{
+    var processor = CreateProcessor();
+    var (sessionInput, sessionOutput) = CreatePipe();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var sessionTask = processor.ProcessAsync(sessionInput, sessionOutput, cts.Token);
+
+    await WriteRespCommandAsync(sessionInput, "XREAD", "BLOCK", "0", "STREAMS", "cancel:events", "$");
+    await Task.Delay(120);
+    var blocked = processor.GetStreamMetrics();
+    AssertEqual(1L, blocked.BlockedReaders);
+
+    await sessionInput.DisposeAsync();
+    try { await sessionTask; } catch (OperationCanceledException) { }
+    await Task.Delay(120);
+
+    var after = processor.GetStreamMetrics();
+    AssertEqual(0L, after.BlockedReaders);
+    Assert(!after.BlockedReadersByStream.ContainsKey("cancel:events"), "Per-stream blocked reader counts should be removed after disconnect cleanup.");
+    _ = sessionOutput;
 }
 
 static async Task PrefixScanReturnsMatchingKeysAsync()
@@ -2616,6 +2763,8 @@ static async Task PrometheusMetricsExposeStreamConsumerGroupTelemetryAsync()
     Assert(payload.Contains("swarmkeydb_stream_xack_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "XACK metric should count acknowledgements.");
     Assert(payload.Contains("swarmkeydb_stream_xclaim_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "XCLAIM metric should count claims.");
     Assert(payload.Contains("swarmkeydb_stream_group_count{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "Stream group count metric should be exposed.");
+    Assert(payload.Contains("swarmkeydb_stream_blocked_readers{privacy_mode=\"none\"} 0", StringComparison.Ordinal), "Blocked readers metric should be exposed.");
+    Assert(payload.Contains("swarmkeydb_stream_xread_wakeup_total{privacy_mode=\"none\"} 0", StringComparison.Ordinal), "XREAD wakeup metric should be exposed.");
 
     cts.Cancel();
     await runTask;
@@ -5194,6 +5343,8 @@ static async Task DashboardHtmlContainsStreamGroupPanelAsync()
     Assert(response.Contains("Stream Groups", StringComparison.Ordinal), "Dashboard should include stream group section.");
     Assert(response.Contains("stream-group-count", StringComparison.Ordinal), "Dashboard should include stream group count element.");
     Assert(response.Contains("stream-pending-total", StringComparison.Ordinal), "Dashboard should include stream pending entries element.");
+    Assert(response.Contains("stream-blocked-readers", StringComparison.Ordinal), "Dashboard should include blocked reader count element.");
+    Assert(response.Contains("stream-blocked-by-stream", StringComparison.Ordinal), "Dashboard should include per-stream blocked reader table.");
 
     cts.Cancel();
     await runTask;
@@ -5547,6 +5698,23 @@ static string ReadAllBytes(MemoryStream stream)
     var text = Encoding.UTF8.GetString(stream.ToArray());
     stream.Position = pos;
     return text;
+}
+
+static async Task<string> WaitForOutputGrowthAsync(MemoryStream stream, int previousLength, int timeoutMs, CancellationToken cancellationToken)
+{
+    var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+    while (DateTime.UtcNow < deadline)
+    {
+        var text = ReadAllBytes(stream);
+        if (text.Length > previousLength)
+        {
+            return text;
+        }
+
+        await Task.Delay(20, cancellationToken);
+    }
+
+    return ReadAllBytes(stream);
 }
 
 /// <summary>

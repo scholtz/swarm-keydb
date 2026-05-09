@@ -26,6 +26,8 @@ This reference covers the public Redis protocol surface and `SwarmKeyDbClient` m
 | `XRANGE key start end [COUNT n]` | stream key, range bounds | nested array of stream entries | wrong arity, invalid IDs, wrong type |
 | `XREVRANGE key end start [COUNT n]` | stream key, reverse range bounds | nested array of stream entries | wrong arity, invalid IDs, wrong type |
 | `XLEN key` | stream key | stream entry count (`0` if missing) | wrong arity, wrong type |
+| `XREAD [COUNT n] [BLOCK ms] STREAMS key [key ...] id [id ...]` | stream keys + start IDs (`$` supported) | stream entries or null array on timeout/no data | wrong arity, invalid IDs, wrong type |
+| `XREADGROUP GROUP group consumer [COUNT n] [BLOCK ms] [NOACK] STREAMS key [key ...] id [id ...]` | consumer-group read (`>` or explicit pending IDs) | stream entries or null array on timeout/no data | wrong arity, invalid IDs, wrong type, `NOGROUP` |
 | `AUTHADDR 0x...` | Ethereum address | `OK` | invalid address |
 | `QUIT` | none | `OK` and close | wrong arity |
 

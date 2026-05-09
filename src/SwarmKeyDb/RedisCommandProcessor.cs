@@ -49,6 +49,12 @@ public sealed class RedisCommandProcessor : IDisposable
     private long _streamPendingEntriesTotal;
     private long _streamXAckTotal;
     private long _streamXClaimTotal;
+    private long _streamBlockedReadersTotal;
+    private long _streamXReadWakeupTotal;
+    private readonly object _streamWaitersGate = new();
+    private readonly Dictionary<string, HashSet<StreamReadWaiter>> _streamReadWaiters = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Dictionary<string, Queue<StreamReadWaiter>>> _streamReadGroupWaiters = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> _streamBlockedReadersByStream = new(StringComparer.Ordinal);
 
     public static readonly double[] TransactionQueueDepthBucketUpperBounds = [0, 1, 2, 4, 8, 16, 32];
     public static readonly double[] TransactionExecDurationBucketUpperBounds = [0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5];
@@ -299,6 +305,32 @@ public sealed class RedisCommandProcessor : IDisposable
         long LastDeliveredUnixMs,
         int DeliveryCount);
     private sealed record ConsumerState(string Name, long LastSeenUnixMs);
+    private sealed class StreamReadWaiter
+    {
+        private int _released;
+
+        public StreamReadWaiter(IReadOnlyList<string> keys, string? groupName)
+        {
+            Keys = keys;
+            GroupName = groupName;
+            Signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        public IReadOnlyList<string> Keys { get; }
+        public string? GroupName { get; }
+        public TaskCompletionSource Signal { get; }
+
+        public bool TryRelease()
+        {
+            if (Interlocked.Exchange(ref _released, 1) != 0)
+            {
+                return false;
+            }
+
+            Signal.TrySetResult();
+            return true;
+        }
+    }
 
     /// <summary>Commands that are valid inside a MULTI block (unknown commands abort the transaction).</summary>
     private static readonly HashSet<string> KnownQueueableCommands = new(StringComparer.OrdinalIgnoreCase)
@@ -308,7 +340,7 @@ public sealed class RedisCommandProcessor : IDisposable
         "DEL", "MDEL", "MGET", "MSET", "MSETNX",
         "EXISTS", "EXPIRE", "PEXPIRE", "EXPIREAT",
         "TTL", "PTTL", "PERSIST",
-        "XADD", "XRANGE", "XREVRANGE", "XLEN",
+        "XADD", "XRANGE", "XREVRANGE", "XLEN", "XREAD",
         "XGROUP", "XREADGROUP", "XACK", "XPENDING", "XCLAIM", "XAUTOCLAIM",
         "KEYS", "SCAN", "TYPE",
         "BACKUP", "RESTOREDB", "ROTATEKEY", "BACKENDMETA",
@@ -554,12 +586,21 @@ public sealed class RedisCommandProcessor : IDisposable
             }
         }
 
+        Dictionary<string, long> blockedReadersByStream;
+        lock (_streamWaitersGate)
+        {
+            blockedReadersByStream = _streamBlockedReadersByStream.ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.Ordinal);
+        }
+
         return new StreamMetricsSnapshot(
             Math.Max(0, Interlocked.Read(ref _streamPendingEntriesTotal)),
             Interlocked.Read(ref _streamXAckTotal),
             Interlocked.Read(ref _streamXClaimTotal),
             groupCount,
-            idleConsumerCount);
+            idleConsumerCount,
+            Math.Max(0, Interlocked.Read(ref _streamBlockedReadersTotal)),
+            Interlocked.Read(ref _streamXReadWakeupTotal),
+            blockedReadersByStream);
     }
 
     private static long[] SnapshotBucketCounts(long[] source)
@@ -783,6 +824,7 @@ public sealed class RedisCommandProcessor : IDisposable
                 "XRANGE" => await XRangeAsync(args, reverse: false, cancellationToken).ConfigureAwait(false),
                 "XREVRANGE" => await XRangeAsync(args, reverse: true, cancellationToken).ConfigureAwait(false),
                 "XLEN" => await XLenAsync(args, cancellationToken).ConfigureAwait(false),
+                "XREAD" => await XReadAsync(args, cancellationToken).ConfigureAwait(false),
                 "XGROUP" => await XGroupAsync(args, cancellationToken).ConfigureAwait(false),
                 "XREADGROUP" => await XReadGroupAsync(args, cancellationToken).ConfigureAwait(false),
                 "XACK" => await XAckAsync(args, cancellationToken).ConfigureAwait(false),
@@ -1331,6 +1373,162 @@ public sealed class RedisCommandProcessor : IDisposable
         });
     }
 
+    private StreamReadWaiter RegisterStreamWaiter(IReadOnlyList<string> keys, string? groupName)
+    {
+        var distinctKeys = keys.Distinct(StringComparer.Ordinal).ToArray();
+        var waiter = new StreamReadWaiter(distinctKeys, groupName);
+        lock (_streamWaitersGate)
+        {
+            Interlocked.Increment(ref _streamBlockedReadersTotal);
+            foreach (var key in distinctKeys)
+            {
+                if (_streamBlockedReadersByStream.TryGetValue(key, out var count))
+                {
+                    _streamBlockedReadersByStream[key] = count + 1;
+                }
+                else
+                {
+                    _streamBlockedReadersByStream[key] = 1;
+                }
+
+                if (groupName is null)
+                {
+                    if (!_streamReadWaiters.TryGetValue(key, out var waiters))
+                    {
+                        waiters = new HashSet<StreamReadWaiter>();
+                        _streamReadWaiters[key] = waiters;
+                    }
+
+                    waiters.Add(waiter);
+                    continue;
+                }
+
+                if (!_streamReadGroupWaiters.TryGetValue(key, out var groups))
+                {
+                    groups = new Dictionary<string, Queue<StreamReadWaiter>>(StringComparer.Ordinal);
+                    _streamReadGroupWaiters[key] = groups;
+                }
+
+                if (!groups.TryGetValue(groupName, out var queue))
+                {
+                    queue = new Queue<StreamReadWaiter>();
+                    groups[groupName] = queue;
+                }
+
+                queue.Enqueue(waiter);
+            }
+        }
+
+        return waiter;
+    }
+
+    private void UnregisterStreamWaiter(StreamReadWaiter waiter)
+    {
+        lock (_streamWaitersGate)
+        {
+            foreach (var key in waiter.Keys)
+            {
+                if (_streamBlockedReadersByStream.TryGetValue(key, out var count))
+                {
+                    if (count <= 1)
+                    {
+                        _streamBlockedReadersByStream.Remove(key);
+                    }
+                    else
+                    {
+                        _streamBlockedReadersByStream[key] = count - 1;
+                    }
+                }
+
+                if (waiter.GroupName is null)
+                {
+                    if (_streamReadWaiters.TryGetValue(key, out var waiters))
+                    {
+                        waiters.Remove(waiter);
+                        if (waiters.Count == 0)
+                        {
+                            _streamReadWaiters.Remove(key);
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (!_streamReadGroupWaiters.TryGetValue(key, out var groups) ||
+                    !groups.TryGetValue(waiter.GroupName, out var queue))
+                {
+                    continue;
+                }
+
+                if (queue.Count > 0)
+                {
+                    var retained = queue.Where(candidate => !ReferenceEquals(candidate, waiter)).ToArray();
+                    queue.Clear();
+                    foreach (var candidate in retained)
+                    {
+                        queue.Enqueue(candidate);
+                    }
+                }
+
+                if (queue.Count == 0)
+                {
+                    groups.Remove(waiter.GroupName);
+                    if (groups.Count == 0)
+                    {
+                        _streamReadGroupWaiters.Remove(key);
+                    }
+                }
+            }
+
+            Interlocked.Decrement(ref _streamBlockedReadersTotal);
+        }
+    }
+
+    private void NotifyStreamWaiters(string key)
+    {
+        List<StreamReadWaiter> wakeups;
+        lock (_streamWaitersGate)
+        {
+            wakeups = [];
+            if (_streamReadWaiters.TryGetValue(key, out var streamWaiters))
+            {
+                wakeups.AddRange(streamWaiters);
+            }
+
+            if (_streamReadGroupWaiters.TryGetValue(key, out var groups))
+            {
+                foreach (var queue in groups.Values)
+                {
+                    while (queue.Count > 0)
+                    {
+                        var waiter = queue.Dequeue();
+                        if (waiter.Signal.Task.IsCompleted)
+                        {
+                            continue;
+                        }
+
+                        wakeups.Add(waiter);
+                        break;
+                    }
+                }
+            }
+        }
+
+        var wakeupCount = 0;
+        foreach (var waiter in wakeups.Distinct())
+        {
+            if (waiter.TryRelease())
+            {
+                wakeupCount++;
+            }
+        }
+
+        if (wakeupCount > 0)
+        {
+            Interlocked.Add(ref _streamXReadWakeupTotal, wakeupCount);
+        }
+    }
+
     private async Task<RespValue> XAddAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
     {
         if (args.Count < 5)
@@ -1419,6 +1617,7 @@ public sealed class RedisCommandProcessor : IDisposable
 
             var updated = new StreamData(entries, timestamp, sequence, stream.Groups);
             await _store.PutAsync(key, SerializeStream(updated), cancellationToken).ConfigureAwait(false);
+            NotifyStreamWaiters(key);
             return RespValue.BulkString(id);
         }
         finally
@@ -1502,6 +1701,197 @@ public sealed class RedisCommandProcessor : IDisposable
         }
 
         return RespValue.IntegerValue(stream?.Entries.Count ?? 0);
+    }
+
+    private async Task<RespValue> XReadAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        if (args.Count < 4)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'XREAD' command");
+        }
+
+        var index = 1;
+        var count = 1_000L;
+        long? blockMilliseconds = null;
+        while (index < args.Count)
+        {
+            var option = args[index].AsString().ToUpperInvariant();
+            if (option == "COUNT")
+            {
+                if (index + 1 >= args.Count || !long.TryParse(args[index + 1].AsString(), out count) || count <= 0)
+                {
+                    return RespValue.Error("ERR value is not an integer or out of range");
+                }
+
+                index += 2;
+                continue;
+            }
+
+            if (option == "BLOCK")
+            {
+                if (index + 1 >= args.Count || !long.TryParse(args[index + 1].AsString(), out var parsedBlock) || parsedBlock < 0)
+                {
+                    return RespValue.Error("ERR value is not an integer or out of range");
+                }
+
+                blockMilliseconds = parsedBlock;
+                index += 2;
+                continue;
+            }
+
+            break;
+        }
+
+        if (index >= args.Count || !args[index].AsString().Equals("STREAMS", StringComparison.OrdinalIgnoreCase))
+        {
+            return RespValue.Error("ERR syntax error");
+        }
+
+        var remaining = args.Count - index - 1;
+        if (remaining < 2 || (remaining % 2) != 0)
+        {
+            return RespValue.Error("ERR syntax error");
+        }
+
+        var streamCount = remaining / 2;
+        var keys = new string[streamCount];
+        var idTokens = new string[streamCount];
+        for (var i = 0; i < streamCount; i++)
+        {
+            keys[i] = args[index + 1 + i].AsString();
+            idTokens[i] = args[index + 1 + streamCount + i].AsString();
+        }
+
+        var (streamStarts, startError) = await ResolveXReadStartsAsync(keys, idTokens, cancellationToken).ConfigureAwait(false);
+        if (startError is not null)
+        {
+            return startError;
+        }
+
+        if (streamStarts is null)
+        {
+            return RespValue.Error("ERR Invalid stream ID specified as stream command argument");
+        }
+
+        var deadlineUtc = blockMilliseconds is > 0
+            ? DateTime.UtcNow.AddMilliseconds(blockMilliseconds.Value)
+            : (DateTime?)null;
+        while (true)
+        {
+            var response = await TryReadStreamsAsync(streamStarts, count, cancellationToken).ConfigureAwait(false);
+            if (response is not null)
+            {
+                return response;
+            }
+
+            if (!blockMilliseconds.HasValue)
+            {
+                return RespValue.NullArray();
+            }
+
+            var waiter = RegisterStreamWaiter(keys, groupName: null);
+            try
+            {
+                if (blockMilliseconds.Value > 0)
+                {
+                    var remainingTimeout = deadlineUtc!.Value - DateTime.UtcNow;
+                    if (remainingTimeout <= TimeSpan.Zero)
+                    {
+                        return RespValue.NullArray();
+                    }
+
+                    using var timeoutCts = new CancellationTokenSource(remainingTimeout);
+                    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+                    try
+                    {
+                        await waiter.Signal.Task.WaitAsync(linkedCts.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                    {
+                        return RespValue.NullArray();
+                    }
+                }
+                else
+                {
+                    await waiter.Signal.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                UnregisterStreamWaiter(waiter);
+            }
+        }
+    }
+
+    private async Task<(List<(string Key, ulong Timestamp, ulong Sequence)>? Starts, RespValue? Error)> ResolveXReadStartsAsync(
+        IReadOnlyList<string> keys,
+        IReadOnlyList<string> idTokens,
+        CancellationToken cancellationToken)
+    {
+        var starts = new List<(string Key, ulong Timestamp, ulong Sequence)>(keys.Count);
+        for (var i = 0; i < keys.Count; i++)
+        {
+            if (idTokens[i] == "$")
+            {
+                var existing = await _store.GetAsync(keys[i], cancellationToken).ConfigureAwait(false);
+                if (!TryReadStream(existing, out var stream))
+                {
+                    return (null, RespValue.Error(WrongTypeError));
+                }
+
+                var timestamp = stream?.LastTimestamp ?? 0;
+                var sequence = stream?.LastSequence ?? 0;
+                starts.Add((keys[i], timestamp, sequence));
+                continue;
+            }
+
+            if (!TryParseStreamId(idTokens[i], out var timestampToken, out var sequenceToken))
+            {
+                return (null, null);
+            }
+
+            starts.Add((keys[i], timestampToken, sequenceToken));
+        }
+
+        return (starts, null);
+    }
+
+    private async Task<RespValue?> TryReadStreamsAsync(
+        IReadOnlyList<(string Key, ulong Timestamp, ulong Sequence)> starts,
+        long count,
+        CancellationToken cancellationToken)
+    {
+        var streamResponses = new List<RespValue>(starts.Count);
+        foreach (var start in starts)
+        {
+            var existing = await _store.GetAsync(start.Key, cancellationToken).ConfigureAwait(false);
+            if (!TryReadStream(existing, out var stream))
+            {
+                return RespValue.Error(WrongTypeError);
+            }
+
+            if (stream is null)
+            {
+                continue;
+            }
+
+            var selected = stream.Entries
+                .Where(entry => CompareStreamIds(entry.Timestamp, entry.Sequence, start.Timestamp, start.Sequence) > 0)
+                .Take((int)Math.Min(int.MaxValue, count))
+                .ToArray();
+            if (selected.Length == 0)
+            {
+                continue;
+            }
+
+            streamResponses.Add(RespValue.Array(new RespValue[]
+            {
+                RespValue.BulkString(start.Key),
+                RespValue.Array(selected.Select(ToRangeRespValue).ToArray())
+            }));
+        }
+
+        return streamResponses.Count == 0 ? null : RespValue.Array(streamResponses.ToArray());
     }
 
     private async Task<RespValue> XGroupAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
@@ -1751,6 +2141,8 @@ public sealed class RedisCommandProcessor : IDisposable
         index += 3;
 
         var count = 1_000L;
+        long? blockMilliseconds = null;
+        var noAck = false;
         while (index < args.Count)
         {
             var option = args[index].AsString().ToUpperInvariant();
@@ -1767,17 +2159,19 @@ public sealed class RedisCommandProcessor : IDisposable
 
             if (option == "BLOCK")
             {
-                if (index + 1 >= args.Count || !long.TryParse(args[index + 1].AsString(), out _))
+                if (index + 1 >= args.Count || !long.TryParse(args[index + 1].AsString(), out var parsedBlock) || parsedBlock < 0)
                 {
                     return RespValue.Error("ERR value is not an integer or out of range");
                 }
 
+                blockMilliseconds = parsedBlock;
                 index += 2;
                 continue;
             }
 
             if (option == "NOACK")
             {
+                noAck = true;
                 index++;
                 continue;
             }
@@ -1785,104 +2179,212 @@ public sealed class RedisCommandProcessor : IDisposable
             break;
         }
 
-        if (index + 3 != args.Count || !args[index].AsString().Equals("STREAMS", StringComparison.OrdinalIgnoreCase))
+        if (index >= args.Count || !args[index].AsString().Equals("STREAMS", StringComparison.OrdinalIgnoreCase))
         {
             return RespValue.Error("ERR syntax error");
         }
 
-        var key = args[index + 1].AsString();
-        var startIdToken = args[index + 2].AsString();
-        var noAck = args.Any(static value => value.AsString().Equals("NOACK", StringComparison.OrdinalIgnoreCase));
-
-        await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        var remaining = args.Count - index - 1;
+        if (remaining < 2 || (remaining % 2) != 0)
         {
-            var existing = await _store.GetAsync(key, cancellationToken).ConfigureAwait(false);
-            if (!TryReadStream(existing, out var stream))
+            return RespValue.Error("ERR syntax error");
+        }
+
+        var streamCount = remaining / 2;
+        var keys = new string[streamCount];
+        var startIdTokens = new string[streamCount];
+        for (var i = 0; i < streamCount; i++)
+        {
+            keys[i] = args[index + 1 + i].AsString();
+            startIdTokens[i] = args[index + 1 + streamCount + i].AsString();
+        }
+
+        var blockableKeys = keys
+            .Where((_, i) => startIdTokens[i] == ">")
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        var deadlineUtc = blockMilliseconds is > 0
+            ? DateTime.UtcNow.AddMilliseconds(blockMilliseconds.Value)
+            : (DateTime?)null;
+        while (true)
+        {
+            var response = await TryReadGroupStreamsAsync(
+                groupName,
+                consumerName,
+                keys,
+                startIdTokens,
+                count,
+                noAck,
+                cancellationToken).ConfigureAwait(false);
+            if (response is not null)
             {
-                return RespValue.Error(WrongTypeError);
+                return response;
             }
 
-            if (stream is null)
-            {
-                return RespValue.Error(NoGroupErrorForReadGroup(key, groupName));
-            }
-
-            var groups = CloneGroups(stream);
-            if (!groups.TryGetValue(groupName, out var group))
-            {
-                return RespValue.Error(NoGroupErrorForReadGroup(key, groupName));
-            }
-
-            var consumers = CloneConsumers(group);
-            var pending = ClonePending(group);
-            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            consumers[consumerName] = new ConsumerState(consumerName, nowMs);
-
-            List<StreamEntry> selected;
-            if (startIdToken == ">")
-            {
-                selected = stream.Entries
-                    .Where(entry => CompareStreamIds(entry.Timestamp, entry.Sequence, group.LastDeliveredTimestamp, group.LastDeliveredSequence) > 0)
-                    .Take((int)Math.Min(int.MaxValue, count))
-                    .ToList();
-            }
-            else
-            {
-                if (!TryParseStreamId(startIdToken, out var startTs, out var startSeq))
-                {
-                    return RespValue.Error("ERR Invalid stream ID specified as stream command argument");
-                }
-
-                selected = pending.Values
-                    .Where(entry => entry.Consumer.Equals(consumerName, StringComparison.Ordinal) &&
-                                    CompareStreamIds(entry.Timestamp, entry.Sequence, startTs, startSeq) >= 0)
-                    .OrderBy(static item => item.Timestamp)
-                    .ThenBy(static item => item.Sequence)
-                    .Take((int)Math.Min(int.MaxValue, count))
-                    .Select(item => stream.Entries.FirstOrDefault(candidate => candidate.Id.Equals(item.Id, StringComparison.Ordinal)))
-                    .Where(static entry => entry is not null)
-                    .Select(static entry => entry!)
-                    .ToList();
-            }
-
-            if (selected.Count == 0)
+            if (!blockMilliseconds.HasValue || blockableKeys.Length == 0)
             {
                 return RespValue.NullArray();
             }
 
-            var deliveredFromNew = 0;
-            foreach (var entry in selected)
+            var waiter = RegisterStreamWaiter(blockableKeys, groupName);
+            try
             {
-                if (startIdToken == ">")
+                if (blockMilliseconds.Value > 0)
                 {
-                    group = group with
+                    var remainingTimeout = deadlineUtc!.Value - DateTime.UtcNow;
+                    if (remainingTimeout <= TimeSpan.Zero)
                     {
-                        LastDeliveredId = entry.Id,
-                        LastDeliveredTimestamp = entry.Timestamp,
-                        LastDeliveredSequence = entry.Sequence
-                    };
+                        return RespValue.NullArray();
+                    }
+
+                    using var timeoutCts = new CancellationTokenSource(remainingTimeout);
+                    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+                    try
+                    {
+                        await waiter.Signal.Task.WaitAsync(linkedCts.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                    {
+                        return RespValue.NullArray();
+                    }
+                }
+                else
+                {
+                    await waiter.Signal.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                UnregisterStreamWaiter(waiter);
+            }
+        }
+    }
+
+    private async Task<RespValue?> TryReadGroupStreamsAsync(
+        string groupName,
+        string consumerName,
+        IReadOnlyList<string> keys,
+        IReadOnlyList<string> startIdTokens,
+        long count,
+        bool noAck,
+        CancellationToken cancellationToken)
+    {
+        await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var streamResponses = new List<RespValue>(keys.Count);
+            var updates = new List<(string Key, StreamData Stream)>(keys.Count);
+            var deliveredFromNew = 0;
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+            for (var i = 0; i < keys.Count; i++)
+            {
+                var key = keys[i];
+                var startIdToken = startIdTokens[i];
+                var existing = await _store.GetAsync(key, cancellationToken).ConfigureAwait(false);
+                if (!TryReadStream(existing, out var stream))
+                {
+                    return RespValue.Error(WrongTypeError);
                 }
 
-                if (noAck)
+                if (stream is null)
+                {
+                    return RespValue.Error(NoGroupErrorForReadGroup(key, groupName));
+                }
+
+                var groups = CloneGroups(stream);
+                if (!groups.TryGetValue(groupName, out var group))
+                {
+                    return RespValue.Error(NoGroupErrorForReadGroup(key, groupName));
+                }
+
+                var consumers = CloneConsumers(group);
+                var pending = ClonePending(group);
+                consumers[consumerName] = new ConsumerState(consumerName, nowMs);
+
+                List<StreamEntry> selected;
+                if (startIdToken == ">")
+                {
+                    selected = stream.Entries
+                        .Where(entry => CompareStreamIds(entry.Timestamp, entry.Sequence, group.LastDeliveredTimestamp, group.LastDeliveredSequence) > 0)
+                        .Take((int)Math.Min(int.MaxValue, count))
+                        .ToList();
+                }
+                else
+                {
+                    if (!TryParseStreamId(startIdToken, out var startTs, out var startSeq))
+                    {
+                        return RespValue.Error("ERR Invalid stream ID specified as stream command argument");
+                    }
+
+                    selected = pending.Values
+                        .Where(entry => entry.Consumer.Equals(consumerName, StringComparison.Ordinal) &&
+                                        CompareStreamIds(entry.Timestamp, entry.Sequence, startTs, startSeq) >= 0)
+                        .OrderBy(static item => item.Timestamp)
+                        .ThenBy(static item => item.Sequence)
+                        .Take((int)Math.Min(int.MaxValue, count))
+                        .Select(item => stream.Entries.FirstOrDefault(candidate => candidate.Id.Equals(item.Id, StringComparison.Ordinal)))
+                        .Where(static entry => entry is not null)
+                        .Select(static entry => entry!)
+                        .ToList();
+                }
+
+                if (selected.Count == 0)
                 {
                     continue;
                 }
 
-                if (pending.TryGetValue(entry.Id, out var existingPending))
+                foreach (var entry in selected)
                 {
-                    pending[entry.Id] = existingPending with
+                    if (startIdToken == ">")
                     {
-                        Consumer = consumerName,
-                        LastDeliveredUnixMs = nowMs,
-                        DeliveryCount = existingPending.DeliveryCount + 1
-                    };
+                        group = group with
+                        {
+                            LastDeliveredId = entry.Id,
+                            LastDeliveredTimestamp = entry.Timestamp,
+                            LastDeliveredSequence = entry.Sequence
+                        };
+                    }
+
+                    if (noAck)
+                    {
+                        continue;
+                    }
+
+                    if (pending.TryGetValue(entry.Id, out var existingPending))
+                    {
+                        pending[entry.Id] = existingPending with
+                        {
+                            Consumer = consumerName,
+                            LastDeliveredUnixMs = nowMs,
+                            DeliveryCount = existingPending.DeliveryCount + 1
+                        };
+                    }
+                    else
+                    {
+                        pending[entry.Id] = new PendingEntryState(entry.Id, entry.Timestamp, entry.Sequence, consumerName, nowMs, 1);
+                        deliveredFromNew++;
+                    }
                 }
-                else
+
+                groups[groupName] = group with { Pending = pending, Consumers = consumers };
+                updates.Add((key, stream with { Groups = groups }));
+                streamResponses.Add(RespValue.Array(new RespValue[]
                 {
-                    pending[entry.Id] = new PendingEntryState(entry.Id, entry.Timestamp, entry.Sequence, consumerName, nowMs, 1);
-                    deliveredFromNew++;
-                }
+                    RespValue.BulkString(key),
+                    RespValue.Array(selected.Select(ToRangeRespValue).ToArray())
+                }));
+            }
+
+            if (streamResponses.Count == 0)
+            {
+                return null;
+            }
+
+            foreach (var update in updates)
+            {
+                await _store.PutAsync(update.Key, SerializeStream(update.Stream), cancellationToken).ConfigureAwait(false);
             }
 
             if (deliveredFromNew > 0)
@@ -1890,17 +2392,7 @@ public sealed class RedisCommandProcessor : IDisposable
                 Interlocked.Add(ref _streamPendingEntriesTotal, deliveredFromNew);
             }
 
-            groups[groupName] = group with { Pending = pending, Consumers = consumers };
-            await _store.PutAsync(key, SerializeStream(stream with { Groups = groups }), cancellationToken).ConfigureAwait(false);
-
-            return RespValue.Array(new[]
-            {
-                RespValue.Array(new RespValue[]
-                {
-                    RespValue.BulkString(key),
-                    RespValue.Array(selected.Select(ToRangeRespValue).ToArray())
-                })
-            });
+            return RespValue.Array(streamResponses.ToArray());
         }
         finally
         {
@@ -2789,7 +3281,7 @@ public sealed class RedisCommandProcessor : IDisposable
         "DEL" => "delete",
         "KEYS" or "SCAN" => "list",
         "MGET" or "MSET" or "MSETNX" or "MDEL" => "batch",
-        "XADD" or "XRANGE" or "XREVRANGE" or "XLEN" or "XGROUP" or "XREADGROUP" or "XACK" or "XPENDING" or "XCLAIM" or "XAUTOCLAIM" => "stream",
+        "XADD" or "XRANGE" or "XREVRANGE" or "XLEN" or "XREAD" or "XGROUP" or "XREADGROUP" or "XACK" or "XPENDING" or "XCLAIM" or "XAUTOCLAIM" => "stream",
         "PUBLISH" => "pubsub",
         "SUBSCRIBE" or "UNSUBSCRIBE" or "PSUBSCRIBE" or "PUNSUBSCRIBE" or "PUBSUB" => "pubsub",
         "MULTI" or "EXEC" or "DISCARD" or "WATCH" or "UNWATCH" => "transaction",
@@ -2832,4 +3324,7 @@ public sealed record StreamMetricsSnapshot(
     long XAckTotal,
     long XClaimTotal,
     long GroupCount,
-    long IdleConsumerCount);
+    long IdleConsumerCount,
+    long BlockedReaders,
+    long XReadWakeupTotal,
+    IReadOnlyDictionary<string, long> BlockedReadersByStream);

@@ -472,10 +472,18 @@ public sealed class MonitoringHttpServer : IDisposable
                                                  <h2>Stream Groups</h2>
                                                  <p>Group Count: <strong id="stream-group-count">0</strong></p>
                                                  <p>Pending Entries: <strong id="stream-pending-total">0</strong></p>
-                                                 <p>XACK Total: <strong id="stream-xack-total">0</strong></p>
-                                                 <p>XCLAIM Total: <strong id="stream-xclaim-total">0</strong></p>
-                                                 <p>Idle Consumers: <strong id="stream-idle-consumer-count">0</strong></p>
-                                                 <h2>Cross-chain replication health</h2>
+                                                  <p>XACK Total: <strong id="stream-xack-total">0</strong></p>
+                                                  <p>XCLAIM Total: <strong id="stream-xclaim-total">0</strong></p>
+                                                  <p>Idle Consumers: <strong id="stream-idle-consumer-count">0</strong></p>
+                                                  <p>Blocked Readers: <strong id="stream-blocked-readers">0</strong></p>
+                                                  <p>XREAD Wakeups: <strong id="stream-xread-wakeup-total">0</strong></p>
+                                                  <table>
+                                                    <thead>
+                                                      <tr><th>Stream</th><th>Blocked Readers</th></tr>
+                                                    </thead>
+                                                    <tbody id="stream-blocked-by-stream"></tbody>
+                                                  </table>
+                                                  <h2>Cross-chain replication health</h2>
                                             <table>
                                               <thead>
                                                 <tr><th>Chain</th><th>Pending</th><th>Synced</th><th>Failed</th><th>Health</th></tr>
@@ -527,10 +535,13 @@ public sealed class MonitoringHttpServer : IDisposable
                                                 const pubSubPublishedEl = document.getElementById('pubsub-published');
                                                 const pubSubDroppedEl = document.getElementById('pubsub-dropped');
                                                 const streamGroupCountEl = document.getElementById('stream-group-count');
-                                                const streamPendingTotalEl = document.getElementById('stream-pending-total');
-                                                const streamXAckTotalEl = document.getElementById('stream-xack-total');
-                                                const streamXClaimTotalEl = document.getElementById('stream-xclaim-total');
-                                                const streamIdleConsumerCountEl = document.getElementById('stream-idle-consumer-count');
+                                                 const streamPendingTotalEl = document.getElementById('stream-pending-total');
+                                                 const streamXAckTotalEl = document.getElementById('stream-xack-total');
+                                                 const streamXClaimTotalEl = document.getElementById('stream-xclaim-total');
+                                                 const streamIdleConsumerCountEl = document.getElementById('stream-idle-consumer-count');
+                                                 const streamBlockedReadersEl = document.getElementById('stream-blocked-readers');
+                                                 const streamXReadWakeupTotalEl = document.getElementById('stream-xread-wakeup-total');
+                                                 const streamBlockedByStreamEl = document.getElementById('stream-blocked-by-stream');
                                                function parseCounters(metricsText) {
                                                const wanted = [
                                                  'swarmkeydb_operations_total{operation="get",status="success"}',
@@ -557,10 +568,13 @@ public sealed class MonitoringHttpServer : IDisposable
                                                     'swarmkeydb_pubsub_messages_dropped_total',
                                                     'swarmkeydb_stream_pending_entries_total',
                                                     'swarmkeydb_stream_xack_total',
-                                                    'swarmkeydb_stream_xclaim_total',
-                                                    'swarmkeydb_stream_group_count',
-                                                    'swarmkeydb_stream_idle_consumer_count'
-                                                  ];
+                                                     'swarmkeydb_stream_xclaim_total',
+                                                     'swarmkeydb_stream_group_count',
+                                                     'swarmkeydb_stream_idle_consumer_count',
+                                                     'swarmkeydb_stream_blocked_readers',
+                                                     'swarmkeydb_stream_xread_wakeup_total',
+                                                     'swarmkeydb_stream_blocked_readers_by_stream'
+                                                   ];
                                                return metricsText.split('\n').filter(line => wanted.some(prefix => line.startsWith(prefix))).join('\n');
                                              }
                                              async function refreshReady() {
@@ -607,11 +621,28 @@ public sealed class MonitoringHttpServer : IDisposable
                                                  pubSubPublishedEl.textContent = extractMetric('swarmkeydb_pubsub_messages_published_total');
                                                  pubSubDroppedEl.textContent = extractMetric('swarmkeydb_pubsub_messages_dropped_total');
                                                  streamGroupCountEl.textContent = extractMetric('swarmkeydb_stream_group_count');
-                                                 streamPendingTotalEl.textContent = extractMetric('swarmkeydb_stream_pending_entries_total');
-                                                 streamXAckTotalEl.textContent = extractMetric('swarmkeydb_stream_xack_total');
-                                                 streamXClaimTotalEl.textContent = extractMetric('swarmkeydb_stream_xclaim_total');
-                                                 streamIdleConsumerCountEl.textContent = extractMetric('swarmkeydb_stream_idle_consumer_count');
-                                               }
+                                                  streamPendingTotalEl.textContent = extractMetric('swarmkeydb_stream_pending_entries_total');
+                                                  streamXAckTotalEl.textContent = extractMetric('swarmkeydb_stream_xack_total');
+                                                  streamXClaimTotalEl.textContent = extractMetric('swarmkeydb_stream_xclaim_total');
+                                                  streamIdleConsumerCountEl.textContent = extractMetric('swarmkeydb_stream_idle_consumer_count');
+                                                  streamBlockedReadersEl.textContent = extractMetric('swarmkeydb_stream_blocked_readers');
+                                                  streamXReadWakeupTotalEl.textContent = extractMetric('swarmkeydb_stream_xread_wakeup_total');
+                                                  streamBlockedByStreamEl.innerHTML = '';
+                                                  text.split('\n')
+                                                    .filter(line => line.startsWith('swarmkeydb_stream_blocked_readers_by_stream{'))
+                                                    .forEach(line => {
+                                                      const streamMatch = line.match(/stream=\"([^\"]+)\"/);
+                                                      const value = line.trim().split(' ').pop() || '0';
+                                                      const row = document.createElement('tr');
+                                                      const streamCell = document.createElement('td');
+                                                      streamCell.textContent = streamMatch ? streamMatch[1] : 'unknown';
+                                                      const valueCell = document.createElement('td');
+                                                      valueCell.textContent = value;
+                                                      row.appendChild(streamCell);
+                                                      row.appendChild(valueCell);
+                                                      streamBlockedByStreamEl.appendChild(row);
+                                                    });
+                                                }
                                               async function refreshSyncSummary() {
                                                 const response = await fetch('/sync');
                                                 const payload = await response.json();
