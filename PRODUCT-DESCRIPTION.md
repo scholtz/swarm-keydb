@@ -8,6 +8,8 @@ Swarm has powerful primitives — content addressing, feeds, manifests — but u
 
 Under the hood, Swarm Feeds let you create a stable pointer (identified by your address + a topic string) that you can update over time. Map each "key" to a topic, and you've got a KV store. For listing keys, Swarm manifests can serve as an index.
 
+Traditional Redis-style deployments still struggle with multi-instance data availability when each node keeps its own hot cache. Backing every instance with decentralized Swarm storage improves durability and recovery, but the product also needs cache synchronization and consistency verification so no node keeps serving stale or divergent data after writes, failovers, or reconnects.
+
 ***What is required to complete this bounty?***
 
 - Support strings, JSON, and binary values
@@ -31,6 +33,8 @@ Under the hood, Swarm Feeds let you create a stable pointer (identified by your 
 - **Multi-User Access Control:** Implement shared databases with access controls, allowing multiple users to read/write based on permissions.
 - **Backup and Restore:** Provide mechanisms for data backup and restore, utilizing Swarm's content addressing for immutable snapshots.
 - **Performance Optimizations:** Add caching, indexing improvements, and compression to handle larger datasets efficiently.
+- **Multi-Instance Cache Coherence:** Keep caches synchronized across SwarmKeyDb instances with version-aware invalidation, anti-entropy reconciliation, and deterministic resync paths so decentralized persistence also improves live availability.
+- **Swarm Consistency Verification SDK:** Publish a NuGet library for Swarm/Bee reads that verifies feed revisions, manifest/index lineage, and content hashes before values are returned or admitted into any local cache.
 - **Monitoring and Observability:** Include logging, metrics, and health checks for production deployments.
 - **Ecosystem Integrations:** Support for integration with other decentralized tools like IPFS, Ethereum smart contracts, and cross-chain data.
 

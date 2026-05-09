@@ -14,6 +14,13 @@
 - [x] Enable horizontal scaling with sharding across multiple Swarm nodes. (100%)
 - [x] Add asynchronous processing for high-throughput operations. (100%)
 
+## Multi-Instance Availability and Cache Consistency
+- [ ] Create a `SwarmKeyDb.SwarmConsistency` NuGet package that validates Swarm and Bee reads with content-hash verification, feed or manifest revision checks, optional quorum policies, and operator-friendly failure diagnostics before values reach callers.
+- [ ] Add consistency verification hooks to every cached `IKeyValueStore` path so cache hits, read-through fetches, and background refreshes evict or reject stale Swarm payloads instead of serving divergent in-memory data.
+- [ ] Implement cross-instance cache synchronization with version stamps, invalidation events, and anti-entropy reconciliation so multiple SwarmKeyDb nodes converge after writes, expirations, restarts, and temporary network partitions.
+- [ ] Define partial-resync and full-resync flows for cache state recovery so an instance can cheaply catch up when version history is available and deterministically rebuild from Swarm when it is not.
+- [ ] Add multi-node integration tests and production telemetry for cache drift, verification failures, synchronization lag, and forced resync counts so operators can prove consistency during failover and rolling deployments.
+
 ## Security and Privacy
 - [x] Integrate end-to-end encryption using user-provided keys. (100%)
 - [x] Implement access control lists for multi-user shared databases. (100%)
