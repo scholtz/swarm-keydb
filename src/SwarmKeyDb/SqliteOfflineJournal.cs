@@ -20,7 +20,8 @@ public sealed class SqliteOfflineJournal : IOfflineJournal
         {
             DataSource = path,
             Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared
+            Cache = SqliteCacheMode.Shared,
+            Pooling = false
         };
         _connectionString = builder.ToString();
         Initialize();
