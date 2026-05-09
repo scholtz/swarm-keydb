@@ -25,20 +25,15 @@ Traditional Redis-style deployments still struggle with multi-instance data avai
 
 ***What are the planned features to make it a robust key-value database?***
 
-- **P2P Replication and Synchronization:** Enable peer-to-peer data replication across multiple nodes for high availability and fault tolerance, similar to OrbitDB's IPFS-based sync.
-- **Conflict Resolution:** Implement CRDTs (Conflict-free Replicated Data Types) for handling concurrent writes and merges, inspired by GunDB's HAM algorithm.
-- **Encryption and Privacy:** Add end-to-end encryption for data at rest and in transit, with user-controlled keys tied to Ethereum addresses for enhanced privacy.
-- **Offline-First Support:** Allow operations in offline mode with automatic sync when connectivity is restored, leveraging Swarm's decentralized nature.
-- **Advanced Data Types and Operations:** Support for TTL (time-to-live), expiration, batch operations, and complex queries beyond simple get/put.
-- **Multi-User Access Control:** Implement shared databases with access controls, allowing multiple users to read/write based on permissions.
-- **Backup and Restore:** Provide mechanisms for data backup and restore, utilizing Swarm's content addressing for immutable snapshots.
-- **Performance Optimizations:** Add caching, indexing improvements, and compression to handle larger datasets efficiently.
-- **Multi-Instance Cache Coherence:** Keep caches synchronized across SwarmKeyDb instances with version-aware invalidation, anti-entropy reconciliation, and deterministic resync paths so decentralized persistence also improves live availability.
-- **Swarm Consistency Verification SDK:** Publish a NuGet library for Swarm/Bee reads that verifies feed revisions, manifest/index lineage, and content hashes before values are returned or admitted into any local cache.
-- **Monitoring and Observability:** Include logging, metrics, and health checks for production deployments.
-- **Deterministic Docker Release Channels:** Build and publish Docker images in CI/CD with a rolling `zero-day` tag for latest pipeline output and immutable `release-YYYYMMDD` tags for repeatable deployments.
-- **Controlled Stability Promotion:** Add a separate promotion workflow that retags a validated `release-YYYYMMDD` image as `latest` only after operator approval to reduce accidental regressions in production.
-- **Ecosystem Integrations:** Support for integration with other decentralized tools like IPFS, Ethereum smart contracts, and cross-chain data.
+- **Delivered foundation (implemented):** TTL/expiration, batch operations, range and prefix scans, CRDT merge strategies, encryption, ACL and DID authorization, backup/restore/key rotation, offline-first sync, consistency verification middleware, Docker and Helm release automation, IPFS and Ethereum integrations, cross-chain sync, and SDK/connectors (JS, Python, Go, React, Node).
+- **Current unresolved gap:** Multi-instance cache coherence still needs cross-node invalidation and deterministic resync behavior so horizontal deployments converge after partitions, failovers, and rolling updates.
+- **Issue-informed compatibility priorities (next roadmap):**
+	- **Redis Pub/Sub parity:** Add `SUBSCRIBE`/`PSUBSCRIBE`/`PUBLISH`/`PUBSUB` behavior with stable fan-out and failure handling, informed by ecosystem pain points such as KeyDB Pub/Sub worker failures and cluster `NUMSUB` inconsistencies.
+	- **Transaction semantics:** Add `MULTI`/`EXEC`/`WATCH` with optimistic concurrency and clear edge-case behavior around expiry and reconnects.
+	- **Streams support:** Add `XADD`/`XREAD`/consumer-group workflows with restart-safe pending state and replay controls.
+	- **Scripting safety:** Add `EVAL`/`EVALSHA`/script cache support with sandboxing and guardrails motivated by recurring Lua-related vulnerabilities in Redis-compatible servers.
+	- **Operability hardening:** Add stronger compatibility and reliability controls for parser edge cases, active-expire budgeting, memory-pressure behavior, and command-level observability based on common KeyDB and Valkey issue themes.
+- **External issue inputs used for prioritization:** KeyDB issues include Pub/Sub and cluster consistency concerns (`#853`, `#845`), `KEYS` operational hangs (`#878`), and memory/eviction instability (`#972`). Valkey issues include stream correctness (`#3429`), command edge-case parsing correctness (`#3483`), and richer command error observability (`#3636`).
 
 ***What are the UX, Privacy, other requirements?***
 

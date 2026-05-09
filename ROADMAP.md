@@ -1,27 +1,5 @@
 # Roadmap for SwarmKeyDb
 
-## K8S helm chart
-- [x] Create helm charts for smooth deployment to k8s. Create scripts to create new version of the helm chart. I want the helm charts to be published to artifacthub. The files will be in the helm chart folder in this repo and published using github pages. (100%)
-
-## Container Release Automation and Stability
-- [x] Expand CI/CD to run on both pull requests and pushes to main, then publish Docker Hub images for main branch pipelines using `zero-day` plus `release-YYYYMMDD` tags so each day has a deterministic rollback target. (100%)
-- [x] Add a dedicated manual promotion pipeline that validates a chosen `release-YYYYMMDD` tag and retags it to `latest`, ensuring only explicitly approved builds become the default production image channel. (100%)
-- [x] Standardize runtime examples and deployment defaults across docs, Compose, Kubernetes, and Helm to the public `scholtz2/swarm-keydb` image reference so operator setup is consistent between local and production environments. (100%)
-
-## Core Functionality Enhancements
-- [x] Add support for TTL and expiration of keys. (100%)
-- [x] Enable batch operations for multiple get/put/delete in one call. (100%)
-- [x] Introduce advanced querying capabilities like range scans and filters. (100%)
-- [x] Support for composite keys and hierarchical namespaces. (100%)
-
-## Performance and Scalability
-- [x] Add in-memory caching layer for frequently accessed keys. (100%)
-- [x] Implement data compression to reduce storage costs on Swarm. (100%)
-- [x] Optimize indexing for faster key lookups and iterations. (100%)
-- [x] Enable horizontal scaling with sharding across multiple Swarm nodes. (100%)
-- [x] Add asynchronous processing for high-throughput operations. (100%)
-- [x] Implement offline-first support with automatic sync. (100%: added `OfflineCapableKeyValueStore`, memory/SQLite journals, Bee `/health` connectivity probing, background replay via `OfflineSyncService`, conflict hooks, queue depth monitoring, dashboard status, SDK `offlineMode` options, and offline-first documentation/examples)
-
 ## Multi-Instance Availability and Cache Consistency
 - [x] Create a `SwarmKeyDb.SwarmConsistency` NuGet package that validates Swarm and Bee reads with content-hash verification, feed or manifest revision checks, optional quorum policies, and operator-friendly failure diagnostics before values reach callers. (100%)
 - [x] Add consistency verification hooks to every cached `IKeyValueStore` path so cache hits, read-through fetches, and background refreshes evict or reject stale Swarm payloads instead of serving divergent in-memory data. (100%: `ICacheEviction` interface propagated through all decorator stores; `ConsistencyVerificationMiddleware` evicts on verification failure and re-fetches from Swarm; `OnVerificationFailure` callback in `ConsistencyOptions`; `EvictionByVerificationTotal` in `ConsistencyVerificationSnapshot`; `IBackendMetadataProvider` propagated through `EncryptingKeyValueStore`, `CompressingKeyValueStore`, `CrdtKeyValueStore`, `AclKeyValueStore`, `DidAuthKeyValueStore`, `CachingKeyValueStore`, `OfflineCapableKeyValueStore`, and `AsyncQueuedKeyValueStore`; Prometheus metrics `swarmkeydb_cache_verification_pass_total`, `swarmkeydb_cache_verification_fail_total`, `swarmkeydb_cache_eviction_by_verification_total`; `WithConsistencyVerification()` DI extension; full unit + integration test coverage)
@@ -29,23 +7,37 @@
 - [ ] Define partial-resync and full-resync flows for cache state recovery so an instance can cheaply catch up when version history is available and deterministically rebuild from Swarm when it is not.
 - [ ] Add multi-node integration tests and production telemetry for cache drift, verification failures, synchronization lag, and forced resync counts so operators can prove consistency during failover and rolling deployments.
 
-## Security and Privacy
-- [x] Integrate end-to-end encryption using user-provided keys. (100%)
-- [x] Implement access control lists for multi-user shared databases. (100%)
-- [x] Add data integrity verification with cryptographic hashes. (100%)
-- [x] Support for secure key rotation and backup mechanisms. (100%)
-- [x] Enable privacy-preserving queries without revealing data. (100%: added HMAC key-token privacy mode, local private key manifest-backed scans, migration `--enable-privacy`, key-token rotation helper, PSI helper primitives, SDK privacy mode flags, and docs/tutorial coverage)
+## Redis Pub/Sub Compatibility
+- [ ] Implement Redis-compatible channel Pub/Sub commands (`SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBLISH`) with connection-scoped subscription state and RESP push reply structure matching redis-cli expectations.
+- [ ] Add `PUBSUB` subcommands (`CHANNELS`, `NUMSUB`, `NUMPAT`) and ensure command results stay consistent under concurrent subscribe, unsubscribe, reconnect, and shard rebalance events.
+- [ ] Build resilient fan-out delivery with bounded per-client output buffers, backpressure handling, and deterministic disconnect behavior to prevent hangs and worker failure loops reported in other Redis-compatible servers.
+- [ ] Add pattern routing parity for glob semantics and duplicate-subscription edge cases, including strict tests for subscribe counts, message ordering within a connection, and unsubscribe acknowledgements.
+- [ ] Provide horizontal Pub/Sub propagation across SwarmKeyDb instances via lightweight inter-node invalidation transport, then expose delivery lag and dropped-subscriber counters in `/metrics` and dashboard panels.
 
-## Developer Experience
-- [x] Create comprehensive SDKs for JavaScript, Python, and Go. (100%: `swarm-keydb-js`, `swarm-keydb-py`, and `swarm-keydb-go` added with core API, examples, and unit tests)
-- [x] Provide detailed documentation with tutorials and examples. (100%: getting-started, API reference, tutorials, SDK guides, deployment guide, FAQ, and runnable examples added with CI validation)
-- [x] Add CLI tools for database management and debugging. (100%)
-- [x] Implement monitoring dashboard with metrics and logs. (100%: `/metrics`, `/health`, `/ready`, `/dashboard`, structured command logging with correlation IDs)
-- [x] Offer migration tools from traditional databases. (100%: `swarmkeydb-migrate` CLI supports SCAN-based import, prefix filters, dry-run, resumable checkpoints, TTL preservation, validation sampling, and Docker demo)
+## Redis Transactions and Concurrency Semantics
+- [ ] Implement `MULTI`, `EXEC`, and `DISCARD` with queued command responses, per-connection transactional context, and explicit error propagation semantics matching Redis behavior for queued failures.
+- [ ] Add optimistic locking support with `WATCH` and `UNWATCH`, including version-stamp integration with Swarm index updates so conflicting writes reliably abort transactional execution.
+- [ ] Support transactional interactions with key expiry and deletion by defining deterministic behavior for keys expiring between queueing and execution, then document compatibility differences where unavoidable.
+- [ ] Create robustness tests for pipelined transaction workloads, client disconnect during `MULTI`, and replay safety under retries to avoid state corruption and orphaned queued commands.
+- [ ] Add telemetry for transaction abort rates, watch conflicts, queue depth, and execution latency so operators can detect contention hotspots and tune application write patterns.
 
-## Ecosystem Integration
-- [x] Integrate with IPFS for hybrid storage options. (100%)
-- [x] Enable interoperability with Ethereum smart contracts. (100%: `EthereumBridgeService` background service with WebSocket + HTTP polling, `ISwarmKeyDb.sol` interface, `SwarmKeyDbOracle.sol` reference implementation with Hardhat tests, `/ethereum/bridge` monitoring endpoint, `ETH_*` environment variable configuration, Docker Compose example with local Hardhat node, full unit + integration test coverage)
-- [x] Support cross-chain data synchronization. (100%)
-- [x] Add connectors for popular frameworks like React and Node.js. (100%: added `swarm-keydb-react` hooks/provider package with Storybook docs + tests, `swarm-keydb-node` service/middleware package with retry/pooling + tests, and runnable `examples/react-app` + `examples/node-express`)
-- [x] Provide APIs for integration with decentralized identity systems. (100%: added `IDecentralizedIdentityProvider` interface with `ResolveAsync`/`AuthenticateAsync`/`CheckPermissionAsync`; `EthrDidProvider` with `did:ethr` resolution and secp256k1 personal-sign verification; `DidAuthKeyValueStore` decorator enforcing DID context on all store operations; `VerifiableCredentialAclPolicy` with operation/key-pattern VC claim evaluation; `DidAuthorizationException`; `AUTHDID` Redis command with optional proof verification; `SWARM_KEYDB_DID_MODE`, `SWARM_KEYDB_DID_RPC_URL`, `SWARM_KEYDB_DID_METHOD` env vars; DID mode indicator on `/dashboard`; `setDid`/`clearDid` in JS, Python, and Go SDKs; `docs/decentralized-identity.md` getting-started guide with DID resolution flow diagram and VC example; full unit test coverage for mock-provider grant/deny, VC policy, AUTHDID command, and dashboard indicator)
+## Redis Streams and Consumer Groups
+- [ ] Implement core stream commands (`XADD`, `XRANGE`, `XREVRANGE`, `XLEN`) using monotonic IDs and append-only semantics that preserve ordering guarantees expected by Redis stream clients.
+- [ ] Add consumer-group workflow commands (`XGROUP`, `XREADGROUP`, `XACK`, `XPENDING`) with pending-entry tracking and restart-safe state persistence across node restarts.
+- [ ] Implement blocking and non-blocking read semantics for `XREAD` and `XREADGROUP`, including timeout handling and fair wake-up behavior under multi-consumer contention.
+- [ ] Define retention policies (`MAXLEN` approximate and exact trimming) that prevent unbounded memory growth while preserving practical replay windows for late or recovering consumers.
+- [ ] Add failure-injection tests for crash recovery, duplicate delivery, and re-delivery from pending entries to ensure at-least-once stream processing remains predictable and observable.
+
+## Scripting, Functions, and Runtime Safety
+- [ ] Implement script execution compatibility (`EVAL`, `EVALSHA`, `SCRIPT LOAD`, `SCRIPT EXISTS`, `SCRIPT FLUSH`) with deterministic command sandboxing and explicit resource limits.
+- [ ] Introduce script runtime guards for maximum CPU time, recursion depth, and output size so long-running or malicious scripts cannot starve command processing threads.
+- [ ] Add deterministic script replication and cache invalidation behavior for multi-instance deployments so script SHA resolution remains consistent after rolling updates and failovers.
+- [ ] Implement secure defaults that disable unsafe host integration primitives and return stable protocol-level errors instead of leaking runtime or framework exception internals.
+- [ ] Add regression tests covering known script-engine CVE patterns from Redis-compatible ecosystems, including denial-of-service vectors, stack exhaustion, and remote code execution preconditions.
+
+## Compatibility, Expiry, and Operability Hardening
+- [ ] Expand Redis command coverage with compatibility-focused priorities (`INFO`, `COMMAND`, `CLIENT`, `CONFIG GET`) to improve ecosystem tooling support and reduce unknown-command operational surprises.
+- [ ] Rework active expiry scheduling with adaptive scan budgeting to keep latency predictable under heavy TTL churn, avoiding keyspace cleanup stalls seen in high-write Redis-compatible deployments.
+- [ ] Introduce memory-pressure controls (`maxmemory`-style limits and documented eviction policies) with deterministic behavior, clear metrics, and safety valves before process-level OOM conditions.
+- [ ] Add protocol conformance tests for parser edge cases, malformed RESP frames, and command argument validation, including integer overflow and boundary-value handling across all Redis-visible commands.
+- [ ] Add issue-watch automation that tracks selected KeyDB and Valkey issues, then maps each relevant finding to SwarmKeyDb tests or roadmap tasks with explicit status in release notes.
