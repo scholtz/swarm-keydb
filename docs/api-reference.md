@@ -22,6 +22,10 @@ This reference covers the public Redis protocol surface and `SwarmKeyDbClient` m
 | `KEYS pattern` | glob pattern | matching keys | wrong arity |
 | `SCAN cursor [COUNT n]` | cursor token | keys + next cursor | invalid cursor/count |
 | `TYPE key` | key | `string` / `none` | wrong arity |
+| `XADD key [MAXLEN [~\|=] count] id field value [field value ...]` | stream key, id token, field/value pairs | generated or explicit stream ID | wrong arity, invalid IDs, out-of-order IDs, wrong type |
+| `XRANGE key start end [COUNT n]` | stream key, range bounds | nested array of stream entries | wrong arity, invalid IDs, wrong type |
+| `XREVRANGE key end start [COUNT n]` | stream key, reverse range bounds | nested array of stream entries | wrong arity, invalid IDs, wrong type |
+| `XLEN key` | stream key | stream entry count (`0` if missing) | wrong arity, wrong type |
 | `AUTHADDR 0x...` | Ethereum address | `OK` | invalid address |
 | `QUIT` | none | `OK` and close | wrong arity |
 
@@ -33,6 +37,10 @@ This reference covers the public Redis protocol surface and `SwarmKeyDbClient` m
 | `ERR invalid expire seconds` | `EXPIRE`/`SETEX` seconds must be `> 0`. |
 | `ERR invalid expire milliseconds` | `PEXPIRE`/`PSETEX` milliseconds must be `> 0`. |
 | `ERR invalid range bounds` | Range start key sorts after end key. |
+| `ERR Invalid stream ID specified as stream command argument` | Stream ID token is malformed. |
+| `ERR The ID specified in XADD is equal or smaller than the target stream top item` | Stream IDs must increase monotonically per key. |
+| `ERR The ID specified in XADD must be greater than 0-0` | `0-0` is not a valid new stream entry ID. |
+| `WRONGTYPE Operation against a key holding the wrong kind of value` | Stream command used on a non-stream key (or vice versa). |
 | `ERR Access denied: address ... does not have ... permission.` | ACL denied the operation. |
 
 ## C# `SwarmKeyDbClient` public methods
