@@ -18,7 +18,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 - Local file storage backend for development and tests.
 - `skdb` CLI for database management and debugging from the terminal.
 - `swarmkeydb-migrate` CLI for Redis-to-SwarmKeyDb migrations with dry-run, prefix filters, resumable checkpoints, and validation sampling.
-- .NET 10 build, Docker packaging, and Kubernetes deployment manifests.
+- .NET 10 build, Docker packaging, Kubernetes deployment manifests, and Helm chart publishing workflow.
 
 ## Documentation
 

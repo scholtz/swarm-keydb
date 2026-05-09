@@ -1,0 +1,7 @@
+1. Get the application service endpoint:
+
+   kubectl get svc --namespace {{ .Release.Namespace }} {{ include "swarm-keydb.fullname" . }}
+
+2. Set required values for Swarm uploads:
+
+   --set env.beeUrl=http://swarm-bee-api:1633 --set secret.beePostageBatchId=<batch-id>

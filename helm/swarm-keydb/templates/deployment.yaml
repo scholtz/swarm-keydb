@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "swarm-keydb.fullname" . }}
+  labels:
+    {{- include "swarm-keydb.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "swarm-keydb.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "swarm-keydb.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "swarm-keydb.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: swarm-keydb
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: redis
+              containerPort: {{ .Values.env.redisPort }}
+              protocol: TCP
+            - name: dashboard
+              containerPort: {{ .Values.env.dashboardPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.env.metricsPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "swarm-keydb.configMapName" . }}
+          env:
+            - name: BEE_POSTAGE_BATCH_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "swarm-keydb.secretName" . }}
+                  key: BEE_POSTAGE_BATCH_ID
+            - name: SWARM_KEYDB_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "swarm-keydb.secretName" . }}
+                  key: SWARM_KEYDB_ENCRYPTION_KEY
+                  optional: true
+            - name: SWARM_KEYDB_ENCRYPTION_ETH_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "swarm-keydb.secretName" . }}
+                  key: SWARM_KEYDB_ENCRYPTION_ETH_KEY
+                  optional: true
+            - name: SWARM_KEYDB_PRIVACY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "swarm-keydb.secretName" . }}
+                  key: SWARM_KEYDB_PRIVACY_KEY
+                  optional: true
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.livenessProbe.path }}
+              port: dashboard
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.readinessProbe.path }}
+              port: dashboard
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.env.dataDir }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "swarm-keydb.fullname" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

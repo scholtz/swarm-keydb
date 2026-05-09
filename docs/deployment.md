@@ -60,3 +60,4 @@ scrape_configs:
 - Docker Compose + Bee: `docs/deployment/README.md`
 - Sharded 3-node example (local backend): `examples/sharding/`
 - Kubernetes manifests: `deploy/k8s/`
+- Helm chart: `helm/swarm-keydb/` (published at `https://scholtz.github.io/swarm-keydb/`)

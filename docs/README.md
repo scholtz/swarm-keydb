@@ -8,11 +8,11 @@ This folder is the entrypoint for project documentation.
 - `api-reference.md` documents Redis commands and public C# client methods.
 - `tutorials/` contains end-to-end walkthroughs for common app patterns.
 - `sdk/` contains SDK/connectors quick references for JavaScript, React, Node.js, Python, and Go.
-- `deployment.md` covers production Docker deployment and monitoring integration.
+- `deployment.md` covers production Docker/Helm deployment and monitoring integration.
 - `faq.md` answers frequent setup/runtime questions.
 - `architecture/` explains the storage model and runtime components.
 - `development/` covers local setup, build, and test commands.
-- `deployment/` covers Docker Compose and Kubernetes deployment assets.
+- `deployment/` covers Docker Compose, Kubernetes manifests, and Helm deployment assets.
 - `reference/` documents configuration and environment variables.
 - `development/migration.md` documents Redis-to-SwarmKeyDb migration workflows.
 - `privacy-preserving-queries.md` documents oblivious key-token query mode and migration.
