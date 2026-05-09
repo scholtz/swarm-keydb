@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace SwarmKeyDb;
 
-public sealed class OfflineCapableKeyValueStore : IOfflineKeyValueStore, ICacheStats, IBackendMetadataProvider, ICacheEviction
+public sealed class OfflineCapableKeyValueStore : IOfflineKeyValueStore, ICacheStats, IBackendMetadataProvider, ICacheEviction, ICacheSyncParticipant
 {
     private readonly IKeyValueStore _inner;
     private readonly IOfflineJournal _journal;
@@ -39,6 +39,7 @@ public sealed class OfflineCapableKeyValueStore : IOfflineKeyValueStore, ICacheS
     public long Hits => (_inner as ICacheStats)?.Hits ?? 0;
     public long Misses => (_inner as ICacheStats)?.Misses ?? 0;
     public long Evictions => (_inner as ICacheStats)?.Evictions ?? 0;
+    public long PendingReconciliations => (_inner as ICacheSyncParticipant)?.PendingReconciliations ?? 0;
 
     public Task PutAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default) =>
         PutWithResultAsync(key, value, cancellationToken);
@@ -382,6 +383,14 @@ public sealed class OfflineCapableKeyValueStore : IOfflineKeyValueStore, ICacheS
 
     public Task<string?> GetBackendMetadataAsync(string key, CancellationToken cancellationToken = default) =>
         (_inner as IBackendMetadataProvider)?.GetBackendMetadataAsync(key, cancellationToken) ?? Task.FromResult<string?>(null);
+
+    public Task<IReadOnlyDictionary<string, long>> GetVersionStampsAsync(CancellationToken cancellationToken = default) =>
+        (_inner as ICacheSyncParticipant)?.GetVersionStampsAsync(cancellationToken)
+        ?? Task.FromResult<IReadOnlyDictionary<string, long>>(new Dictionary<string, long>(StringComparer.Ordinal));
+
+    public Task ReconcileKeyAsync(string key, long versionStamp, CancellationToken cancellationToken = default) =>
+        (_inner as ICacheSyncParticipant)?.ReconcileKeyAsync(key, versionStamp, cancellationToken)
+        ?? Task.CompletedTask;
 
     public void EvictFromCache(string key) => (_inner as ICacheEviction)?.EvictFromCache(key);
 

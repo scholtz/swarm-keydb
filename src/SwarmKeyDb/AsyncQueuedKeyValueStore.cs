@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging;
 
 namespace SwarmKeyDb;
 
-public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingStore, ICacheStats, IBackendMetadataProvider, ICacheEviction
+public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingStore, ICacheStats, IBackendMetadataProvider, ICacheEviction, ICacheSyncParticipant
 {
     private readonly IKeyValueStore _inner;
     private readonly AsyncProcessingOptions _options;
@@ -85,6 +85,7 @@ public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingS
     public long Hits => (_inner as ICacheStats)?.Hits ?? 0;
     public long Misses => (_inner as ICacheStats)?.Misses ?? 0;
     public long Evictions => (_inner as ICacheStats)?.Evictions ?? 0;
+    public long PendingReconciliations => (_inner as ICacheSyncParticipant)?.PendingReconciliations ?? 0;
 
     public Task FlushAsync(CancellationToken cancellationToken = default)
     {
@@ -143,6 +144,14 @@ public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingS
             return Task.CompletedTask;
         }, operationName);
     }
+
+    public Task<IReadOnlyDictionary<string, long>> GetVersionStampsAsync(CancellationToken cancellationToken = default) =>
+        (_inner as ICacheSyncParticipant)?.GetVersionStampsAsync(cancellationToken)
+        ?? Task.FromResult<IReadOnlyDictionary<string, long>>(new Dictionary<string, long>(StringComparer.Ordinal));
+
+    public Task ReconcileKeyAsync(string key, long versionStamp, CancellationToken cancellationToken = default) =>
+        (_inner as ICacheSyncParticipant)?.ReconcileKeyAsync(key, versionStamp, cancellationToken)
+        ?? Task.CompletedTask;
 
     private async Task<T> QueueWriteAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken)
     {

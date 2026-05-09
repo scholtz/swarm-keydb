@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -24,6 +25,8 @@ public static class ServiceCollectionExtensions
         Func<IServiceProvider, IKeyValueStore> baseStoreFactory)
     {
         ArgumentNullException.ThrowIfNull(baseStoreFactory);
+        services.TryAddSingleton<IOptions<CacheSyncOptions>>(Options.Create(new CacheSyncOptions()));
+        services.TryAddSingleton<ICacheSyncBus>(NoOpCacheSyncBus.Instance);
         services.AddSingleton<IKeyValueStore>(sp =>
         {
             IKeyValueStore store = baseStoreFactory(sp);
@@ -62,7 +65,9 @@ public static class ServiceCollectionExtensions
                 store,
                 sp.GetRequiredService<IMemoryCache>(),
                 sp.GetRequiredService<IOptions<CacheOptions>>(),
-                sp.GetRequiredService<ILogger<CachingKeyValueStore>>());
+                sp.GetRequiredService<ILogger<CachingKeyValueStore>>(),
+                sp.GetService<ICacheSyncBus>(),
+                sp.GetService<IOptions<CacheSyncOptions>>());
 
             var swarmOptions = sp.GetService<IOptions<SwarmKeyDbOptions>>()?.Value ?? new SwarmKeyDbOptions();
             if (swarmOptions.OfflineMode != OfflineMode.Never)
@@ -99,6 +104,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IConsistencyVerificationStatusProvider>(sp =>
             sp.GetRequiredService<IKeyValueStore>() as IConsistencyVerificationStatusProvider
             ?? NoOpConsistencyVerificationStatusProvider.Instance);
+        services.TryAddSingleton<ICacheSyncStatusProvider>(NoOpCacheSyncStatusProvider.Instance);
         return services;
     }
 }

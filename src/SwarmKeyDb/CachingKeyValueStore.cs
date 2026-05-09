@@ -5,39 +5,61 @@ using Microsoft.Extensions.Options;
 namespace SwarmKeyDb;
 
 public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats, ICacheEviction, IBackendMetadataProvider
+    , ICacheSyncParticipant
 {
     private readonly IKeyValueStore _inner;
     private readonly IMemoryCache _cache;
     private readonly CacheOptions _options;
     private readonly ILogger<CachingKeyValueStore> _logger;
+    private readonly ICacheSyncBus _syncBus;
+    private readonly CacheSyncOptions _syncOptions;
     private readonly object _lruLock = new();
+    private readonly object _versionLock = new();
     private readonly LinkedList<string> _lruKeys = new();
     private readonly Dictionary<string, LinkedListNode<string>> _lruNodes = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> _versionStamps = new(StringComparer.Ordinal);
+    private readonly IDisposable? _syncSubscription;
+    private readonly IDisposable? _syncVersionRegistration;
     private long _hits;
     private long _misses;
     private long _evictions;
+    private long _versionCounter;
+    private long _pendingReconciliations;
 
     public CachingKeyValueStore(
         IKeyValueStore inner,
         IMemoryCache cache,
         IOptions<CacheOptions> options,
-        ILogger<CachingKeyValueStore> logger)
+        ILogger<CachingKeyValueStore> logger,
+        ICacheSyncBus? syncBus = null,
+        IOptions<CacheSyncOptions>? syncOptions = null)
     {
         _inner = inner;
         _cache = cache;
         _options = options.Value;
         _logger = logger;
+        _syncBus = syncBus ?? NoOpCacheSyncBus.Instance;
+        _syncOptions = syncOptions?.Value ?? new CacheSyncOptions();
+        if (_syncOptions.Enabled)
+        {
+            _syncSubscription = _syncBus is ICacheSyncBusWithNodeSubscriptions nodeSubscriptions
+                ? nodeSubscriptions.SubscribeInvalidations(_syncOptions.NodeId, HandleInvalidationAsync)
+                : _syncBus.SubscribeInvalidations(HandleInvalidationAsync);
+            _syncVersionRegistration = (_syncBus as ICacheSyncPeerStateBus)?
+                .RegisterVersionProvider(_syncOptions.NodeId, GetVersionStampsAsync);
+        }
     }
 
     public long Hits => Interlocked.Read(ref _hits);
     public long Misses => Interlocked.Read(ref _misses);
     public long Evictions => Interlocked.Read(ref _evictions);
+    public long PendingReconciliations => Interlocked.Read(ref _pendingReconciliations);
 
     public async Task PutAsync(string key, ReadOnlyMemory<byte> value, CancellationToken cancellationToken = default)
     {
         await _inner.PutAsync(key, value, cancellationToken).ConfigureAwait(false);
-        _cache.Remove(key);
-        RemoveLru(key);
+        EvictFromCacheCore(key, "write");
+        await PublishInvalidationAsync(key, reason: "write", cancellationToken).ConfigureAwait(false);
     }
 
     public async Task PutWithStrategyAsync(
@@ -47,15 +69,15 @@ public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats, ICacheEv
         CancellationToken cancellationToken = default)
     {
         await _inner.PutWithStrategyAsync(key, value, mergeStrategy, cancellationToken).ConfigureAwait(false);
-        _cache.Remove(key);
-        RemoveLru(key);
+        EvictFromCacheCore(key, "write");
+        await PublishInvalidationAsync(key, reason: "write", cancellationToken).ConfigureAwait(false);
     }
 
     public async Task MergeAsync(string key, ReadOnlyMemory<byte> incomingValue, CancellationToken cancellationToken = default)
     {
         await _inner.MergeAsync(key, incomingValue, cancellationToken).ConfigureAwait(false);
-        _cache.Remove(key);
-        RemoveLru(key);
+        EvictFromCacheCore(key, "write");
+        await PublishInvalidationAsync(key, reason: "write", cancellationToken).ConfigureAwait(false);
     }
 
     public Task SetKeyOptionsAsync(string key, KeyOptions options, CancellationToken cancellationToken = default) =>
@@ -89,6 +111,8 @@ public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats, ICacheEv
         {
             return null;
         }
+
+        EnsureVersionStampExists(key);
 
         var ttl = await ResolveCacheEntryTtlAsync(key, cancellationToken).ConfigureAwait(false);
         if (ttl <= TimeSpan.Zero)
@@ -132,8 +156,8 @@ public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats, ICacheEv
     public async Task<bool> DeleteAsync(string key, CancellationToken cancellationToken = default)
     {
         var deleted = await _inner.DeleteAsync(key, cancellationToken).ConfigureAwait(false);
-        _cache.Remove(key);
-        RemoveLru(key);
+        EvictFromCacheCore(key, "delete");
+        await PublishInvalidationAsync(key, reason: "delete", cancellationToken).ConfigureAwait(false);
         return deleted;
     }
 
@@ -143,8 +167,12 @@ public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats, ICacheEv
     public async Task<bool> SetTtlAsync(string key, TimeSpan ttl, CancellationToken cancellationToken = default)
     {
         var updated = await _inner.SetTtlAsync(key, ttl, cancellationToken).ConfigureAwait(false);
-        _cache.Remove(key);
-        RemoveLru(key);
+        EvictFromCacheCore(key, "ttl");
+        if (updated)
+        {
+            await PublishInvalidationAsync(key, reason: "ttl", cancellationToken).ConfigureAwait(false);
+        }
+
         return updated;
     }
 
@@ -154,21 +182,52 @@ public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats, ICacheEv
     public async Task<bool> RemoveTtlAsync(string key, CancellationToken cancellationToken = default)
     {
         var updated = await _inner.RemoveTtlAsync(key, cancellationToken).ConfigureAwait(false);
-        _cache.Remove(key);
-        RemoveLru(key);
+        EvictFromCacheCore(key, "ttl");
+        if (updated)
+        {
+            await PublishInvalidationAsync(key, reason: "ttl", cancellationToken).ConfigureAwait(false);
+        }
+
         return updated;
     }
 
     public void EvictFromCache(string key)
     {
-        _cache.Remove(key);
-        RemoveLru(key);
-        Interlocked.Increment(ref _evictions);
-        _logger.LogDebug("Cache eviction by consistency verification for key '{Key}'.", key);
+        EvictFromCacheCore(key, "consistency");
     }
 
     public Task<string?> GetBackendMetadataAsync(string key, CancellationToken cancellationToken = default) =>
         (_inner as IBackendMetadataProvider)?.GetBackendMetadataAsync(key, cancellationToken) ?? Task.FromResult<string?>(null);
+
+    public Task<IReadOnlyDictionary<string, long>> GetVersionStampsAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_versionLock)
+        {
+            return Task.FromResult<IReadOnlyDictionary<string, long>>(
+                _versionStamps.ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.Ordinal));
+        }
+    }
+
+    public async Task ReconcileKeyAsync(string key, long versionStamp, CancellationToken cancellationToken = default)
+    {
+        if (versionStamp <= GetVersionStamp(key))
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref _pendingReconciliations);
+        try
+        {
+            EvictFromCacheCore(key, "anti-entropy");
+            _ = await _inner.GetAsync(key, cancellationToken).ConfigureAwait(false);
+            SetVersionStamp(key, versionStamp);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _pendingReconciliations);
+        }
+    }
 
     private async Task<TimeSpan?> ResolveCacheEntryTtlAsync(string key, CancellationToken cancellationToken)
     {
@@ -233,6 +292,100 @@ public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats, ICacheEv
 
             _lruNodes.Remove(key);
             _lruKeys.Remove(node);
+        }
+    }
+
+    private async Task PublishInvalidationAsync(string key, string reason, CancellationToken cancellationToken)
+    {
+        if (!_syncOptions.Enabled)
+        {
+            return;
+        }
+
+        var stamp = NextVersionStamp(key);
+        try
+        {
+            await _syncBus.PublishInvalidationAsync(
+                new CacheInvalidationEvent(
+                    _syncOptions.NodeId,
+                    key,
+                    stamp,
+                    DateTimeOffset.UtcNow,
+                    reason),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Cache invalidation publish failed for key '{Key}'. Continuing with local cache only.", key);
+        }
+    }
+
+    private Task HandleInvalidationAsync(CacheInvalidationEvent invalidation)
+    {
+        if (!_syncOptions.Enabled || string.Equals(invalidation.SourceNodeId, _syncOptions.NodeId, StringComparison.Ordinal))
+        {
+            return Task.CompletedTask;
+        }
+
+        if (invalidation.VersionStamp <= GetVersionStamp(invalidation.Key))
+        {
+            return Task.CompletedTask;
+        }
+
+        SetVersionStamp(invalidation.Key, invalidation.VersionStamp);
+        EvictFromCacheCore(invalidation.Key, "peer");
+        return Task.CompletedTask;
+    }
+
+    private void EvictFromCacheCore(string key, string reason)
+    {
+        _cache.Remove(key);
+        RemoveLru(key);
+        Interlocked.Increment(ref _evictions);
+        _logger.LogDebug("Cache eviction ({Reason}) for key '{Key}'.", reason, key);
+    }
+
+    private long NextVersionStamp(string key)
+    {
+        var stamp = Interlocked.Increment(ref _versionCounter);
+        lock (_versionLock)
+        {
+            _versionStamps[key] = stamp;
+        }
+
+        return stamp;
+    }
+
+    private long GetVersionStamp(string key)
+    {
+        lock (_versionLock)
+        {
+            return _versionStamps.TryGetValue(key, out var stamp) ? stamp : 0;
+        }
+    }
+
+    private void EnsureVersionStampExists(string key)
+    {
+        lock (_versionLock)
+        {
+            _versionStamps.TryAdd(key, 0);
+        }
+    }
+
+    private void SetVersionStamp(string key, long stamp)
+    {
+        lock (_versionLock)
+        {
+            _versionStamps[key] = stamp;
+        }
+
+        long current;
+        while ((current = Interlocked.Read(ref _versionCounter)) < stamp)
+        {
+            if (Interlocked.CompareExchange(ref _versionCounter, stamp, current) == current)
+            {
+                break;
+            }
         }
     }
 }

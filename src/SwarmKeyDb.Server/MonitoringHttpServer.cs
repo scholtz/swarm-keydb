@@ -19,6 +19,7 @@ public sealed class MonitoringHttpServer : IDisposable
     private readonly CrossChainSyncService? _crossChainSyncService;
     private readonly IOfflineStatusProvider _offlineStatusProvider;
     private readonly IConsistencyVerificationStatusProvider _consistencyStatusProvider;
+    private readonly ICacheSyncStatusProvider _cacheSyncStatusProvider;
     private readonly string _privacyMode;
     private readonly string _didMode;
 
@@ -36,6 +37,7 @@ public sealed class MonitoringHttpServer : IDisposable
         CrossChainSyncService? crossChainSyncService = null,
         IOfflineStatusProvider? offlineStatusProvider = null,
         IConsistencyVerificationStatusProvider? consistencyStatusProvider = null,
+        ICacheSyncStatusProvider? cacheSyncStatusProvider = null,
         PrivacyMode privacyMode = PrivacyMode.None,
         DidAuthMode didMode = DidAuthMode.None)
     {
@@ -50,6 +52,7 @@ public sealed class MonitoringHttpServer : IDisposable
         _crossChainSyncService = crossChainSyncService;
         _offlineStatusProvider = offlineStatusProvider ?? NoOpOfflineStatusProvider.Instance;
         _consistencyStatusProvider = consistencyStatusProvider ?? NoOpConsistencyVerificationStatusProvider.Instance;
+        _cacheSyncStatusProvider = cacheSyncStatusProvider ?? NoOpCacheSyncStatusProvider.Instance;
         _privacyMode = privacyMode.ToString().ToLowerInvariant();
         _didMode = didMode.ToString().ToLowerInvariant();
         _listener.Prefixes.Add($"http://{(address.Equals(IPAddress.Any) ? "+" : address.ToString())}:{port}/");
@@ -101,6 +104,7 @@ public sealed class MonitoringHttpServer : IDisposable
                 : await _shardHealthProvider.GetShardHealthAsync(cancellationToken).ConfigureAwait(false);
             var degraded = shardHealth?.Any(static shard => !shard.Ready) == true;
             var consistencySnapshot = _consistencyStatusProvider.GetSnapshot();
+            var cacheSyncSnapshot = _cacheSyncStatusProvider.GetSnapshot();
             await WriteJsonAsync(
                 context.Response,
                 degraded ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.OK,
@@ -117,6 +121,14 @@ public sealed class MonitoringHttpServer : IDisposable
                         violationCount = consistencySnapshot.ViolationCount,
                         worstLatencyMs = consistencySnapshot.WorstLatencyMs,
                         evictionByVerificationTotal = consistencySnapshot.EvictionByVerificationTotal
+                    },
+                    cacheSync = new
+                    {
+                        peerCount = cacheSyncSnapshot.PeerCount,
+                        lastSuccessfulSyncUtc = cacheSyncSnapshot.LastSuccessfulSyncUtc,
+                        reconciledKeysLastCycle = cacheSyncSnapshot.ReconciledKeysLastCycle,
+                        pendingReconciliations = cacheSyncSnapshot.PendingReconciliations,
+                        lastError = cacheSyncSnapshot.LastError
                     },
                     shards = shardHealth?.Select(static shard => new
                     {
@@ -136,6 +148,7 @@ public sealed class MonitoringHttpServer : IDisposable
             var shardHealth = _shardHealthProvider is null
                 ? null
                 : await _shardHealthProvider.GetShardHealthAsync(cancellationToken).ConfigureAwait(false);
+            var cacheSyncSnapshot = _cacheSyncStatusProvider.GetSnapshot();
             await WriteJsonAsync(
                 context.Response,
                 ready ? HttpStatusCode.OK : HttpStatusCode.ServiceUnavailable,
@@ -145,6 +158,14 @@ public sealed class MonitoringHttpServer : IDisposable
                     message,
                     offline_queue_depth = _offlineStatusProvider.QueueDepth,
                     last_successful_sync_utc = _offlineStatusProvider.LastSuccessfulSyncUtc,
+                    cacheSync = new
+                    {
+                        peerCount = cacheSyncSnapshot.PeerCount,
+                        lastSuccessfulSyncUtc = cacheSyncSnapshot.LastSuccessfulSyncUtc,
+                        reconciledKeysLastCycle = cacheSyncSnapshot.ReconciledKeysLastCycle,
+                        pendingReconciliations = cacheSyncSnapshot.PendingReconciliations,
+                        lastError = cacheSyncSnapshot.LastError
+                    },
                     shards = shardHealth?.Select(static shard => new
                     {
                         shard = shard.Shard,
@@ -342,11 +363,17 @@ public sealed class MonitoringHttpServer : IDisposable
                                              <p>Readiness: <span id="ready-status">loading...</span></p>
                                              <p>Offline Queue: <strong id="offline-queue-depth">loading...</strong></p>
                                              <p>Last Sync: <strong id="offline-last-sync">loading...</strong></p>
-                                             <p>Consistency Success Rate: <strong id="consistency-success-rate">loading...</strong></p>
-                                             <p>Consistency Violations: <strong id="consistency-violation-count">loading...</strong></p>
-                                             <p>Consistency Worst Latency: <strong id="consistency-worst-latency">loading...</strong></p>
-                                             <p>Cache Evictions by Verification: <strong id="consistency-eviction-count">loading...</strong></p>
-                                              <h2>Cross-chain replication health</h2>
+                                              <p>Consistency Success Rate: <strong id="consistency-success-rate">loading...</strong></p>
+                                              <p>Consistency Violations: <strong id="consistency-violation-count">loading...</strong></p>
+                                              <p>Consistency Worst Latency: <strong id="consistency-worst-latency">loading...</strong></p>
+                                              <p>Cache Evictions by Verification: <strong id="consistency-eviction-count">loading...</strong></p>
+                                              <h2>Cache Sync Status</h2>
+                                              <p>Sync Peers: <strong id="cache-sync-peer-count">loading...</strong></p>
+                                              <p>Last Sync: <strong id="cache-sync-last-sync">loading...</strong></p>
+                                              <p>Reconciled Keys (Last Cycle): <strong id="cache-sync-reconciled">loading...</strong></p>
+                                              <p>Pending Reconciliations: <strong id="cache-sync-pending">loading...</strong></p>
+                                              <p>Last Sync Error: <strong id="cache-sync-last-error">none</strong></p>
+                                               <h2>Cross-chain replication health</h2>
                                             <table>
                                               <thead>
                                                 <tr><th>Chain</th><th>Pending</th><th>Synced</th><th>Failed</th><th>Health</th></tr>
@@ -380,6 +407,11 @@ public sealed class MonitoringHttpServer : IDisposable
                                               const consistencyViolationCountEl = document.getElementById('consistency-violation-count');
                                               const consistencyWorstLatencyEl = document.getElementById('consistency-worst-latency');
                                               const consistencyEvictionCountEl = document.getElementById('consistency-eviction-count');
+                                              const cacheSyncPeerCountEl = document.getElementById('cache-sync-peer-count');
+                                              const cacheSyncLastSyncEl = document.getElementById('cache-sync-last-sync');
+                                              const cacheSyncReconciledEl = document.getElementById('cache-sync-reconciled');
+                                              const cacheSyncPendingEl = document.getElementById('cache-sync-pending');
+                                              const cacheSyncLastErrorEl = document.getElementById('cache-sync-last-error');
                                               function parseCounters(metricsText) {
                                                const wanted = [
                                                  'swarmkeydb_operations_total{operation="get",status="success"}',
@@ -409,12 +441,20 @@ public sealed class MonitoringHttpServer : IDisposable
                                                  offlineLastSyncEl.textContent = data.last_successful_sync_utc
                                                    ? new Date(data.last_successful_sync_utc).toLocaleString()
                                                    : 'never';
-                                                 const consistency = data.consistencyVerification || {};
-                                                 consistencySuccessRateEl.textContent = `${Math.round((consistency.successRate ?? 1) * 10000) / 100}%`;
-                                                 consistencyViolationCountEl.textContent = String(consistency.violationCount ?? 0);
-                                                 consistencyWorstLatencyEl.textContent = `${Math.round(consistency.worstLatencyMs ?? 0)} ms`;
-                                                 consistencyEvictionCountEl.textContent = String(consistency.evictionByVerificationTotal ?? 0);
-                                               }
+                                                  const consistency = data.consistencyVerification || {};
+                                                  consistencySuccessRateEl.textContent = `${Math.round((consistency.successRate ?? 1) * 10000) / 100}%`;
+                                                  consistencyViolationCountEl.textContent = String(consistency.violationCount ?? 0);
+                                                  consistencyWorstLatencyEl.textContent = `${Math.round(consistency.worstLatencyMs ?? 0)} ms`;
+                                                  consistencyEvictionCountEl.textContent = String(consistency.evictionByVerificationTotal ?? 0);
+                                                  const cacheSync = data.cacheSync || {};
+                                                  cacheSyncPeerCountEl.textContent = String(cacheSync.peerCount ?? 0);
+                                                  cacheSyncLastSyncEl.textContent = cacheSync.lastSuccessfulSyncUtc
+                                                    ? new Date(cacheSync.lastSuccessfulSyncUtc).toLocaleString()
+                                                    : 'never';
+                                                  cacheSyncReconciledEl.textContent = String(cacheSync.reconciledKeysLastCycle ?? 0);
+                                                  cacheSyncPendingEl.textContent = String(cacheSync.pendingReconciliations ?? 0);
+                                                  cacheSyncLastErrorEl.textContent = cacheSync.lastError || 'none';
+                                                }
                                               async function refreshMetrics() {
                                                 const response = await fetch('/metrics');
                                                 const text = await response.text();
