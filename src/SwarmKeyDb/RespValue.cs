@@ -34,6 +34,7 @@ public sealed class RespValue
     public static RespValue BulkString(byte[]? value) => new(RespType.BulkString, bytes: value);
     public static RespValue BulkString(string? value) => new(RespType.BulkString, bytes: value is null ? null : Encoding.UTF8.GetBytes(value));
     public static RespValue Array(IReadOnlyList<RespValue> items) => new(RespType.Array, items: items);
+    public static RespValue NullArray() => new(RespType.Array);
 
     public string AsString() => Encoding.UTF8.GetString(Bytes ?? System.Array.Empty<byte>());
 }

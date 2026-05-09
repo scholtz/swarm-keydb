@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -21,6 +22,15 @@ public sealed class RedisCommandProcessor : IDisposable
     private readonly PubSubManager? _pubSubManager;
     private readonly ILogger<RedisCommandProcessor> _logger;
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
+
+    // Shared key-version tracker for WATCH support (incremented on every successful mutation)
+    private readonly ConcurrentDictionary<string, long> _keyVersions = new(StringComparer.Ordinal);
+    private long _versionClock;
+
+    // Transaction telemetry counters
+    private long _txExecTotal;
+    private long _txAbortTotal;
+    private long _txWatchConflictTotal;
 
     public RedisCommandProcessor(
         IKeyValueStore store,
@@ -75,6 +85,9 @@ public sealed class RedisCommandProcessor : IDisposable
             FullMode = BoundedChannelFullMode.DropWrite,
             SingleReader = true
         });
+
+        // Per-connection transaction state
+        var tx = new TransactionState();
 
         try
         {
@@ -162,7 +175,30 @@ public sealed class RedisCommandProcessor : IDisposable
                     continue;
                 }
 
+                // Transaction commands (MULTI/EXEC/DISCARD/WATCH/UNWATCH) require per-connection state
+                if (command is "MULTI" or "EXEC" or "DISCARD" or "WATCH" or "UNWATCH")
+                {
+                    var txResponse = await HandleTransactionCommandAsync(command, request, tx, cancellationToken).ConfigureAwait(false);
+                    await writer.WriteAsync(txResponse, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                // Queue commands while inside a MULTI block
+                if (tx.InMulti)
+                {
+                    var queueResponse = TryQueueCommand(command, tx, request);
+                    await writer.WriteAsync(queueResponse, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
                 var response = await ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
+
+                // Bump key versions for successful mutations so WATCH can detect changes
+                if (response.Type != RespType.Error && request.Items is { Count: > 0 } mutatedItems)
+                {
+                    BumpMutatedKeys(command, mutatedItems);
+                }
+
                 if (TryGetAuthorizedAddress(request, response, out var authorizedAddress))
                 {
                     currentAddress = authorizedAddress;
@@ -201,6 +237,216 @@ public sealed class RedisCommandProcessor : IDisposable
             }
         }
     }
+
+    // --- Transaction support ---
+
+    /// <summary>Per-connection transaction state (local to <see cref="ProcessAsync"/>).</summary>
+    private sealed class TransactionState
+    {
+        public bool InMulti;
+        public bool HasQueueError;
+        public readonly List<RespValue> CommandQueue = [];
+        public readonly Dictionary<string, long> WatchedVersions = new(StringComparer.Ordinal);
+
+        public void Reset()
+        {
+            InMulti = false;
+            HasQueueError = false;
+            CommandQueue.Clear();
+            WatchedVersions.Clear();
+        }
+    }
+
+    /// <summary>Commands that are valid inside a MULTI block (unknown commands abort the transaction).</summary>
+    private static readonly HashSet<string> KnownQueueableCommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "PING", "ECHO", "AUTHADDR", "AUTHDID",
+        "SET", "SETEX", "PSETEX", "GET",
+        "DEL", "MDEL", "MGET", "MSET", "MSETNX",
+        "EXISTS", "EXPIRE", "PEXPIRE", "EXPIREAT",
+        "TTL", "PTTL", "PERSIST",
+        "KEYS", "SCAN", "TYPE",
+        "BACKUP", "RESTOREDB", "ROTATEKEY", "BACKENDMETA",
+        "SWARM.RESYNC", "PUBLISH", "PUBSUB", "QUIT",
+        "SUBSCRIBE", "UNSUBSCRIBE", "PSUBSCRIBE", "PUNSUBSCRIBE"
+    };
+
+    /// <summary>
+    /// Handles MULTI, EXEC, DISCARD, WATCH, and UNWATCH commands with per-connection state.
+    /// </summary>
+    private async Task<RespValue> HandleTransactionCommandAsync(
+        string command,
+        RespValue request,
+        TransactionState tx,
+        CancellationToken cancellationToken)
+    {
+        var args = request.Items ?? (IReadOnlyList<RespValue>)[];
+
+        switch (command)
+        {
+            case "MULTI":
+                if (tx.InMulti)
+                {
+                    return RespValue.Error("ERR MULTI calls can not be nested");
+                }
+                tx.InMulti = true;
+                return RespValue.SimpleString("OK");
+
+            case "EXEC":
+                if (!tx.InMulti)
+                {
+                    return RespValue.Error("ERR EXEC without MULTI");
+                }
+                return await ExecTransactionAsync(tx, cancellationToken).ConfigureAwait(false);
+
+            case "DISCARD":
+                if (!tx.InMulti)
+                {
+                    return RespValue.Error("ERR DISCARD without MULTI");
+                }
+                tx.Reset();
+                return RespValue.SimpleString("OK");
+
+            case "WATCH":
+                if (tx.InMulti)
+                {
+                    return RespValue.Error("ERR WATCH inside MULTI is not allowed");
+                }
+                if (args.Count < 2)
+                {
+                    return RespValue.Error("ERR wrong number of arguments for 'WATCH' command");
+                }
+                for (var i = 1; i < args.Count; i++)
+                {
+                    var watchKey = args[i].AsString();
+                    tx.WatchedVersions[watchKey] = GetKeyVersion(watchKey);
+                }
+                return RespValue.SimpleString("OK");
+
+            case "UNWATCH":
+                tx.WatchedVersions.Clear();
+                return RespValue.SimpleString("OK");
+
+            default:
+                return RespValue.Error($"ERR unknown command '{command}'");
+        }
+    }
+
+    /// <summary>
+    /// Executes all queued commands atomically.  Returns a null array if any watched key changed.
+    /// Returns EXECABORT if a syntax error was queued.
+    /// </summary>
+    private async Task<RespValue> ExecTransactionAsync(TransactionState tx, CancellationToken cancellationToken)
+    {
+        // Count every EXEC attempt so abort_rate = abort_total / exec_total is meaningful
+        Interlocked.Increment(ref _txExecTotal);
+
+        // Syntax error during queuing → abort the whole transaction
+        if (tx.HasQueueError)
+        {
+            tx.Reset();
+            Interlocked.Increment(ref _txAbortTotal);
+            return RespValue.Error("EXECABORT Transaction discarded because of previous errors.");
+        }
+
+        // WATCH conflict check
+        foreach (var (watchedKey, watchedVersion) in tx.WatchedVersions)
+        {
+            if (GetKeyVersion(watchedKey) != watchedVersion)
+            {
+                tx.Reset();
+                Interlocked.Increment(ref _txWatchConflictTotal);
+                Interlocked.Increment(ref _txAbortTotal);
+                return RespValue.NullArray();
+            }
+        }
+
+        // Snapshot and clear the queue before executing so that nested commands behave correctly
+        var queue = tx.CommandQueue.ToArray();
+        tx.Reset();
+
+        var results = new RespValue[queue.Length];
+        for (var i = 0; i < queue.Length; i++)
+        {
+            results[i] = await ExecuteAsync(queue[i], cancellationToken).ConfigureAwait(false);
+
+            // Propagate mutations so WATCH on other connections sees them
+            if (results[i].Type != RespType.Error && queue[i].Items is { Count: > 0 } qItems)
+            {
+                BumpMutatedKeys(qItems[0].AsString().ToUpperInvariant(), qItems);
+            }
+        }
+
+        return RespValue.Array(results);
+    }
+
+    /// <summary>
+    /// Attempts to queue a command during a MULTI block.
+    /// Unknown commands mark the transaction for abort on EXEC and return an error.
+    /// </summary>
+    private static RespValue TryQueueCommand(string command, TransactionState tx, RespValue request)
+    {
+        if (!KnownQueueableCommands.Contains(command))
+        {
+            tx.HasQueueError = true;
+            return RespValue.Error($"ERR unknown command `{command}`");
+        }
+
+        tx.CommandQueue.Add(request);
+        return RespValue.SimpleString("QUEUED");
+    }
+
+    /// <summary>Retrieves the current mutation version for a key (0 if never written).</summary>
+    private long GetKeyVersion(string key) => _keyVersions.GetValueOrDefault(key, 0L);
+
+    /// <summary>Stamps the key with a new monotonically-increasing version after a successful mutation.</summary>
+    private void NotifyKeyMutated(string key) =>
+        _keyVersions[key] = Interlocked.Increment(ref _versionClock);
+
+    /// <summary>
+    /// Bumps the mutation version for all keys affected by a successful write command.
+    /// Called after every successful non-transaction command execution.
+    /// </summary>
+    private void BumpMutatedKeys(string command, IReadOnlyList<RespValue> args)
+    {
+        switch (command)
+        {
+            case "SET":
+            case "SETEX":
+            case "PSETEX":
+            case "EXPIRE":
+            case "PEXPIRE":
+            case "EXPIREAT":
+            case "PERSIST":
+                if (args.Count >= 2)
+                {
+                    NotifyKeyMutated(args[1].AsString());
+                }
+                break;
+
+            case "DEL":
+            case "MDEL":
+                for (var i = 1; i < args.Count; i++)
+                {
+                    NotifyKeyMutated(args[i].AsString());
+                }
+                break;
+
+            case "MSET":
+            case "MSETNX":
+                for (var i = 1; i < args.Count - 1; i += 2)
+                {
+                    NotifyKeyMutated(args[i].AsString());
+                }
+                break;
+        }
+    }
+
+    /// <summary>Returns a snapshot of transaction telemetry counters.</summary>
+    public TransactionMetricsSnapshot GetTransactionMetrics() => new(
+        Interlocked.Read(ref _txExecTotal),
+        Interlocked.Read(ref _txAbortTotal),
+        Interlocked.Read(ref _txWatchConflictTotal));
 
     /// <summary>
     /// Handles SUBSCRIBE, UNSUBSCRIBE, PSUBSCRIBE, and PUNSUBSCRIBE commands,
@@ -1168,6 +1414,7 @@ public sealed class RedisCommandProcessor : IDisposable
         "MGET" or "MSET" or "MSETNX" or "MDEL" => "batch",
         "PUBLISH" => "pubsub",
         "SUBSCRIBE" or "UNSUBSCRIBE" or "PSUBSCRIBE" or "PUNSUBSCRIBE" or "PUBSUB" => "pubsub",
+        "MULTI" or "EXEC" or "DISCARD" or "WATCH" or "UNWATCH" => "transaction",
         _ => "other"
     };
 
@@ -1185,3 +1432,6 @@ public sealed class RedisCommandProcessor : IDisposable
         return string.IsNullOrWhiteSpace(token) ? "unknown" : token.ToLowerInvariant();
     }
 }
+
+/// <summary>Snapshot of per-processor transaction telemetry counters.</summary>
+public sealed record TransactionMetricsSnapshot(long ExecTotal, long AbortTotal, long WatchConflictTotal);
