@@ -32,7 +32,8 @@ EVALSHA a94a8fe5ccb19ba61c4c0873d391e987982fbbd3 0
 
 ### `SCRIPT LOAD script`
 
-Stores a script in the node-local cache and returns its SHA1:
+Stores a script in the local cache and returns its SHA1. When cache sync is
+enabled, the script source is also propagated to peer nodes:
 
 ```
 SCRIPT LOAD "return 1"
@@ -48,7 +49,7 @@ SCRIPT EXISTS a94a8fe5ccb19ba61c4c0873d391e987982fbbd3 0000000000000000000000000
 
 ### `SCRIPT FLUSH [ASYNC|SYNC]`
 
-Clears all cached scripts. The mode flag is accepted but ignored (single-node):
+Clears all cached scripts. The mode flag is accepted but ignored:
 
 ```
 SCRIPT FLUSH
@@ -193,15 +194,25 @@ return redis.call("GET", KEYS[1])
 | `swarmkeydb_script_evalsha_total` | Counter | Total `EVALSHA` invocations. |
 | `swarmkeydb_script_error_total` | Counter | Total script errors (runtime + timeout). |
 | `swarmkeydb_script_timeout_total` | Counter | Scripts terminated by the timeout guard. |
+| `swarmkeydb_script_replication_sent_total` | Counter | Total script-replication events published. |
+| `swarmkeydb_script_replication_received_total` | Counter | Total script-replication events received from peers. |
+| `swarmkeydb_script_cache_miss_recovered_total` | Counter | Total `EVALSHA` misses recovered via peer fetch/replication. |
+| `swarmkeydb_script_flush_propagated_total` | Counter | Total `SCRIPT FLUSH` propagation events sent to peers. |
+| `swarmkeydb_script_cache_size` | Gauge | Current number of scripts cached on the node. |
 | `swarmkeydb_script_exec_duration_seconds` | Histogram | Script execution duration buckets. |
 
 ---
 
 ## Script cache behaviour
 
-- The script cache is **node-local** — it is not replicated to other SwarmKeyDb
-  instances. Load scripts on each node independently, or use `EVAL` (which
-  caches automatically) before switching to `EVALSHA`.
-- The cache is in-memory only and is cleared on restart or by `SCRIPT FLUSH`.
+- Scripts loaded by `SCRIPT LOAD` and scripts first seen via `EVAL` are
+  propagated across nodes through the cache-sync bus when enabled.
+- `EVALSHA` performs a peer fetch attempt on local cache miss before returning
+  `NOSCRIPT`, reducing transient miss windows during propagation delays.
+- Nodes can request startup script-cache resync from peers during boot.
+- `SCRIPT FLUSH` is propagated across nodes so all peers clear script cache
+  state consistently.
+- The cache is in-memory and is cleared on restart if no peer resync source is
+  available.
 - SHA1 is computed from the raw UTF-8 bytes of the script source, identical to
   Redis.

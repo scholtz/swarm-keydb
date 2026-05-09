@@ -68,6 +68,7 @@ IOfflineStatusProvider? offlineStatusMetrics = null;
 IConsistencyVerificationStatusProvider? consistencyStatusMetrics = null;
 ICacheSyncStatusProvider? cacheSyncStatusMetrics = null;
 PubSubManager? pubSubManager = null;
+ScriptReplicationManager? scriptReplicationManager = null;
 RedisCommandProcessor? processorRef = null;
 var monitoringMetrics = new MonitoringMetrics(
     () => cacheStats ?? NoOpCacheStats.Instance,
@@ -93,6 +94,11 @@ var monitoringMetrics = new MonitoringMetrics(
             0)),
     streamMetricsAccessor: () => processorRef?.GetStreamMetrics() ?? new StreamMetricsSnapshot(0, 0, 0, 0, 0, 0, 0, new Dictionary<string, long>(StringComparer.Ordinal), 0, 0, new Dictionary<string, long>(StringComparer.Ordinal)),
     scriptMetricsAccessor: () => processorRef?.GetScriptMetrics() ?? new ScriptMetricsSnapshot(
+        0,
+        0,
+        0,
+        0,
+        0,
         0,
         0,
         0,
@@ -468,6 +474,12 @@ CrossChainSyncService? crossChainSyncService = null;
 OfflineSyncService? offlineSyncService = provider.GetService<OfflineSyncService>();
 AntiEntropyService? antiEntropyService = cacheSyncStatusProvider as AntiEntropyService;
 IKeyValueStore commandStore = baseStore;
+var scriptCache = new ScriptCache();
+scriptReplicationManager = new ScriptReplicationManager(
+    scriptCache,
+    provider.GetService<ICacheSyncBus>(),
+    cacheSyncOptions,
+    provider.GetService<ILogger<ScriptReplicationManager>>());
 if (crossChainOptions.Enabled && crossChainOptions.Chains.Count > 0)
 {
     var adapters = crossChainOptions.Chains.Select(chain => (IChainAdapter)new NamespacedChainAdapter(baseStore, chain)).ToArray();
@@ -495,6 +507,8 @@ var processor = new RedisCommandProcessor(
     scriptEngine: new ScriptEngine(
         timeoutMs: Math.Max(100, GetInt("SWARM_KEYDB_SCRIPT_TIMEOUT_MS", 5_000)),
         logger: provider.GetRequiredService<ILogger<ScriptEngine>>()),
+    scriptCache: scriptCache,
+    scriptReplicationManager: scriptReplicationManager,
     compatibilityOptions: compatibilityOptions);
 processorRef = processor;
 var server = new RedisServer(
@@ -553,6 +567,20 @@ if (!ReferenceEquals(resyncCoordinator, NoOpResyncCoordinator.Instance))
         provider.GetRequiredService<ILoggerFactory>()
             .CreateLogger("ResyncStartup")
             .LogWarning(ex, "Startup resync failed. Continuing server startup.");
+    }
+}
+
+if (scriptReplicationManager?.Enabled == true)
+{
+    try
+    {
+        await scriptReplicationManager.RequestStartupResyncAsync(cts.Token);
+    }
+    catch (Exception ex)
+    {
+        provider.GetRequiredService<ILoggerFactory>()
+            .CreateLogger("ScriptReplicationStartup")
+            .LogWarning(ex, "Startup script-cache resync request failed. Continuing server startup.");
     }
 }
 
@@ -630,6 +658,8 @@ if (antiEntropyService is not null)
 {
     await antiEntropyService.DisposeAsync();
 }
+
+scriptReplicationManager?.Dispose();
 
 foreach (var monitoringServer in monitoringServers)
 {

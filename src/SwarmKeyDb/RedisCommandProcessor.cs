@@ -55,6 +55,7 @@ public sealed class RedisCommandProcessor : IDisposable
     // Scripting
     private readonly ScriptEngine _scriptEngine;
     private readonly ScriptCache _scriptCache;
+    private readonly ScriptReplicationManager? _scriptReplicationManager;
 
     // Scripting telemetry counters
     private long _scriptEvalTotal;
@@ -110,6 +111,7 @@ public sealed class RedisCommandProcessor : IDisposable
         StreamTrimOptions? streamTrimOptions = null,
         ScriptEngine? scriptEngine = null,
         ScriptCache? scriptCache = null,
+        ScriptReplicationManager? scriptReplicationManager = null,
         RedisCompatibilityOptions? compatibilityOptions = null)
     {
         _store = store;
@@ -126,6 +128,7 @@ public sealed class RedisCommandProcessor : IDisposable
         _streamTrimOptions = streamTrimOptions ?? new StreamTrimOptions();
         _scriptEngine = scriptEngine ?? new ScriptEngine();
         _scriptCache = scriptCache ?? new ScriptCache();
+        _scriptReplicationManager = scriptReplicationManager;
         _compatibilityOptions = compatibilityOptions ?? new RedisCompatibilityOptions();
     }
 
@@ -4115,7 +4118,10 @@ public sealed class RedisCommandProcessor : IDisposable
         Interlocked.Increment(ref _scriptEvalTotal);
 
         // Cache the script so it can be retrieved by EVALSHA afterwards.
-        _scriptCache.Store(script);
+        if (_scriptCache.TryStore(script, out var sha1) && _scriptReplicationManager?.Enabled == true)
+        {
+            await _scriptReplicationManager.PublishLoadedScriptAsync(sha1, script, cancellationToken).ConfigureAwait(false);
+        }
 
         return await RunScriptAsync(script, keys, argv, cancellationToken).ConfigureAwait(false);
     }
@@ -4137,7 +4143,18 @@ public sealed class RedisCommandProcessor : IDisposable
         var script = _scriptCache.Get(sha1);
         if (script is null)
         {
-            return RespValue.Error("NOSCRIPT No matching script. Please use EVAL.");
+            if (_scriptReplicationManager is not null)
+            {
+                _ = await _scriptReplicationManager.TryRecoverMissingScriptAsync(sha1, cancellationToken).ConfigureAwait(false);
+                script = _scriptCache.Get(sha1);
+            }
+
+            if (script is null)
+            {
+                return _scriptReplicationManager?.Enabled == true
+                    ? RespValue.Error("NOSCRIPT No matching script. Please use EVAL.")
+                    : RespValue.Error("NOSCRIPT No matching script. Please use EVAL. Script replication is not enabled.");
+            }
         }
 
         if (3 + numKeys > args.Count)
@@ -4172,7 +4189,12 @@ public sealed class RedisCommandProcessor : IDisposable
                 }
 
                 var source = args[2].AsString();
-                var sha1 = _scriptCache.Store(source);
+                _ = _scriptCache.TryStore(source, out var sha1);
+                if (_scriptReplicationManager?.Enabled == true)
+                {
+                    await _scriptReplicationManager.PublishLoadedScriptAsync(sha1, source, cancellationToken).ConfigureAwait(false);
+                }
+
                 return RespValue.BulkString(sha1);
             }
 
@@ -4196,6 +4218,11 @@ public sealed class RedisCommandProcessor : IDisposable
             {
                 // SCRIPT FLUSH [ASYNC|SYNC] — mode is ignored (single-node cache)
                 _scriptCache.Flush();
+                if (_scriptReplicationManager?.Enabled == true)
+                {
+                    await _scriptReplicationManager.PublishFlushAsync(cancellationToken).ConfigureAwait(false);
+                }
+
                 return RespValue.SimpleString("OK");
             }
 
@@ -4277,11 +4304,17 @@ public sealed class RedisCommandProcessor : IDisposable
             durationSum = Volatile.Read(ref _scriptExecDurationSumSeconds);
         }
 
+        var replicationMetrics = _scriptReplicationManager?.GetMetricsSnapshot() ?? default;
         return new ScriptMetricsSnapshot(
             Interlocked.Read(ref _scriptEvalTotal),
             Interlocked.Read(ref _scriptEvalShaTotal),
             Interlocked.Read(ref _scriptErrorTotal),
             Interlocked.Read(ref _scriptTimeoutTotal),
+            replicationMetrics.SentTotal,
+            replicationMetrics.ReceivedTotal,
+            replicationMetrics.CacheMissRecoveredTotal,
+            replicationMetrics.FlushPropagatedTotal,
+            replicationMetrics.CacheSize,
             new ScriptDurationHistogramSnapshot(
                 ScriptExecDurationBucketUpperBounds,
                 bucketSnapshot,
@@ -4528,6 +4561,11 @@ public sealed record ScriptMetricsSnapshot(
     long EvalShaTotal,
     long ErrorTotal,
     long TimeoutTotal,
+    long ReplicationSentTotal,
+    long ReplicationReceivedTotal,
+    long CacheMissRecoveredTotal,
+    long FlushPropagatedTotal,
+    int CacheSize,
     ScriptDurationHistogramSnapshot ExecDuration);
 
 /// <summary>Histogram snapshot used for script execution duration telemetry.</summary>
