@@ -64,8 +64,25 @@ public static class ServiceCollectionExtensions
                 sp.GetRequiredService<IOptions<CacheOptions>>(),
                 sp.GetRequiredService<ILogger<CachingKeyValueStore>>());
 
+            var swarmOptions = sp.GetService<IOptions<SwarmKeyDbOptions>>()?.Value ?? new SwarmKeyDbOptions();
+            if (swarmOptions.OfflineMode != OfflineMode.Never)
+            {
+                IOfflineJournal journal = swarmOptions.OfflineJournal == OfflineJournalType.Sqlite
+                    ? new SqliteOfflineJournal(
+                        swarmOptions.OfflineSqlitePath
+                        ?? Path.Combine(AppContext.BaseDirectory, "data", "offline-journal.sqlite"))
+                    : new InMemoryOfflineJournal();
+                var connectivityProbe = sp.GetService<IConnectivityProbe>() ?? new AlwaysConnectedProbe();
+                store = new OfflineCapableKeyValueStore(
+                    store,
+                    journal,
+                    connectivityProbe,
+                    swarmOptions,
+                    sp.GetService<ILogger<OfflineCapableKeyValueStore>>() ?? NullLogger<OfflineCapableKeyValueStore>.Instance);
+            }
+
             var asyncOptions = sp.GetService<IOptions<AsyncProcessingOptions>>()?.Value ?? new AsyncProcessingOptions();
-            if (asyncOptions.Enabled)
+            if (asyncOptions.Enabled && swarmOptions.OfflineMode == OfflineMode.Never)
             {
                 store = new AsyncQueuedKeyValueStore(
                     store,
@@ -77,6 +94,8 @@ public static class ServiceCollectionExtensions
         });
 
         services.AddSingleton<ICacheStats>(sp => (ICacheStats)sp.GetRequiredService<IKeyValueStore>());
+        services.AddSingleton<IOfflineStatusProvider>(sp =>
+            sp.GetRequiredService<IKeyValueStore>() as IOfflineStatusProvider ?? NoOpOfflineStatusProvider.Instance);
         return services;
     }
 }

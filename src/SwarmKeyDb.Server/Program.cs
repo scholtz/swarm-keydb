@@ -24,10 +24,17 @@ var privacyKeyHex = GetFirstSetting("SWARM_KEYDB_PRIVACY_KEY", "SWARM_KEYDB_ENCR
 var didMode = GetDidModeFromSettings();
 var didRpcUrl = GetFirstSetting("SWARM_KEYDB_DID_RPC_URL", "Did:RpcUrl");
 var didMethod = GetFirstSetting("SWARM_KEYDB_DID_METHOD", "Did:Method") ?? "ethr";
+var offlineMode = GetOfflineModeFromSettings();
+var offlineJournal = GetOfflineJournalFromSettings();
+var offlineSyncIntervalMs = Math.Max(250, GetInt("SWARM_KEYDB_OFFLINE_SYNC_INTERVAL_MS", 5_000));
 var privacyOptions = new SwarmKeyDbOptions
 {
     PrivacyMode = privacyMode,
     PrivacyKeyHex = privacyKeyHex,
+    OfflineMode = offlineMode,
+    OfflineJournal = offlineJournal,
+    OfflineSyncIntervalMs = offlineSyncIntervalMs,
+    OfflineSqlitePath = Path.Combine(dataDir, "offline-journal.sqlite"),
     DidMode = didMode,
     DidRpcUrl = didRpcUrl,
     DidMethod = didMethod
@@ -38,7 +45,11 @@ var environment = GetString("DOTNET_ENVIRONMENT", GetString("ASPNETCORE_ENVIRONM
 var useJsonLogging = GetBool("JSON_LOGS", !environment.Equals("Development", StringComparison.OrdinalIgnoreCase));
 
 ICacheStats? cacheStats = null;
-var monitoringMetrics = new MonitoringMetrics(() => cacheStats ?? NoOpCacheStats.Instance, privacyMode: privacyOptions.PrivacyMode);
+IOfflineStatusProvider? offlineStatusMetrics = null;
+var monitoringMetrics = new MonitoringMetrics(
+    () => cacheStats ?? NoOpCacheStats.Instance,
+    () => offlineStatusMetrics ?? NoOpOfflineStatusProvider.Instance,
+    privacyMode: privacyOptions.PrivacyMode);
 
 var cacheOptions = new CacheOptions
 {
@@ -132,6 +143,7 @@ if (didMode != DidAuthMode.None)
 IReadinessProbe readinessProbe;
 IShardHealthProvider? shardHealthProvider = null;
 IBackendStatusProvider? backendStatusProvider = null;
+IConnectivityProbe connectivityProbe = new AlwaysConnectedProbe();
 var ownedResources = new List<IDisposable>();
 ISwarmClient? snapshotSwarmClient = null;
 
@@ -209,8 +221,10 @@ else
             var instrumentedClient = new InstrumentedSwarmClient(swarmClient, monitoringMetrics);
             snapshotSwarmClient = instrumentedClient;
             readinessProbe = swarmProbe;
+            connectivityProbe = new HttpHealthConnectivityProbe(beeUrl);
             backendProbes.Add(("swarm", swarmProbe));
             ownedResources.Add(swarmProbe);
+            ownedResources.Add((IDisposable)connectivityProbe);
             ownedResources.Add((IDisposable)swarmClient);
             services.AddSwarmKeyDbStore(_ => new SwarmKeyValueStore(instrumentedClient, index, integrityOptions));
             break;
@@ -239,7 +253,9 @@ else
                 var beeProbe = new BeeReadinessProbe(beeUrl, batchId);
                 swarmProbe = beeProbe;
                 swarmClient = new BeeSwarmClient(beeUrl, batchId);
+                connectivityProbe = new HttpHealthConnectivityProbe(beeUrl);
                 ownedResources.Add(beeProbe);
+                ownedResources.Add((IDisposable)connectivityProbe);
                 ownedResources.Add((IDisposable)swarmClient);
             }
             else
@@ -278,6 +294,7 @@ else
 }
 
 services.AddSingleton<ISwarmClient>(_ => snapshotSwarmClient ?? throw new InvalidOperationException("No Swarm client is configured."));
+services.AddSingleton<IConnectivityProbe>(connectivityProbe);
 
 services.AddSingleton<BackupService>(sp => new BackupService(
     sp.GetRequiredService<IKeyValueStore>(),
@@ -292,11 +309,22 @@ services.AddSingleton<KeyRotationService>(sp => new KeyRotationService(
     sp.GetRequiredService<ISwarmClient>(),
     sp.GetRequiredService<IEncryptionKeyProvider>(),
     sp.GetRequiredService<BackupService>()));
+if (privacyOptions.OfflineMode != OfflineMode.Never)
+{
+    services.AddSingleton<OfflineSyncService>(sp =>
+        new OfflineSyncService(
+            (IOfflineKeyValueStore)sp.GetRequiredService<IKeyValueStore>(),
+            TimeSpan.FromMilliseconds(privacyOptions.OfflineSyncIntervalMs),
+            sp.GetRequiredService<ILogger<OfflineSyncService>>()));
+}
 
 using var provider = services.BuildServiceProvider();
 cacheStats = provider.GetRequiredService<ICacheStats>();
 var baseStore = provider.GetRequiredService<IKeyValueStore>();
+var offlineStatusProvider = provider.GetRequiredService<IOfflineStatusProvider>();
+offlineStatusMetrics = offlineStatusProvider;
 CrossChainSyncService? crossChainSyncService = null;
+OfflineSyncService? offlineSyncService = provider.GetService<OfflineSyncService>();
 IKeyValueStore commandStore = baseStore;
 if (crossChainOptions.Enabled && crossChainOptions.Chains.Count > 0)
 {
@@ -354,6 +382,11 @@ if (crossChainSyncService is not null)
     await crossChainSyncService.StartAsync(cts.Token);
 }
 
+if (offlineSyncService is not null)
+{
+    await offlineSyncService.StartAsync(cts.Token);
+}
+
 var monitoringServers = new List<MonitoringHttpServer>();
 var monitoringTasks = new List<Task>();
 if (dashboardEnabled)
@@ -370,6 +403,7 @@ if (dashboardEnabled)
         backendStatusProvider,
         ethereumBridge,
         crossChainSyncService,
+        offlineStatusProvider,
         privacyMode: privacyOptions.PrivacyMode,
         didMode: privacyOptions.DidMode);
     monitoringServers.Add(dashboardServer);
@@ -390,6 +424,7 @@ if (metricsEnabled && (!dashboardEnabled || metricsPort != dashboardPort))
         backendStatusProvider,
         ethereumBridge,
         crossChainSyncService,
+        offlineStatusProvider,
         privacyMode: privacyOptions.PrivacyMode,
         didMode: privacyOptions.DidMode);
     monitoringServers.Add(metricsServer);
@@ -407,6 +442,11 @@ if (ethereumBridge is not null)
 if (crossChainSyncService is not null)
 {
     await crossChainSyncService.DisposeAsync();
+}
+
+if (offlineSyncService is not null)
+{
+    await offlineSyncService.DisposeAsync();
 }
 
 foreach (var monitoringServer in monitoringServers)
@@ -458,6 +498,28 @@ DidAuthMode GetDidModeFromSettings()
     }
 
     return DidAuthMode.None;
+}
+
+OfflineMode GetOfflineModeFromSettings()
+{
+    var configured = GetFirstSetting("SWARM_KEYDB_OFFLINE_MODE", "Offline:Mode");
+    if (Enum.TryParse<OfflineMode>(configured, ignoreCase: true, out var mode))
+    {
+        return mode;
+    }
+
+    return OfflineMode.Never;
+}
+
+OfflineJournalType GetOfflineJournalFromSettings()
+{
+    var configured = GetFirstSetting("SWARM_KEYDB_OFFLINE_JOURNAL", "Offline:Journal");
+    if (Enum.TryParse<OfflineJournalType>(configured, ignoreCase: true, out var journal))
+    {
+        return journal;
+    }
+
+    return OfflineJournalType.Memory;
 }
 
 IKeyIndex BuildKeyIndex(string path)

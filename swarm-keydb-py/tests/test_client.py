@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 
-from swarm_keydb import AsyncSwarmKeyDb, KeyNotFoundError, PrivacyMode, SwarmKeyDb
+from swarm_keydb import AsyncSwarmKeyDb, KeyNotFoundError, OfflineMode, PrivacyMode, SwarmKeyDb
 from swarm_keydb.client import DidAuthMode
 
 
@@ -136,6 +136,10 @@ class SwarmKeyDbTests(unittest.TestCase):
         )
         self.assertEqual(db._did_mode, DidAuthMode.ETHR_DID)
         self.assertEqual(db._did_rpc_url, "http://localhost:8545")
+
+    def test_offline_mode_option(self):
+        db = SwarmKeyDb(host="localhost", port=6379, redis_client=FakeRedis(), offline_mode=OfflineMode.AUTO)
+        self.assertEqual(db._offline_mode, OfflineMode.AUTO)
 
     def test_set_did_sends_authdid_without_proof(self):
         backend = FakeRedis()

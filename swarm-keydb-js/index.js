@@ -20,6 +20,12 @@ export const DidAuthMode = Object.freeze({
   EthrDid: 'ethr_did'
 });
 
+export const OfflineMode = Object.freeze({
+  Never: 'never',
+  Auto: 'auto',
+  Always: 'always'
+});
+
 export class SwarmKeyDb {
   /**
    * @param {object} options - Connection and feature options.
@@ -30,6 +36,7 @@ export class SwarmKeyDb {
    * @param {string}  [options.didMode]      - DID authentication mode (see DidAuthMode).
    * @param {string}  [options.didRpcUrl]    - Ethereum RPC URL used for on-chain DID resolution.
    * @param {string}  [options.didMethod]    - DID method string, e.g. "ethr" (default).
+   * @param {string}  [options.offlineMode]  - Offline mode (see OfflineMode).
    * @param {Function} [clientFactory]     - Optional factory for the underlying Redis client (for testing).
    */
   constructor(options, clientFactory) {
@@ -40,6 +47,7 @@ export class SwarmKeyDb {
     this.privacyKey = options.privacyKey;
     this.tokenToPlain = new Map();
     this.didMode = options.didMode ?? DidAuthMode.None;
+    this.offlineMode = options.offlineMode ?? OfflineMode.Never;
     this._currentDid = null;
   }
 

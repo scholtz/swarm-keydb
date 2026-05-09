@@ -1,5 +1,6 @@
 export type PrivacyMode = 'none' | 'oblivious_hashing' | 'full_psi';
 export type DidAuthMode = 'none' | 'ethr_did';
+export type OfflineMode = 'never' | 'auto' | 'always';
 
 export type SwarmKeyDbOptions = {
   host: string;
@@ -14,6 +15,8 @@ export type SwarmKeyDbOptions = {
   didRpcUrl?: string;
   /** DID method string, e.g. "ethr". */
   didMethod?: string;
+  /** Offline mode hint for parity with the C# store. */
+  offlineMode?: OfflineMode;
 };
 
 export type BatchEntry = { key: string; value: string };
@@ -32,6 +35,11 @@ export declare const PrivacyMode: {
 export declare const DidAuthMode: {
   readonly None: 'none';
   readonly EthrDid: 'ethr_did';
+};
+export declare const OfflineMode: {
+  readonly Never: 'never';
+  readonly Auto: 'auto';
+  readonly Always: 'always';
 };
 
 export declare class SwarmKeyDb {

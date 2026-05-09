@@ -28,6 +28,12 @@ class DidAuthMode:
     ETHR_DID = "ethr_did"
 
 
+class OfflineMode:
+    NEVER = "never"
+    AUTO = "auto"
+    ALWAYS = "always"
+
+
 class SwarmKeyDb:
     def __init__(
         self,
@@ -40,14 +46,17 @@ class SwarmKeyDb:
         did_mode: str = DidAuthMode.NONE,
         did_rpc_url: Optional[str] = None,
         did_method: str = "ethr",
+        offline_mode: str = OfflineMode.NEVER,
     ):
         self._client = redis_client or redis.Redis(host=host, port=port, password=password, decode_responses=True)
         self._privacy_mode = privacy_mode
         self._privacy_key = privacy_key
         self._token_to_plain: dict[str, str] = {}
+        self._offline_mode = offline_mode
         self._did_mode = did_mode
         self._did_rpc_url = did_rpc_url
         self._did_method = did_method
+        self._offline_mode = offline_mode
         self._current_did: Optional[str] = None
 
     def set_did(
@@ -184,11 +193,13 @@ class AsyncSwarmKeyDb:
         redis_client: Any = None,
         privacy_mode: str = PrivacyMode.NONE,
         privacy_key: Optional[str] = None,
+        offline_mode: str = OfflineMode.NEVER,
     ):
         self._client = redis_client or aioredis.Redis(host=host, port=port, password=password, decode_responses=True)
         self._privacy_mode = privacy_mode
         self._privacy_key = privacy_key
         self._token_to_plain: dict[str, str] = {}
+        self._offline_mode = offline_mode
 
     async def get(self, key: str) -> Optional[str]:
         _validate_key(key)

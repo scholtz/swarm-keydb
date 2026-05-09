@@ -17,6 +17,7 @@ public sealed class MonitoringHttpServer : IDisposable
     private readonly IBackendStatusProvider? _backendStatusProvider;
     private readonly EthereumBridgeService? _ethereumBridge;
     private readonly CrossChainSyncService? _crossChainSyncService;
+    private readonly IOfflineStatusProvider _offlineStatusProvider;
     private readonly string _privacyMode;
     private readonly string _didMode;
 
@@ -32,6 +33,7 @@ public sealed class MonitoringHttpServer : IDisposable
         IBackendStatusProvider? backendStatusProvider = null,
         EthereumBridgeService? ethereumBridge = null,
         CrossChainSyncService? crossChainSyncService = null,
+        IOfflineStatusProvider? offlineStatusProvider = null,
         PrivacyMode privacyMode = PrivacyMode.None,
         DidAuthMode didMode = DidAuthMode.None)
     {
@@ -44,6 +46,7 @@ public sealed class MonitoringHttpServer : IDisposable
         _backendStatusProvider = backendStatusProvider;
         _ethereumBridge = ethereumBridge;
         _crossChainSyncService = crossChainSyncService;
+        _offlineStatusProvider = offlineStatusProvider ?? NoOpOfflineStatusProvider.Instance;
         _privacyMode = privacyMode.ToString().ToLowerInvariant();
         _didMode = didMode.ToString().ToLowerInvariant();
         _listener.Prefixes.Add($"http://{(address.Equals(IPAddress.Any) ? "+" : address.ToString())}:{port}/");
@@ -100,6 +103,8 @@ public sealed class MonitoringHttpServer : IDisposable
                 new
                 {
                     status = degraded ? "degraded" : "healthy",
+                    offline_queue_depth = _offlineStatusProvider.QueueDepth,
+                    last_successful_sync_utc = _offlineStatusProvider.LastSuccessfulSyncUtc,
                     shards = shardHealth?.Select(static shard => new
                     {
                         shard = shard.Shard,
@@ -125,6 +130,8 @@ public sealed class MonitoringHttpServer : IDisposable
                 {
                     status = ready ? "ready" : "not_ready",
                     message,
+                    offline_queue_depth = _offlineStatusProvider.QueueDepth,
+                    last_successful_sync_utc = _offlineStatusProvider.LastSuccessfulSyncUtc,
                     shards = shardHealth?.Select(static shard => new
                     {
                         shard = shard.Shard,
@@ -317,10 +324,12 @@ public sealed class MonitoringHttpServer : IDisposable
                                           </head>
                                           <body>
                                             <h1>SwarmKeyDb Dashboard</h1>
-                                            <p>Privacy Mode: <strong>__PRIVACY_MODE__</strong></p>
-                                             <p>DID Auth Mode: <strong>__DID_MODE__</strong></p>
-                                            <p>Readiness: <span id="ready-status">loading...</span></p>
-                                            <h2>Cross-chain replication health</h2>
+                                             <p>Privacy Mode: <strong>__PRIVACY_MODE__</strong></p>
+                                              <p>DID Auth Mode: <strong>__DID_MODE__</strong></p>
+                                             <p>Readiness: <span id="ready-status">loading...</span></p>
+                                             <p>Offline Queue: <strong id="offline-queue-depth">loading...</strong></p>
+                                             <p>Last Sync: <strong id="offline-last-sync">loading...</strong></p>
+                                             <h2>Cross-chain replication health</h2>
                                             <table>
                                               <thead>
                                                 <tr><th>Chain</th><th>Pending</th><th>Synced</th><th>Failed</th><th>Health</th></tr>
@@ -348,6 +357,8 @@ public sealed class MonitoringHttpServer : IDisposable
                                               const syncRefreshButton = document.getElementById('sync-refresh');
                                               const metricsEl = document.getElementById('metrics');
                                               const logsEl = document.getElementById('logs');
+                                              const offlineQueueDepthEl = document.getElementById('offline-queue-depth');
+                                              const offlineLastSyncEl = document.getElementById('offline-last-sync');
                                               function parseCounters(metricsText) {
                                                const wanted = [
                                                  'swarmkeydb_operations_total{operation="get",status="success"}',
@@ -363,11 +374,15 @@ public sealed class MonitoringHttpServer : IDisposable
                                                return metricsText.split('\n').filter(line => wanted.some(prefix => line.startsWith(prefix))).join('\n');
                                              }
                                              async function refreshReady() {
-                                               const response = await fetch('/ready');
-                                               const data = await response.json();
-                                               readyStatus.textContent = data.status + ' (' + data.message + ')';
-                                               readyStatus.className = response.ok ? 'ok' : 'bad';
-                                             }
+                                                const response = await fetch('/ready');
+                                                const data = await response.json();
+                                                readyStatus.textContent = data.status + ' (' + data.message + ')';
+                                                readyStatus.className = response.ok ? 'ok' : 'bad';
+                                                offlineQueueDepthEl.textContent = String(data.offline_queue_depth ?? 0);
+                                                offlineLastSyncEl.textContent = data.last_successful_sync_utc
+                                                  ? new Date(data.last_successful_sync_utc).toLocaleString()
+                                                  : 'never';
+                                              }
                                               async function refreshMetrics() {
                                                 const response = await fetch('/metrics');
                                                 const text = await response.text();
