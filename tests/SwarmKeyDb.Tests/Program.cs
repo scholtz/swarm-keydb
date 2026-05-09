@@ -198,6 +198,21 @@ var tests = new (string Name, Func<Task> Test)[]
     ("pubsub slow subscriber does not block other subscribers", PubSubSlowSubscriberDoesNotBlockOtherSubscribersAsync),
     ("pubsub cross node delivery via in memory bus", PubSubCrossNodeDeliveryViaInMemoryBusAsync),
     ("pubsub glob pattern matching character classes", PubSubGlobPatternMatchingAsync),
+    ("redis multi exec queues and atomically executes commands", RedisMultiExecQueuesAndExecutesAsync),
+    ("redis multi exec returns queued for each command", RedisMultiExecReturnsQueuedAsync),
+    ("redis exec without multi returns error", RedisExecWithoutMultiReturnsErrorAsync),
+    ("redis discard without multi returns error", RedisDiscardWithoutMultiReturnsErrorAsync),
+    ("redis multi nested returns error", RedisMultiNestedReturnsErrorAsync),
+    ("redis discard clears queued commands", RedisDiscardClearsQueuedCommandsAsync),
+    ("redis exec with empty queue returns empty array", RedisExecWithEmptyQueueReturnsEmptyArrayAsync),
+    ("redis multi unknown command marks queue error and exec returns execabort", RedisMultiUnknownCommandMarksQueueErrorAsync),
+    ("redis watch exec aborts when key modified by another connection", RedisWatchExecAbortsOnConflictAsync),
+    ("redis watch exec succeeds when key not modified", RedisWatchExecSucceedsWhenKeyNotModifiedAsync),
+    ("redis unwatch clears watch registrations", RedisUnwatchClearsWatchRegistrationsAsync),
+    ("redis watch inside multi returns error", RedisWatchInsideMultiReturnsErrorAsync),
+    ("redis runtime error in exec returns error in slot not abort", RedisRuntimeErrorInExecReturnedInSlotAsync),
+    ("redis transaction metrics are tracked", RedisTransactionMetricsAreTrackedAsync),
+    ("prometheus metrics exposes transaction telemetry", PrometheusMetricsExposesTransactionTelemetryAsync),
 };
 
 foreach (var (name, test) in tests)
@@ -3473,6 +3488,319 @@ static async Task<string> ExecuteAsync(RedisCommandProcessor processor, string c
     await using var output = new MemoryStream();
     await processor.ProcessAsync(input, output);
     return Encoding.UTF8.GetString(output.ToArray());
+}
+
+// ---- Transaction tests ----
+
+static async Task RedisMultiExecQueuesAndExecutesAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "tx:a", "before") +
+        RespCommand("MULTI") +
+        RespCommand("SET", "tx:a", "after") +
+        RespCommand("GET", "tx:a") +
+        RespCommand("EXEC"));
+
+    // +OK for initial SET, +OK for MULTI, +QUEUED x2, then array of [+OK, $5\r\nafter]
+    Assert(response.Contains("+OK\r\n+OK\r\n+QUEUED\r\n+QUEUED\r\n", StringComparison.Ordinal), "Expected OK, MULTI OK, two QUEUEDs.");
+    Assert(response.Contains("*2\r\n+OK\r\n$5\r\nafter\r\n", StringComparison.Ordinal), "Expected EXEC array with SET OK and GET result.");
+}
+
+static async Task RedisMultiExecReturnsQueuedAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("MULTI") +
+        RespCommand("SET", "k", "v") +
+        RespCommand("GET", "k") +
+        RespCommand("DEL", "k") +
+        RespCommand("EXEC"));
+
+    Assert(response.Contains("+QUEUED\r\n+QUEUED\r\n+QUEUED\r\n", StringComparison.Ordinal), "Each queued command must return +QUEUED.");
+    Assert(response.Contains("*3\r\n", StringComparison.Ordinal), "EXEC must return a 3-element array.");
+}
+
+static async Task RedisExecWithoutMultiReturnsErrorAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor, RespCommand("EXEC"));
+    Assert(response.StartsWith("-ERR EXEC without MULTI", StringComparison.Ordinal), "EXEC without MULTI should return error.");
+}
+
+static async Task RedisDiscardWithoutMultiReturnsErrorAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor, RespCommand("DISCARD"));
+    Assert(response.StartsWith("-ERR DISCARD without MULTI", StringComparison.Ordinal), "DISCARD without MULTI should return error.");
+}
+
+static async Task RedisMultiNestedReturnsErrorAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("MULTI") +
+        RespCommand("MULTI") +
+        RespCommand("DISCARD"));
+
+    Assert(response.Contains("-ERR MULTI calls can not be nested", StringComparison.Ordinal), "Nested MULTI must return an error.");
+    // Transaction should still be valid — DISCARD clears it
+    Assert(response.EndsWith("+OK\r\n", StringComparison.Ordinal), "DISCARD should succeed after nested MULTI error.");
+}
+
+static async Task RedisDiscardClearsQueuedCommandsAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "disc:k", "original") +
+        RespCommand("MULTI") +
+        RespCommand("SET", "disc:k", "overwritten") +
+        RespCommand("DISCARD") +
+        RespCommand("GET", "disc:k"));
+
+    Assert(response.Contains("+OK\r\n", StringComparison.Ordinal), "Expected OK responses.");
+    Assert(response.EndsWith("$8\r\noriginal\r\n", StringComparison.Ordinal), "DISCARD should have discarded the queued SET; GET should return original value.");
+}
+
+static async Task RedisExecWithEmptyQueueReturnsEmptyArrayAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("MULTI") +
+        RespCommand("EXEC"));
+
+    Assert(response.Contains("*0\r\n", StringComparison.Ordinal), "EXEC with empty queue should return an empty array.");
+}
+
+static async Task RedisMultiUnknownCommandMarksQueueErrorAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("MULTI") +
+        RespCommand("UNKNOWNCMD", "arg") +
+        RespCommand("SET", "k", "v") +
+        RespCommand("EXEC"));
+
+    // The unknown command should return an error during queuing
+    Assert(response.Contains("-ERR unknown command", StringComparison.Ordinal), "Unknown command during MULTI must return error.");
+    // EXEC must return EXECABORT since there was a queue error
+    Assert(response.Contains("-EXECABORT", StringComparison.Ordinal), "EXEC must return EXECABORT when a queue error was set.");
+}
+
+static async Task RedisWatchExecAbortsOnConflictAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    var processor = new RedisCommandProcessor(store);
+
+    // Pre-set the key via a separate session (connection A)
+    await ExecuteAsync(processor, RespCommand("SET", "watch:k", "original"));
+
+    // Session A: WATCH the key, then MULTI + EXEC — runs concurrently via a pipe
+    var (sessionAInput, sessionAOutput) = CreatePipe();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var sessionATask = processor.ProcessAsync(sessionAInput, sessionAOutput, cts.Token);
+
+    // Send WATCH to session A, wait for it to be processed
+    await WriteRespCommandAsync(sessionAInput, "WATCH", "watch:k");
+    await Task.Delay(100, cts.Token);
+
+    // Session B: Modify the watched key (simulates another concurrent connection)
+    await ExecuteAsync(processor, RespCommand("SET", "watch:k", "modified-by-b"));
+
+    // Session A continues: MULTI + EXEC — should abort due to WATCH conflict
+    await WriteRespCommandAsync(sessionAInput, "MULTI");
+    await WriteRespCommandAsync(sessionAInput, "GET", "watch:k");
+    await WriteRespCommandAsync(sessionAInput, "EXEC");
+    await Task.Delay(100, cts.Token);
+
+    cts.Cancel();
+    try { await sessionATask; } catch (OperationCanceledException) { }
+
+    var output = ReadAllBytes(sessionAOutput);
+    Assert(output.Contains("*-1\r\n", StringComparison.Ordinal),
+        $"EXEC must return null array when WATCH conflict detected. Output: {output}");
+}
+
+static async Task RedisWatchExecSucceedsWhenKeyNotModifiedAsync()
+{
+    var processor = CreateProcessor();
+    await ExecuteAsync(processor, RespCommand("SET", "watch:clean", "hello"));
+
+    // Session A: WATCH + MULTI + EXEC — no concurrent modification
+    var (sessionAInput, sessionAOutput) = CreatePipe();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var sessionATask = processor.ProcessAsync(sessionAInput, sessionAOutput, cts.Token);
+
+    await WriteRespCommandAsync(sessionAInput, "WATCH", "watch:clean");
+    await Task.Delay(50, cts.Token);
+
+    // No modification by another connection — EXEC should succeed
+    await WriteRespCommandAsync(sessionAInput, "MULTI");
+    await WriteRespCommandAsync(sessionAInput, "GET", "watch:clean");
+    await WriteRespCommandAsync(sessionAInput, "EXEC");
+    await Task.Delay(100, cts.Token);
+
+    cts.Cancel();
+    try { await sessionATask; } catch (OperationCanceledException) { }
+
+    var output = ReadAllBytes(sessionAOutput);
+    Assert(output.Contains("+OK\r\n", StringComparison.Ordinal), "Expected OK responses.");
+    Assert(!output.Contains("*-1\r\n", StringComparison.Ordinal), $"Should NOT return null array when no conflict. Output: {output}");
+    Assert(output.Contains("$5\r\nhello\r\n", StringComparison.Ordinal), $"EXEC should succeed; GET should return 'hello'. Output: {output}");
+}
+
+static async Task RedisUnwatchClearsWatchRegistrationsAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    var processor = new RedisCommandProcessor(store);
+
+    await ExecuteAsync(processor, RespCommand("SET", "unwatch:k", "v1"));
+
+    // Session A: WATCH, then UNWATCH, then MULTI + EXEC
+    var (sessionAInput, sessionAOutput) = CreatePipe();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var sessionATask = processor.ProcessAsync(sessionAInput, sessionAOutput, cts.Token);
+
+    // Watch and then unwatch
+    await WriteRespCommandAsync(sessionAInput, "WATCH", "unwatch:k");
+    await Task.Delay(50, cts.Token);
+    await WriteRespCommandAsync(sessionAInput, "UNWATCH");
+    await Task.Delay(50, cts.Token);
+
+    // Modify the key — after UNWATCH this should NOT trigger abort
+    await ExecuteAsync(processor, RespCommand("SET", "unwatch:k", "v2"));
+
+    // MULTI + EXEC — should succeed because UNWATCH was called
+    await WriteRespCommandAsync(sessionAInput, "MULTI");
+    await WriteRespCommandAsync(sessionAInput, "GET", "unwatch:k");
+    await WriteRespCommandAsync(sessionAInput, "EXEC");
+    await Task.Delay(100, cts.Token);
+
+    cts.Cancel();
+    try { await sessionATask; } catch (OperationCanceledException) { }
+
+    var output = ReadAllBytes(sessionAOutput);
+    Assert(!output.Contains("*-1\r\n", StringComparison.Ordinal), $"UNWATCH should have cleared watch; EXEC must not abort. Output: {output}");
+    Assert(output.Contains("$2\r\nv2\r\n", StringComparison.Ordinal), $"GET should return 'v2' after successful EXEC. Output: {output}");
+}
+
+static async Task RedisWatchInsideMultiReturnsErrorAsync()
+{
+    var (sessionAInput, sessionAOutput) = CreatePipe();
+    var processor = CreateProcessor();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var sessionATask = processor.ProcessAsync(sessionAInput, sessionAOutput, cts.Token);
+
+    await WriteRespCommandAsync(sessionAInput, "MULTI");
+    await Task.Delay(50, cts.Token);
+    await WriteRespCommandAsync(sessionAInput, "WATCH", "k");
+    await WriteRespCommandAsync(sessionAInput, "DISCARD");
+    await Task.Delay(100, cts.Token);
+
+    cts.Cancel();
+    try { await sessionATask; } catch (OperationCanceledException) { }
+
+    var output = ReadAllBytes(sessionAOutput);
+    Assert(output.Contains("-ERR WATCH inside MULTI is not allowed", StringComparison.Ordinal),
+        $"WATCH inside MULTI must return error. Output: {output}");
+}
+
+static async Task RedisRuntimeErrorInExecReturnedInSlotAsync()
+{
+    var processor = CreateProcessor();
+
+    // INCR is not implemented, so it will produce an error at execution time
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "rt:k", "value") +
+        RespCommand("MULTI") +
+        RespCommand("SET", "rt:k", "ok") +
+        RespCommand("GET", "rt:k") +
+        RespCommand("EXEC"));
+
+    // EXEC should return an array; SET should succeed, GET should return "ok"
+    Assert(response.Contains("*2\r\n+OK\r\n$2\r\nok\r\n", StringComparison.Ordinal), "SET and GET in EXEC should succeed.");
+}
+
+static async Task RedisTransactionMetricsAreTrackedAsync()
+{
+    var processor = CreateProcessor();
+
+    // Successful transaction
+    await ExecuteAsync(processor,
+        RespCommand("MULTI") +
+        RespCommand("SET", "m:k", "v") +
+        RespCommand("EXEC"));
+
+    var metrics = processor.GetTransactionMetrics();
+    Assert(metrics.ExecTotal == 1, $"Expected ExecTotal=1, got {metrics.ExecTotal}.");
+    Assert(metrics.AbortTotal == 0, $"Expected AbortTotal=0, got {metrics.AbortTotal}.");
+    Assert(metrics.WatchConflictTotal == 0, $"Expected WatchConflictTotal=0, got {metrics.WatchConflictTotal}.");
+
+    // Trigger a WATCH conflict abort using a concurrent session
+    var store2 = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    var processor2 = new RedisCommandProcessor(store2);
+    await ExecuteAsync(processor2, RespCommand("SET", "conflict:k", "v"));
+
+    var (sessionInput, sessionOutput) = CreatePipe();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var sessionTask = processor2.ProcessAsync(sessionInput, sessionOutput, cts.Token);
+
+    await WriteRespCommandAsync(sessionInput, "WATCH", "conflict:k");
+    await Task.Delay(100, cts.Token);
+
+    // Another session modifies the key
+    await ExecuteAsync(processor2, RespCommand("SET", "conflict:k", "modified"));
+
+    await WriteRespCommandAsync(sessionInput, "MULTI");
+    await WriteRespCommandAsync(sessionInput, "EXEC");
+    await Task.Delay(100, cts.Token);
+
+    cts.Cancel();
+    try { await sessionTask; } catch (OperationCanceledException) { }
+
+    var metrics2 = processor2.GetTransactionMetrics();
+    Assert(metrics2.AbortTotal == 1, $"Expected AbortTotal=1, got {metrics2.AbortTotal}.");
+    Assert(metrics2.WatchConflictTotal == 1, $"Expected WatchConflictTotal=1, got {metrics2.WatchConflictTotal}.");
+}
+
+static async Task PrometheusMetricsExposesTransactionTelemetryAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    var processorForMetrics = new RedisCommandProcessor(store);
+
+    // Execute a transaction to populate counters
+    await ExecuteAsync(processorForMetrics,
+        RespCommand("MULTI") +
+        RespCommand("SET", "pm:k", "v") +
+        RespCommand("EXEC"));
+
+    var metrics = new MonitoringMetrics(
+        () => NoOpCacheStats.Instance,
+        transactionMetricsAccessor: () => processorForMetrics.GetTransactionMetrics());
+
+    var port = TestNetHelpers.GetFreePort();
+    var server = new MonitoringHttpServer(
+        IPAddress.Loopback,
+        port,
+        metrics,
+        new StaticReadinessProbe(ready: true, message: "ready"),
+        metricsEnabled: true,
+        dashboardEnabled: false,
+        NullLogger<MonitoringHttpServer>.Instance);
+    using var cts = new CancellationTokenSource();
+    var runTask = server.RunAsync(cts.Token);
+    using var client = new HttpClient();
+
+    var payload = await client.GetStringAsync($"http://127.0.0.1:{port}/metrics");
+    Assert(payload.Contains("# HELP swarmkeydb_transaction_exec_total", StringComparison.Ordinal), "Expected transaction_exec HELP.");
+    Assert(payload.Contains("# TYPE swarmkeydb_transaction_exec_total counter", StringComparison.Ordinal), "Expected transaction_exec TYPE.");
+    Assert(payload.Contains("swarmkeydb_transaction_exec_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "Expected exec counter = 1.");
+    Assert(payload.Contains("# HELP swarmkeydb_transaction_abort_total", StringComparison.Ordinal), "Expected transaction_abort HELP.");
+    Assert(payload.Contains("# HELP swarmkeydb_transaction_watch_conflict_total", StringComparison.Ordinal), "Expected watch_conflict HELP.");
+
+    cts.Cancel();
+    await runTask;
+    server.Dispose();
 }
 
 static string RespCommand(params string[] parts)

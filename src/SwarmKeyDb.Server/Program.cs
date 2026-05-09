@@ -50,13 +50,15 @@ IOfflineStatusProvider? offlineStatusMetrics = null;
 IConsistencyVerificationStatusProvider? consistencyStatusMetrics = null;
 ICacheSyncStatusProvider? cacheSyncStatusMetrics = null;
 PubSubManager? pubSubManager = null;
+RedisCommandProcessor? processorRef = null;
 var monitoringMetrics = new MonitoringMetrics(
     () => cacheStats ?? NoOpCacheStats.Instance,
     () => offlineStatusMetrics ?? NoOpOfflineStatusProvider.Instance,
     () => consistencyStatusMetrics ?? NoOpConsistencyVerificationStatusProvider.Instance,
     () => cacheSyncStatusMetrics ?? NoOpCacheSyncStatusProvider.Instance,
     privacyMode: privacyOptions.PrivacyMode,
-    pubSubManagerAccessor: () => pubSubManager);
+    pubSubManagerAccessor: () => pubSubManager,
+    transactionMetricsAccessor: () => processorRef?.GetTransactionMetrics() ?? new TransactionMetricsSnapshot(0, 0, 0));
 
 var cacheOptions = new CacheOptions
 {
@@ -445,6 +447,7 @@ var processor = new RedisCommandProcessor(
     provider.GetService<IDecentralizedIdentityProvider>(),
     resyncCoordinator,
     pubSubManager);
+processorRef = processor;
 var server = new RedisServer(
     bind,
     port,
