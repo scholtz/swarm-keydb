@@ -4,7 +4,7 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 
 ## Features
 
-- Redis-compatible commands for `PING`, `SET`, `SETEX`, `PSETEX`, `GET`, `MGET`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXISTS`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `KEYS`, `SCAN`, `TYPE`, `SWARM.RESYNC`, and `QUIT`.
+- Redis-compatible commands for `PING`, `SET`, `SETEX`, `PSETEX`, `GET`, `MGET`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXISTS`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `KEYS`, `SCAN`, `TYPE`, `XADD`, `XRANGE`, `XREVRANGE`, `XLEN`, `SWARM.RESYNC`, and `QUIT`.
 - Connection-scoped Ethereum-address ACL enforcement via `AUTHADDR` for shared databases.
 - Secure key rotation plus immutable Swarm backup/restore workflows for encrypted databases.
 - String, JSON, and binary value helpers in the `SwarmKeyDbClient` library.
@@ -180,6 +180,8 @@ MGET a b missing                  -> *3\r\n$1\r\n1\r\n$1\r\n2\r\n$-1
 PERSIST session:token             -> :1 (or :0 when no TTL exists)
 SET profile:name Ada EX 60        -> +OK
 SWARM.RESYNC PARTIAL              -> {"status":"ok","mode":"partial",...}
+XADD events * type created user ada -> $<id-len>\r\n<ms>-<seq>
+XRANGE events - +                  -> *1\r\n*2\r\n$<id-len>\r\n<ms>-<seq>\r\n*4\r\n$4\r\ntype\r\n$7\r\ncreated\r\n$4\r\nuser\r\n$3\r\nada
 ```
 
 ## Querying
@@ -498,7 +500,7 @@ redis-cli -p 6379 GET profile:name
 
 ### Access control lists (ACLs)
 
-The server supports Ethereum-address-based access control for shared databases. When ACLs are enabled, reads (`GET`, `MGET`, `KEYS`, `SCAN`, `TYPE`, `TTL`, `PTTL`) require read permission, and writes (`SET`, `SETEX`, `PSETEX`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PERSIST`) require write permission. `admin` grants both.
+The server supports Ethereum-address-based access control for shared databases. When ACLs are enabled, reads (`GET`, `MGET`, `KEYS`, `SCAN`, `TYPE`, `TTL`, `PTTL`, `XRANGE`, `XREVRANGE`, `XLEN`) require read permission, and writes (`SET`, `SETEX`, `PSETEX`, `MSET`, `MSETNX`, `DEL`, `MDEL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PERSIST`, `XADD`) require write permission. `admin` grants both.
 
 Configure it with:
 

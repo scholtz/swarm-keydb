@@ -37,6 +37,10 @@ var tests = new (string Name, Func<Task> Test)[]
     ("redis backendmeta command returns backend metadata", RedisBackendMetaCommandReturnsMetadataAsync),
     ("redis protocol supports set get exists delete", RedisProtocolRoundTripAsync),
     ("redis protocol supports keys and scan", RedisProtocolKeyIterationAsync),
+    ("redis stream xadd xrange xrevrange and xlen round trip", RedisStreamRoundTripAsync),
+    ("redis stream validates id ordering and formatting", RedisStreamIdValidationAsync),
+    ("redis stream supports maxlen trimming", RedisStreamMaxLenTrimmingAsync),
+    ("redis stream commands return wrongtype for string keys", RedisStreamWrongTypeErrorsAsync),
     ("prefix scan returns matching keys", PrefixScanReturnsMatchingKeysAsync),
     ("range scan supports boundaries and reverse order", RangeScanSupportsBoundariesAndReverseOrderAsync),
     ("range scan rejects invalid bounds", RangeScanRejectsInvalidBoundsAsync),
@@ -834,6 +838,76 @@ static async Task RedisProtocolKeyIterationAsync()
 
     Assert(response.Contains("*2\r\n$5\r\napp:a\r\n$5\r\napp:b\r\n", StringComparison.Ordinal), "KEYS should return matching app keys.");
     Assert(response.EndsWith("*2\r\n$1\r\n1\r\n*1\r\n$5\r\napp:a\r\n", StringComparison.Ordinal), "SCAN should return next cursor and one key.");
+}
+
+static async Task RedisStreamRoundTripAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("XADD", "events", "1-0", "type", "created", "user", "alice") +
+        RespCommand("XADD", "events", "1-*", "type", "updated", "user", "bob") +
+        RespCommand("XRANGE", "events", "-", "+") +
+        RespCommand("XRANGE", "events", "-", "+", "COUNT", "1") +
+        RespCommand("XREVRANGE", "events", "+", "-", "COUNT", "1") +
+        RespCommand("XLEN", "events") +
+        RespCommand("XLEN", "missing:events"));
+
+    Assert(response.Contains("$3\r\n1-0\r\n", StringComparison.Ordinal), "XADD with explicit ID should echo ID.");
+    Assert(response.Contains("$3\r\n1-1\r\n", StringComparison.Ordinal), "XADD with partial ID should auto-generate a monotonic ID.");
+    Assert(response.Contains("*2\r\n*2\r\n$3\r\n1-0\r\n*4\r\n$4\r\ntype\r\n$7\r\ncreated\r\n$4\r\nuser\r\n$5\r\nalice\r\n", StringComparison.Ordinal),
+        "XRANGE should return ascending stream entries in Redis nested-array format.");
+    Assert(response.Contains("*1\r\n*2\r\n$3\r\n1-0\r\n", StringComparison.Ordinal), "XRANGE COUNT 1 should return at most one entry.");
+    Assert(response.Contains("*1\r\n*2\r\n$3\r\n1-1\r\n", StringComparison.Ordinal), "XREVRANGE COUNT 1 should return the most recent entry first.");
+    Assert(response.EndsWith(":2\r\n:0\r\n", StringComparison.Ordinal), "XLEN should return stream length and 0 for missing key.");
+}
+
+static async Task RedisStreamIdValidationAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("XADD", "logs", "2-1", "f", "v") +
+        RespCommand("XADD", "logs", "2-1", "f", "dup") +
+        RespCommand("XADD", "logs", "1-9", "f", "old") +
+        RespCommand("XADD", "logs", "0-0", "f", "zero") +
+        RespCommand("XADD", "logs", "bad-id", "f", "bad") +
+        RespCommand("XRANGE", "logs", "zzz", "+"));
+
+    Assert(response.Contains("$3\r\n2-1\r\n", StringComparison.Ordinal), "Initial XADD should succeed.");
+    Assert(response.Contains("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n", StringComparison.Ordinal),
+        "XADD must reject duplicate/out-of-order IDs.");
+    Assert(response.Contains("-ERR The ID specified in XADD must be greater than 0-0\r\n", StringComparison.Ordinal),
+        "XADD must reject the reserved 0-0 ID.");
+    Assert(response.Contains("-ERR Invalid stream ID specified as stream command argument\r\n", StringComparison.Ordinal),
+        "XADD/XRANGE must reject malformed stream IDs.");
+}
+
+static async Task RedisStreamMaxLenTrimmingAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("XADD", "trim:events", "MAXLEN", "~", "2", "1-0", "f", "v1") +
+        RespCommand("XADD", "trim:events", "MAXLEN", "~", "2", "2-0", "f", "v2") +
+        RespCommand("XADD", "trim:events", "MAXLEN", "~", "2", "3-0", "f", "v3") +
+        RespCommand("XRANGE", "trim:events", "-", "+") +
+        RespCommand("XLEN", "trim:events"));
+
+    Assert(response.Contains("*2\r\n*2\r\n$3\r\n2-0\r\n*2\r\n$1\r\nf\r\n$2\r\nv2\r\n*2\r\n$3\r\n3-0\r\n*2\r\n$1\r\nf\r\n$2\r\nv3\r\n", StringComparison.Ordinal),
+        "MAXLEN trimming should retain only the newest entries.");
+    Assert(response.EndsWith(":2\r\n", StringComparison.Ordinal), "XLEN should reflect trimmed stream size.");
+}
+
+static async Task RedisStreamWrongTypeErrorsAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("SET", "plain:key", "value") +
+        RespCommand("XADD", "plain:key", "*", "f", "v") +
+        RespCommand("XRANGE", "plain:key", "-", "+") +
+        RespCommand("XREVRANGE", "plain:key", "+", "-") +
+        RespCommand("XLEN", "plain:key"));
+
+    Assert(response.Contains("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", StringComparison.Ordinal),
+        "Stream commands must return WRONGTYPE for non-stream keys.");
 }
 
 static async Task PrefixScanReturnsMatchingKeysAsync()

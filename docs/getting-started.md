@@ -39,6 +39,28 @@ dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
 
 Then run the same `SET`/`GET` commands above.
 
+## Stream quickstart (`XADD` + `XRANGE`)
+
+```bash
+redis-cli -p 6379 XADD events * type created user alice
+redis-cli -p 6379 XADD events * type updated user alice
+redis-cli -p 6379 XRANGE events - +
+redis-cli -p 6379 XREVRANGE events + - COUNT 1
+redis-cli -p 6379 XLEN events
+```
+
+Expected shape:
+
+```text
+<ms>-<seq>
+1) 1) "<ms>-<seq>"
+   2) 1) "type"
+      2) "created"
+      3) "user"
+      4) "alice"
+...
+```
+
 ## IPFS-backed quickstart
 
 ```bash

@@ -10,6 +10,13 @@ namespace SwarmKeyDb;
 
 public sealed class RedisCommandProcessor : IDisposable
 {
+    private const string WrongTypeError = "WRONGTYPE Operation against a key holding the wrong kind of value";
+    private static readonly byte[] StreamValueMagicPrefix = "SKDBSTREAM1:"u8.ToArray();
+    private static readonly JsonSerializerOptions StreamJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+
     private readonly IKeyValueStore _store;
     private readonly IEthAddressAccessor? _ethAddressAccessor;
     private readonly IDidContextAccessor? _didContextAccessor;
@@ -267,6 +274,10 @@ public sealed class RedisCommandProcessor : IDisposable
         }
     }
 
+    private sealed record StreamData(IReadOnlyList<StreamEntry> Entries, ulong LastTimestamp, ulong LastSequence);
+    private sealed record StreamEntry(string Id, ulong Timestamp, ulong Sequence, IReadOnlyList<StreamField> Fields);
+    private sealed record StreamField(byte[] Name, byte[] Value);
+
     /// <summary>Commands that are valid inside a MULTI block (unknown commands abort the transaction).</summary>
     private static readonly HashSet<string> KnownQueueableCommands = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -275,6 +286,7 @@ public sealed class RedisCommandProcessor : IDisposable
         "DEL", "MDEL", "MGET", "MSET", "MSETNX",
         "EXISTS", "EXPIRE", "PEXPIRE", "EXPIREAT",
         "TTL", "PTTL", "PERSIST",
+        "XADD", "XRANGE", "XREVRANGE", "XLEN",
         "KEYS", "SCAN", "TYPE",
         "BACKUP", "RESTOREDB", "ROTATEKEY", "BACKENDMETA",
         "SWARM.RESYNC", "PUBLISH", "PUBSUB", "QUIT",
@@ -459,6 +471,13 @@ public sealed class RedisCommandProcessor : IDisposable
                 for (var i = 1; i < args.Count - 1; i += 2)
                 {
                     NotifyKeyMutated(args[i].AsString());
+                }
+                break;
+
+            case "XADD":
+                if (args.Count >= 2)
+                {
+                    NotifyKeyMutated(args[1].AsString());
                 }
                 break;
         }
@@ -698,6 +717,10 @@ public sealed class RedisCommandProcessor : IDisposable
                 "KEYS" => await KeysAsync(args, cancellationToken).ConfigureAwait(false),
                 "SCAN" => await ScanAsync(args, cancellationToken).ConfigureAwait(false),
                 "TYPE" => await TypeAsync(args, cancellationToken).ConfigureAwait(false),
+                "XADD" => await XAddAsync(args, cancellationToken).ConfigureAwait(false),
+                "XRANGE" => await XRangeAsync(args, reverse: false, cancellationToken).ConfigureAwait(false),
+                "XREVRANGE" => await XRangeAsync(args, reverse: true, cancellationToken).ConfigureAwait(false),
+                "XLEN" => await XLenAsync(args, cancellationToken).ConfigureAwait(false),
                 "BACKUP" => await BackupAsync(args, cancellationToken).ConfigureAwait(false),
                 "RESTOREDB" => await RestoreDbAsync(args, cancellationToken).ConfigureAwait(false),
                 "ROTATEKEY" => await RotateKeyAsync(args, cancellationToken).ConfigureAwait(false),
@@ -1240,6 +1263,179 @@ public sealed class RedisCommandProcessor : IDisposable
         });
     }
 
+    private async Task<RespValue> XAddAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        if (args.Count < 5)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'XADD' command");
+        }
+
+        var key = args[1].AsString();
+        long? maxLen = null;
+        var approximate = false;
+        var index = 2;
+        if (index < args.Count && args[index].AsString().Equals("MAXLEN", StringComparison.OrdinalIgnoreCase))
+        {
+            index++;
+            if (index >= args.Count)
+            {
+                return RespValue.Error("ERR wrong number of arguments for 'XADD' command");
+            }
+
+            var mode = args[index].AsString();
+            if (mode == "~")
+            {
+                approximate = true;
+                index++;
+            }
+            else if (mode == "=")
+            {
+                index++;
+            }
+
+            if (index >= args.Count || !long.TryParse(args[index].AsString(), out var parsedMaxLen) || parsedMaxLen < 0)
+            {
+                return RespValue.Error("ERR value is not an integer or out of range");
+            }
+
+            maxLen = parsedMaxLen;
+            index++;
+        }
+
+        if (index >= args.Count)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'XADD' command");
+        }
+
+        var idToken = args[index].AsString();
+        index++;
+        if (args.Count - index < 2 || ((args.Count - index) % 2) != 0)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'XADD' command");
+        }
+
+        var fields = new List<StreamField>((args.Count - index) / 2);
+        for (var i = index; i < args.Count; i += 2)
+        {
+            fields.Add(new StreamField(args[i].Bytes ?? Array.Empty<byte>(), args[i + 1].Bytes ?? Array.Empty<byte>()));
+        }
+
+        await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var existing = await _store.GetAsync(key, cancellationToken).ConfigureAwait(false);
+            if (!TryReadStream(existing, out var stream))
+            {
+                return RespValue.Error(WrongTypeError);
+            }
+
+            stream ??= new StreamData(Array.Empty<StreamEntry>(), 0, 0);
+            if (!TryResolveXAddId(idToken, stream.LastTimestamp, stream.LastSequence, out var timestamp, out var sequence, out var id, out var error))
+            {
+                return RespValue.Error(error!);
+            }
+
+            var entries = stream.Entries.ToList();
+            entries.Add(new StreamEntry(id!, timestamp, sequence, fields));
+
+            if (maxLen is { } trimTo && entries.Count > trimTo)
+            {
+                var removeCount = entries.Count - (int)trimTo;
+                if (approximate && removeCount == 1 && entries.Count > trimTo + 32)
+                {
+                    removeCount = entries.Count - (int)trimTo;
+                }
+
+                entries.RemoveRange(0, removeCount);
+            }
+
+            var updated = new StreamData(entries, timestamp, sequence);
+            await _store.PutAsync(key, SerializeStream(updated), cancellationToken).ConfigureAwait(false);
+            return RespValue.BulkString(id);
+        }
+        finally
+        {
+            _mutationGate.Release();
+        }
+    }
+
+    private async Task<RespValue> XRangeAsync(IReadOnlyList<RespValue> args, bool reverse, CancellationToken cancellationToken)
+    {
+        var command = reverse ? "XREVRANGE" : "XRANGE";
+        if (args.Count != 4 && args.Count != 6)
+        {
+            return RespValue.Error($"ERR wrong number of arguments for '{command}' command");
+        }
+
+        long? count = null;
+        if (args.Count == 6)
+        {
+            if (!args[4].AsString().Equals("COUNT", StringComparison.OrdinalIgnoreCase))
+            {
+                return RespValue.Error("ERR syntax error");
+            }
+
+            if (!long.TryParse(args[5].AsString(), out var parsedCount) || parsedCount <= 0)
+            {
+                return RespValue.Error("ERR value is not an integer or out of range");
+            }
+
+            count = parsedCount;
+        }
+
+        var key = args[1].AsString();
+        var existing = await _store.GetAsync(key, cancellationToken).ConfigureAwait(false);
+        if (!TryReadStream(existing, out var stream))
+        {
+            return RespValue.Error(WrongTypeError);
+        }
+
+        if (stream is null || stream.Entries.Count == 0)
+        {
+            return RespValue.Array(Array.Empty<RespValue>());
+        }
+
+        var startToken = reverse ? args[3].AsString() : args[2].AsString();
+        var endToken = reverse ? args[2].AsString() : args[3].AsString();
+        if (!TryParseRangeBound(startToken, isStart: true, out var startTs, out var startSeq) ||
+            !TryParseRangeBound(endToken, isStart: false, out var endTs, out var endSeq))
+        {
+            return RespValue.Error("ERR Invalid stream ID specified as stream command argument");
+        }
+
+        IEnumerable<StreamEntry> query = reverse
+            ? stream.Entries.OrderByDescending(static entry => entry.Timestamp).ThenByDescending(static entry => entry.Sequence)
+            : stream.Entries.OrderBy(static entry => entry.Timestamp).ThenBy(static entry => entry.Sequence);
+
+        query = query.Where(entry =>
+            CompareStreamIds(entry.Timestamp, entry.Sequence, startTs, startSeq) >= 0 &&
+            CompareStreamIds(entry.Timestamp, entry.Sequence, endTs, endSeq) <= 0);
+
+        if (count is { } countValue)
+        {
+            query = query.Take((int)countValue);
+        }
+
+        return RespValue.Array(query.Select(ToRangeRespValue).ToArray());
+    }
+
+    private async Task<RespValue> XLenAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
+    {
+        var arityError = RequireArity(args, 2);
+        if (arityError is not null)
+        {
+            return arityError;
+        }
+
+        var existing = await _store.GetAsync(args[1].AsString(), cancellationToken).ConfigureAwait(false);
+        if (!TryReadStream(existing, out var stream))
+        {
+            return RespValue.Error(WrongTypeError);
+        }
+
+        return RespValue.IntegerValue(stream?.Entries.Count ?? 0);
+    }
+
     private async Task<RespValue> TypeAsync(IReadOnlyList<RespValue> args, CancellationToken cancellationToken)
     {
         var arityError = RequireArity(args, 2);
@@ -1248,7 +1444,13 @@ public sealed class RedisCommandProcessor : IDisposable
             return arityError;
         }
 
-        return RespValue.SimpleString(await _store.GetAsync(args[1].AsString(), cancellationToken).ConfigureAwait(false) is null ? "none" : "string");
+        var value = await _store.GetAsync(args[1].AsString(), cancellationToken).ConfigureAwait(false);
+        if (value is null)
+        {
+            return RespValue.SimpleString("none");
+        }
+
+        return RespValue.SimpleString(IsSerializedStreamValue(value) ? "stream" : "string");
     }
 
     private static RespValue? RequireArity(IReadOnlyList<RespValue> args, int expected) =>
@@ -1256,6 +1458,192 @@ public sealed class RedisCommandProcessor : IDisposable
 
     private static bool IsQuit(RespValue request) =>
         request.Type == RespType.Array && request.Items is { Count: > 0 } && request.Items[0].AsString().Equals("QUIT", StringComparison.OrdinalIgnoreCase);
+
+    private static RespValue ToRangeRespValue(StreamEntry entry)
+    {
+        var fields = new List<RespValue>(entry.Fields.Count * 2);
+        foreach (var field in entry.Fields)
+        {
+            fields.Add(RespValue.BulkString(field.Name));
+            fields.Add(RespValue.BulkString(field.Value));
+        }
+
+        return RespValue.Array(new[]
+        {
+            RespValue.BulkString(entry.Id),
+            RespValue.Array(fields)
+        });
+    }
+
+    private static bool TryResolveXAddId(string token, ulong lastTs, ulong lastSeq, out ulong timestamp, out ulong sequence, out string? id, out string? error)
+    {
+        timestamp = 0;
+        sequence = 0;
+        id = null;
+        error = null;
+
+        if (token == "*")
+        {
+            timestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (timestamp < lastTs)
+            {
+                timestamp = lastTs;
+            }
+
+            sequence = timestamp == lastTs ? checked(lastSeq + 1UL) : 0;
+            id = $"{timestamp}-{sequence}";
+            return true;
+        }
+
+        var separator = token.IndexOf('-');
+        if (separator <= 0 || separator >= token.Length - 1)
+        {
+            error = "ERR Invalid stream ID specified as stream command argument";
+            return false;
+        }
+
+        if (!ulong.TryParse(token.AsSpan(0, separator), out timestamp))
+        {
+            error = "ERR Invalid stream ID specified as stream command argument";
+            return false;
+        }
+
+        var sequenceToken = token[(separator + 1)..];
+        if (sequenceToken == "*")
+        {
+            if (timestamp < lastTs)
+            {
+                error = "ERR The ID specified in XADD is equal or smaller than the target stream top item";
+                return false;
+            }
+
+            sequence = timestamp == lastTs ? checked(lastSeq + 1UL) : 0;
+            if (timestamp == 0 && sequence == 0)
+            {
+                sequence = 1;
+            }
+
+            id = $"{timestamp}-{sequence}";
+            return true;
+        }
+
+        if (!ulong.TryParse(sequenceToken, out sequence))
+        {
+            error = "ERR Invalid stream ID specified as stream command argument";
+            return false;
+        }
+
+        if (timestamp == 0 && sequence == 0)
+        {
+            error = "ERR The ID specified in XADD must be greater than 0-0";
+            return false;
+        }
+
+        if (CompareStreamIds(timestamp, sequence, lastTs, lastSeq) <= 0)
+        {
+            error = "ERR The ID specified in XADD is equal or smaller than the target stream top item";
+            return false;
+        }
+
+        id = token;
+        return true;
+    }
+
+    private static bool TryParseRangeBound(string token, bool isStart, out ulong timestamp, out ulong sequence)
+    {
+        if (token == "-")
+        {
+            timestamp = 0;
+            sequence = 0;
+            return true;
+        }
+
+        if (token == "+")
+        {
+            timestamp = ulong.MaxValue;
+            sequence = ulong.MaxValue;
+            return true;
+        }
+
+        var separator = token.IndexOf('-');
+        if (separator < 0)
+        {
+            if (!ulong.TryParse(token, out timestamp))
+            {
+                sequence = 0;
+                return false;
+            }
+
+            sequence = isStart ? 0 : ulong.MaxValue;
+            return true;
+        }
+
+        if (separator <= 0 || separator >= token.Length - 1 || !ulong.TryParse(token.AsSpan(0, separator), out timestamp))
+        {
+            timestamp = 0;
+            sequence = 0;
+            return false;
+        }
+
+        var seqToken = token[(separator + 1)..];
+        if (seqToken == "*")
+        {
+            sequence = isStart ? 0 : ulong.MaxValue;
+            return true;
+        }
+
+        return ulong.TryParse(seqToken, out sequence);
+    }
+
+    private static int CompareStreamIds(ulong leftTs, ulong leftSeq, ulong rightTs, ulong rightSeq)
+    {
+        var timestampComparison = leftTs.CompareTo(rightTs);
+        return timestampComparison != 0 ? timestampComparison : leftSeq.CompareTo(rightSeq);
+    }
+
+    private static bool TryReadStream(byte[]? bytes, out StreamData? stream)
+    {
+        stream = null;
+        if (bytes is null)
+        {
+            return true;
+        }
+
+        if (!IsSerializedStreamValue(bytes))
+        {
+            return false;
+        }
+
+        try
+        {
+            stream = JsonSerializer.Deserialize<StreamData>(bytes.AsSpan(StreamValueMagicPrefix.Length), StreamJsonOptions) ??
+                new StreamData(Array.Empty<StreamEntry>(), 0, 0);
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsSerializedStreamValue(byte[] bytes)
+    {
+        if (bytes.Length <= StreamValueMagicPrefix.Length)
+        {
+            return false;
+        }
+
+        return bytes.AsSpan(0, StreamValueMagicPrefix.Length).SequenceEqual(StreamValueMagicPrefix);
+    }
+
+    private static byte[] SerializeStream(StreamData stream)
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(stream, StreamJsonOptions);
+        var result = new byte[StreamValueMagicPrefix.Length + payload.Length];
+        StreamValueMagicPrefix.CopyTo(result, 0);
+        payload.CopyTo(result, StreamValueMagicPrefix.Length);
+        return result;
+    }
 
     private static bool TryGetAuthorizedAddress(RespValue request, RespValue response, out string? address)
     {
@@ -1496,6 +1884,7 @@ public sealed class RedisCommandProcessor : IDisposable
         "DEL" => "delete",
         "KEYS" or "SCAN" => "list",
         "MGET" or "MSET" or "MSETNX" or "MDEL" => "batch",
+        "XADD" or "XRANGE" or "XREVRANGE" or "XLEN" => "stream",
         "PUBLISH" => "pubsub",
         "SUBSCRIBE" or "UNSUBSCRIBE" or "PSUBSCRIBE" or "PUNSUBSCRIBE" or "PUBSUB" => "pubsub",
         "MULTI" or "EXEC" or "DISCARD" or "WATCH" or "UNWATCH" => "transaction",
