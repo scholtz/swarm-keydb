@@ -27,4 +27,6 @@ public sealed class SwarmKeyDbOptions
     /// Reserved for future multi-method support.
     /// </summary>
     public string DidMethod { get; set; } = "ethr";
+
+    public StreamTrimOptions StreamTrim { get; set; } = new();
 }

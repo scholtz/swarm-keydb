@@ -40,10 +40,16 @@ var tests = new (string Name, Func<Task> Test)[]
     ("redis stream xadd xrange xrevrange and xlen round trip", RedisStreamRoundTripAsync),
     ("redis stream validates id ordering and formatting", RedisStreamIdValidationAsync),
     ("redis stream supports maxlen trimming", RedisStreamMaxLenTrimmingAsync),
+    ("redis stream xtrim supports maxlen and minid retention", RedisStreamXTrimMaxLenAndMinIdAsync),
+    ("redis stream xtrim validates invalid arguments and empty streams", RedisStreamXTrimValidationAndEmptyStreamAsync),
+    ("redis stream default retention policy trims xadd without explicit maxlen", RedisStreamDefaultRetentionPolicyAsync),
     ("redis stream commands return wrongtype for string keys", RedisStreamWrongTypeErrorsAsync),
     ("redis stream consumer groups workflow supports xgroup xreadgroup xack and xpending", RedisStreamConsumerGroupWorkflowAsync),
     ("redis stream consumer groups support xclaim xautoclaim and delconsumer", RedisStreamConsumerGroupClaimAndPendingAsync),
     ("redis stream consumer groups persist pending entries across processor restart", RedisStreamConsumerGroupPersistenceAcrossRestartAsync),
+    ("redis stream duplicate xack is idempotent", RedisStreamDuplicateAckIsIdempotentAsync),
+    ("redis stream pending redelivery survives consumer crash and restart", RedisStreamPendingRedeliveryAfterConsumerCrashAsync),
+    ("redis stream concurrent groups remain isolated after restart", RedisStreamConcurrentGroupsIsolationOnRestartAsync),
     ("redis stream consumer groups support setid destroy and busygroup semantics", RedisStreamConsumerGroupAdminCommandsAsync),
     ("redis stream xread and xreadgroup validate options and syntax", RedisStreamXReadAndGroupValidateOptionsAsync),
     ("redis stream xreadgroup noack does not create pending entries", RedisStreamXReadGroupNoAckDoesNotCreatePendingAsync),
@@ -907,6 +913,60 @@ static async Task RedisStreamMaxLenTrimmingAsync()
     Assert(response.EndsWith(":2\r\n", StringComparison.Ordinal), "XLEN should reflect trimmed stream size.");
 }
 
+static async Task RedisStreamXTrimMaxLenAndMinIdAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("XADD", "xtrim:events", "1-0", "f", "v1") +
+        RespCommand("XADD", "xtrim:events", "2-0", "f", "v2") +
+        RespCommand("XADD", "xtrim:events", "3-0", "f", "v3") +
+        RespCommand("XADD", "xtrim:events", "4-0", "f", "v4") +
+        RespCommand("XTRIM", "xtrim:events", "MAXLEN", "2") +
+        RespCommand("XRANGE", "xtrim:events", "-", "+") +
+        RespCommand("XADD", "xtrim:events", "5-0", "f", "v5") +
+        RespCommand("XTRIM", "xtrim:events", "MINID", "4-0") +
+        RespCommand("XRANGE", "xtrim:events", "-", "+"));
+
+    Assert(response.Contains(":2\r\n*2\r\n*2\r\n$3\r\n3-0\r\n", StringComparison.Ordinal),
+        "XTRIM MAXLEN should delete and retain only newest IDs.");
+    Assert(response.Contains(":1\r\n*2\r\n*2\r\n$3\r\n4-0\r\n", StringComparison.Ordinal),
+        "XTRIM MINID should remove entries older than the threshold ID.");
+}
+
+static async Task RedisStreamXTrimValidationAndEmptyStreamAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("XTRIM", "missing:events", "MAXLEN", "10") +
+        RespCommand("XADD", "xtrim:validate", "1-0", "f", "v1") +
+        RespCommand("XTRIM", "xtrim:validate", "MAXLEN", "-1") +
+        RespCommand("XTRIM", "xtrim:validate", "MINID", "bad-id"));
+
+    Assert(response.StartsWith(":0\r\n", StringComparison.Ordinal), "XTRIM on a missing stream should return 0.");
+    Assert(response.Contains("-ERR invalid arguments\r\n", StringComparison.Ordinal), "Invalid MAXLEN/MINID should return ERR invalid arguments.");
+}
+
+static async Task RedisStreamDefaultRetentionPolicyAsync()
+{
+    var processor = new RedisCommandProcessor(
+        new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()),
+        streamTrimOptions: new StreamTrimOptions
+        {
+            DefaultMaxLen = 2,
+            DefaultMaxLenApproximate = true
+        });
+
+    var response = await ExecuteAsync(processor,
+        RespCommand("XADD", "default-trim:events", "1-0", "f", "v1") +
+        RespCommand("XADD", "default-trim:events", "2-0", "f", "v2") +
+        RespCommand("XADD", "default-trim:events", "3-0", "f", "v3") +
+        RespCommand("XLEN", "default-trim:events") +
+        RespCommand("XRANGE", "default-trim:events", "-", "+"));
+
+    Assert(response.Contains(":2\r\n", StringComparison.Ordinal), "Default stream retention should cap stream size when XADD omits MAXLEN.");
+    Assert(response.Contains("*2\r\n*2\r\n$3\r\n2-0\r\n", StringComparison.Ordinal), "Default retention should keep newest entries.");
+}
+
 static async Task RedisStreamWrongTypeErrorsAsync()
 {
     var processor = CreateProcessor();
@@ -987,6 +1047,66 @@ static async Task RedisStreamConsumerGroupPersistenceAcrossRestartAsync()
     var response = await ExecuteAsync(processor2, RespCommand("XPENDING", "persist:events", "workers"));
     Assert(response.Contains("*4\r\n:1\r\n$3\r\n1-0\r\n$3\r\n1-0\r\n*1\r\n*2\r\n$2\r\nc1\r\n:1\r\n", StringComparison.Ordinal),
         "Pending entries should survive processor restart when backed by persisted stream state.");
+}
+
+static async Task RedisStreamDuplicateAckIsIdempotentAsync()
+{
+    var processor = CreateProcessor();
+    var response = await ExecuteAsync(processor,
+        RespCommand("XADD", "dup-ack:events", "1-0", "f", "v1") +
+        RespCommand("XGROUP", "CREATE", "dup-ack:events", "workers", "0-0") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "STREAMS", "dup-ack:events", ">") +
+        RespCommand("XACK", "dup-ack:events", "workers", "1-0") +
+        RespCommand("XACK", "dup-ack:events", "workers", "1-0") +
+        RespCommand("XPENDING", "dup-ack:events", "workers"));
+
+    Assert(response.Contains(":1\r\n:0\r\n*4\r\n:0\r\n$-1\r\n$-1\r\n*0\r\n", StringComparison.Ordinal),
+        "XACK should be idempotent and keep XPENDING at zero after a duplicate ACK.");
+}
+
+static async Task RedisStreamPendingRedeliveryAfterConsumerCrashAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    var processor1 = new RedisCommandProcessor(store);
+    await ExecuteAsync(processor1,
+        RespCommand("XADD", "crash:events", "1-0", "f", "v1") +
+        RespCommand("XGROUP", "CREATE", "crash:events", "workers", "0-0") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "STREAMS", "crash:events", ">"));
+
+    await Task.Delay(20);
+    var processor2 = new RedisCommandProcessor(store);
+    var response = await ExecuteAsync(processor2,
+        RespCommand("XAUTOCLAIM", "crash:events", "workers", "c2", "1", "0-0", "COUNT", "10") +
+        RespCommand("XACK", "crash:events", "workers", "1-0") +
+        RespCommand("XPENDING", "crash:events", "workers"));
+
+    Assert(response.Contains("*3\r\n$3\r\n1-0\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$1\r\nf\r\n$2\r\nv1\r\n*0\r\n", StringComparison.Ordinal),
+        "XAUTOCLAIM should re-deliver pending entries after consumer restart.");
+    Assert(response.Contains(":1\r\n*4\r\n:0\r\n$-1\r\n$-1\r\n*0\r\n", StringComparison.Ordinal),
+        "Re-processed claimed entry should ACK cleanly and clear pending list.");
+}
+
+static async Task RedisStreamConcurrentGroupsIsolationOnRestartAsync()
+{
+    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
+    var processor1 = new RedisCommandProcessor(store);
+    await ExecuteAsync(processor1,
+        RespCommand("XADD", "iso:events", "1-0", "f", "v1") +
+        RespCommand("XGROUP", "CREATE", "iso:events", "g1", "0-0") +
+        RespCommand("XGROUP", "CREATE", "iso:events", "g2", "0-0") +
+        RespCommand("XREADGROUP", "GROUP", "g1", "c1", "STREAMS", "iso:events", ">") +
+        RespCommand("XREADGROUP", "GROUP", "g2", "c2", "STREAMS", "iso:events", ">") +
+        RespCommand("XACK", "iso:events", "g1", "1-0"));
+
+    var processor2 = new RedisCommandProcessor(store);
+    var response = await ExecuteAsync(processor2,
+        RespCommand("XPENDING", "iso:events", "g1") +
+        RespCommand("XPENDING", "iso:events", "g2"));
+
+    Assert(response.Contains("*4\r\n:0\r\n$-1\r\n$-1\r\n*0\r\n", StringComparison.Ordinal),
+        "ACK in group g1 should clear only g1 pending entries.");
+    Assert(response.Contains("*4\r\n:1\r\n$3\r\n1-0\r\n$3\r\n1-0\r\n*1\r\n*2\r\n$2\r\nc2\r\n:1\r\n", StringComparison.Ordinal),
+        "Group g2 pending entries should remain intact across restart.");
 }
 
 static async Task RedisStreamConsumerGroupAdminCommandsAsync()
@@ -2737,10 +2857,12 @@ static async Task PrometheusMetricsExposeStreamConsumerGroupTelemetryAsync()
     var processor = new RedisCommandProcessor(store);
     await ExecuteAsync(processor,
         RespCommand("XADD", "metrics:events", "1-0", "f", "v1") +
+        RespCommand("XADD", "metrics:events", "2-0", "f", "v2") +
         RespCommand("XGROUP", "CREATE", "metrics:events", "workers", "0-0") +
-        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "STREAMS", "metrics:events", ">") +
+        RespCommand("XREADGROUP", "GROUP", "workers", "c1", "COUNT", "1", "STREAMS", "metrics:events", ">") +
         RespCommand("XCLAIM", "metrics:events", "workers", "c2", "0", "1-0") +
-        RespCommand("XACK", "metrics:events", "workers", "1-0"));
+        RespCommand("XACK", "metrics:events", "workers", "1-0") +
+        RespCommand("XTRIM", "metrics:events", "MAXLEN", "1"));
 
     var metrics = new MonitoringMetrics(
         () => NoOpCacheStats.Instance,
@@ -2765,6 +2887,9 @@ static async Task PrometheusMetricsExposeStreamConsumerGroupTelemetryAsync()
     Assert(payload.Contains("swarmkeydb_stream_group_count{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "Stream group count metric should be exposed.");
     Assert(payload.Contains("swarmkeydb_stream_blocked_readers{privacy_mode=\"none\"} 0", StringComparison.Ordinal), "Blocked readers metric should be exposed.");
     Assert(payload.Contains("swarmkeydb_stream_xread_wakeup_total{privacy_mode=\"none\"} 0", StringComparison.Ordinal), "XREAD wakeup metric should be exposed.");
+    Assert(payload.Contains("swarmkeydb_stream_trimmed_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal), "Trimmed metric should count XTRIM/XADD retention deletes.");
+    Assert(payload.Contains("swarmkeydb_stream_length_bytes{privacy_mode=\"none\"}", StringComparison.Ordinal), "Stream length bytes metric should be exposed.");
+    Assert(payload.Contains("swarmkeydb_stream_length_bytes{stream=\"metrics:events\",privacy_mode=\"none\"}", StringComparison.Ordinal), "Per-stream length bytes metric should be exposed.");
 
     cts.Cancel();
     await runTask;
@@ -5345,6 +5470,10 @@ static async Task DashboardHtmlContainsStreamGroupPanelAsync()
     Assert(response.Contains("stream-pending-total", StringComparison.Ordinal), "Dashboard should include stream pending entries element.");
     Assert(response.Contains("stream-blocked-readers", StringComparison.Ordinal), "Dashboard should include blocked reader count element.");
     Assert(response.Contains("stream-blocked-by-stream", StringComparison.Ordinal), "Dashboard should include per-stream blocked reader table.");
+    Assert(response.Contains("Stream Retention", StringComparison.Ordinal), "Dashboard should include stream retention section.");
+    Assert(response.Contains("stream-trimmed-total", StringComparison.Ordinal), "Dashboard should include stream trimmed total element.");
+    Assert(response.Contains("stream-length-bytes-total", StringComparison.Ordinal), "Dashboard should include stream length bytes total element.");
+    Assert(response.Contains("stream-length-bytes-by-stream", StringComparison.Ordinal), "Dashboard should include stream length-by-stream table.");
 
     cts.Cancel();
     await runTask;

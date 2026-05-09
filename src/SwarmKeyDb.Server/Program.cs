@@ -28,6 +28,8 @@ var didMethod = GetFirstSetting("SWARM_KEYDB_DID_METHOD", "Did:Method") ?? "ethr
 var offlineMode = GetOfflineModeFromSettings();
 var offlineJournal = GetOfflineJournalFromSettings();
 var offlineSyncIntervalMs = Math.Max(250, GetInt("SWARM_KEYDB_OFFLINE_SYNC_INTERVAL_MS", 5_000));
+var streamDefaultMaxLen = GetNullableLongFromMany("SWARM_KEYDB_STREAM_DEFAULT_MAXLEN", "Stream:DefaultMaxLen");
+var streamDefaultMaxLenApproximate = GetBoolFromMany(defaultValue: true, "SWARM_KEYDB_STREAM_DEFAULT_MAXLEN_APPROXIMATE", "Stream:DefaultMaxLenApproximate");
 var privacyOptions = new SwarmKeyDbOptions
 {
     PrivacyMode = privacyMode,
@@ -38,7 +40,12 @@ var privacyOptions = new SwarmKeyDbOptions
     OfflineSqlitePath = Path.Combine(dataDir, "offline-journal.sqlite"),
     DidMode = didMode,
     DidRpcUrl = didRpcUrl,
-    DidMethod = didMethod
+    DidMethod = didMethod,
+    StreamTrim = new StreamTrimOptions
+    {
+        DefaultMaxLen = streamDefaultMaxLen >= 0 ? streamDefaultMaxLen : null,
+        DefaultMaxLenApproximate = streamDefaultMaxLenApproximate
+    }
 };
 
 var logLevel = GetLogLevel("LOG_LEVEL", GetLogLevel("SWARM_KEYDB_LOG_LEVEL", LogLevel.Information));
@@ -73,7 +80,7 @@ var monitoringMetrics = new MonitoringMetrics(
             new long[RedisCommandProcessor.TransactionExecDurationBucketUpperBounds.Length],
             0,
             0)),
-    streamMetricsAccessor: () => processorRef?.GetStreamMetrics() ?? new StreamMetricsSnapshot(0, 0, 0, 0, 0, 0, 0, new Dictionary<string, long>(StringComparer.Ordinal)));
+    streamMetricsAccessor: () => processorRef?.GetStreamMetrics() ?? new StreamMetricsSnapshot(0, 0, 0, 0, 0, 0, 0, new Dictionary<string, long>(StringComparer.Ordinal), 0, 0, new Dictionary<string, long>(StringComparer.Ordinal)));
 
 var cacheOptions = new CacheOptions
 {
@@ -461,7 +468,8 @@ var processor = new RedisCommandProcessor(
     provider.GetRequiredService<IDidContextAccessor>(),
     provider.GetService<IDecentralizedIdentityProvider>(),
     resyncCoordinator,
-    pubSubManager);
+    pubSubManager,
+    privacyOptions.StreamTrim);
 processorRef = processor;
 var server = new RedisServer(
     bind,
@@ -781,6 +789,19 @@ int? GetNullableIntFromMany(params string[] names)
     foreach (var name in names)
     {
         if (int.TryParse(GetSetting(name), out var value))
+        {
+            return value;
+        }
+    }
+
+    return null;
+}
+
+long? GetNullableLongFromMany(params string[] names)
+{
+    foreach (var name in names)
+    {
+        if (long.TryParse(GetSetting(name), out var value))
         {
             return value;
         }

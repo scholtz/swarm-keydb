@@ -23,6 +23,7 @@ This reference covers the public Redis protocol surface and `SwarmKeyDbClient` m
 | `SCAN cursor [COUNT n]` | cursor token | keys + next cursor | invalid cursor/count |
 | `TYPE key` | key | `string` / `none` | wrong arity |
 | `XADD key [MAXLEN [~\|=] count] id field value [field value ...]` | stream key, id token, field/value pairs | generated or explicit stream ID | wrong arity, invalid IDs, out-of-order IDs, wrong type |
+| `XTRIM key MAXLEN [~\|=] count` / `XTRIM key MINID [~\|=] id` | stream key + retention strategy | integer count of deleted entries | wrong arity, invalid arguments, wrong type |
 | `XRANGE key start end [COUNT n]` | stream key, range bounds | nested array of stream entries | wrong arity, invalid IDs, wrong type |
 | `XREVRANGE key end start [COUNT n]` | stream key, reverse range bounds | nested array of stream entries | wrong arity, invalid IDs, wrong type |
 | `XLEN key` | stream key | stream entry count (`0` if missing) | wrong arity, wrong type |
