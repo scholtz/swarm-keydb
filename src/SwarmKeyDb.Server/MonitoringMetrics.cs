@@ -110,6 +110,12 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
         builder.AppendLine("# TYPE swarmkeydb_consistency_worst_latency_ms gauge");
         builder.AppendLine("# HELP swarmkeydb_consistency_last_verification_unix_time Last consistency verification timestamp.");
         builder.AppendLine("# TYPE swarmkeydb_consistency_last_verification_unix_time gauge");
+        builder.AppendLine("# HELP swarmkeydb_cache_verification_pass_total Total cache reads that passed consistency verification.");
+        builder.AppendLine("# TYPE swarmkeydb_cache_verification_pass_total counter");
+        builder.AppendLine("# HELP swarmkeydb_cache_verification_fail_total Total cache reads that failed consistency verification.");
+        builder.AppendLine("# TYPE swarmkeydb_cache_verification_fail_total counter");
+        builder.AppendLine("# HELP swarmkeydb_cache_eviction_by_verification_total Total cache evictions triggered by a consistency verification failure.");
+        builder.AppendLine("# TYPE swarmkeydb_cache_eviction_by_verification_total counter");
 
         foreach (var entry in _operations.OrderBy(static item => item.Key, StringComparer.Ordinal))
         {
@@ -163,6 +169,10 @@ public sealed class MonitoringMetrics : IRedisCommandObserver
         builder.AppendLine(FormatMetric(
             "swarmkeydb_consistency_last_verification_unix_time",
             consistency.LastVerificationUtc?.ToUnixTimeSeconds() ?? 0));
+        var passTotal = Math.Max(0, consistency.TotalVerifications - consistency.ViolationCount);
+        builder.AppendLine(FormatMetric("swarmkeydb_cache_verification_pass_total", passTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_cache_verification_fail_total", consistency.ViolationCount));
+        builder.AppendLine(FormatMetric("swarmkeydb_cache_eviction_by_verification_total", consistency.EvictionByVerificationTotal));
 
         return builder.ToString();
     }

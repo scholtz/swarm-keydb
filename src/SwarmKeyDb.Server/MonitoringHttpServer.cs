@@ -115,7 +115,8 @@ public sealed class MonitoringHttpServer : IDisposable
                         totalVerifications = consistencySnapshot.TotalVerifications,
                         successRate = consistencySnapshot.SuccessRate,
                         violationCount = consistencySnapshot.ViolationCount,
-                        worstLatencyMs = consistencySnapshot.WorstLatencyMs
+                        worstLatencyMs = consistencySnapshot.WorstLatencyMs,
+                        evictionByVerificationTotal = consistencySnapshot.EvictionByVerificationTotal
                     },
                     shards = shardHealth?.Select(static shard => new
                     {
@@ -344,6 +345,7 @@ public sealed class MonitoringHttpServer : IDisposable
                                              <p>Consistency Success Rate: <strong id="consistency-success-rate">loading...</strong></p>
                                              <p>Consistency Violations: <strong id="consistency-violation-count">loading...</strong></p>
                                              <p>Consistency Worst Latency: <strong id="consistency-worst-latency">loading...</strong></p>
+                                             <p>Cache Evictions by Verification: <strong id="consistency-eviction-count">loading...</strong></p>
                                               <h2>Cross-chain replication health</h2>
                                             <table>
                                               <thead>
@@ -377,6 +379,7 @@ public sealed class MonitoringHttpServer : IDisposable
                                               const consistencySuccessRateEl = document.getElementById('consistency-success-rate');
                                               const consistencyViolationCountEl = document.getElementById('consistency-violation-count');
                                               const consistencyWorstLatencyEl = document.getElementById('consistency-worst-latency');
+                                              const consistencyEvictionCountEl = document.getElementById('consistency-eviction-count');
                                               function parseCounters(metricsText) {
                                                const wanted = [
                                                  'swarmkeydb_operations_total{operation="get",status="success"}',
@@ -390,7 +393,10 @@ public sealed class MonitoringHttpServer : IDisposable
                                                   'swarmkeydb_swarm_writes_total',
                                                   'swarmkeydb_consistency_success_rate',
                                                   'swarmkeydb_consistency_violations_total',
-                                                  'swarmkeydb_consistency_worst_latency_ms'
+                                                  'swarmkeydb_consistency_worst_latency_ms',
+                                                  'swarmkeydb_cache_verification_pass_total',
+                                                  'swarmkeydb_cache_verification_fail_total',
+                                                  'swarmkeydb_cache_eviction_by_verification_total'
                                                 ];
                                                return metricsText.split('\n').filter(line => wanted.some(prefix => line.startsWith(prefix))).join('\n');
                                              }
@@ -407,6 +413,7 @@ public sealed class MonitoringHttpServer : IDisposable
                                                  consistencySuccessRateEl.textContent = `${Math.round((consistency.successRate ?? 1) * 10000) / 100}%`;
                                                  consistencyViolationCountEl.textContent = String(consistency.violationCount ?? 0);
                                                  consistencyWorstLatencyEl.textContent = `${Math.round(consistency.worstLatencyMs ?? 0)} ms`;
+                                                 consistencyEvictionCountEl.textContent = String(consistency.evictionByVerificationTotal ?? 0);
                                                }
                                               async function refreshMetrics() {
                                                 const response = await fetch('/metrics');

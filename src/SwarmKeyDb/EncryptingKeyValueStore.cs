@@ -11,7 +11,7 @@ namespace SwarmKeyDb;
 /// followed by a 12-byte random nonce and a 16-byte GCM authentication tag, then the
 /// ciphertext. Legacy values without the magic header are returned as-is.
 /// </summary>
-public sealed class EncryptingKeyValueStore : IKeyValueStore, IAccessControlVerifier
+public sealed class EncryptingKeyValueStore : IKeyValueStore, IAccessControlVerifier, IBackendMetadataProvider
 {
     // Magic bytes that identify an encrypted blob stored by this class.
     private static readonly byte[] Magic = [0xAE, 0x73];
@@ -190,4 +190,7 @@ public sealed class EncryptingKeyValueStore : IKeyValueStore, IAccessControlVeri
 
         return new MutableEncryptionKeyProvider(options.Value);
     }
+
+    public Task<string?> GetBackendMetadataAsync(string key, CancellationToken cancellationToken = default) =>
+        (_inner as IBackendMetadataProvider)?.GetBackendMetadataAsync(key, cancellationToken) ?? Task.FromResult<string?>(null);
 }

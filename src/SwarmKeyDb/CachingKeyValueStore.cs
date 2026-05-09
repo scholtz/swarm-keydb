@@ -4,7 +4,7 @@ using Microsoft.Extensions.Options;
 
 namespace SwarmKeyDb;
 
-public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats
+public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats, ICacheEviction, IBackendMetadataProvider
 {
     private readonly IKeyValueStore _inner;
     private readonly IMemoryCache _cache;
@@ -158,6 +158,17 @@ public sealed class CachingKeyValueStore : IKeyValueStore, ICacheStats
         RemoveLru(key);
         return updated;
     }
+
+    public void EvictFromCache(string key)
+    {
+        _cache.Remove(key);
+        RemoveLru(key);
+        Interlocked.Increment(ref _evictions);
+        _logger.LogDebug("Cache eviction by consistency verification for key '{Key}'.", key);
+    }
+
+    public Task<string?> GetBackendMetadataAsync(string key, CancellationToken cancellationToken = default) =>
+        (_inner as IBackendMetadataProvider)?.GetBackendMetadataAsync(key, cancellationToken) ?? Task.FromResult<string?>(null);
 
     private async Task<TimeSpan?> ResolveCacheEntryTtlAsync(string key, CancellationToken cancellationToken)
     {

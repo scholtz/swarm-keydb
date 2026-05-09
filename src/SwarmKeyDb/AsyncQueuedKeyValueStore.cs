@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging;
 
 namespace SwarmKeyDb;
 
-public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingStore, ICacheStats
+public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingStore, ICacheStats, IBackendMetadataProvider, ICacheEviction
 {
     private readonly IKeyValueStore _inner;
     private readonly AsyncProcessingOptions _options;
@@ -270,6 +270,11 @@ public sealed class AsyncQueuedKeyValueStore : IKeyValueStore, IAsyncProcessingS
     {
         _logger.LogError(exception, "Fire-and-forget operation '{OperationName}' failed.", operationName);
     }
+
+    public Task<string?> GetBackendMetadataAsync(string key, CancellationToken cancellationToken = default) =>
+        (_inner as IBackendMetadataProvider)?.GetBackendMetadataAsync(key, cancellationToken) ?? Task.FromResult<string?>(null);
+
+    public void EvictFromCache(string key) => (_inner as ICacheEviction)?.EvictFromCache(key);
 
     private sealed class QueuedWriteOperation
     {

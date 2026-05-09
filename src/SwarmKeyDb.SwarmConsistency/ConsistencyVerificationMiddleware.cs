@@ -17,6 +17,7 @@ public sealed class ConsistencyVerificationMiddleware :
     private readonly ILogger<ConsistencyVerificationMiddleware> _logger;
     private long _totalVerifications;
     private long _violations;
+    private long _cacheEvictionsByVerification;
     private long _totalLatencyMs;
     private long _worstLatencyMs;
     private long _lastVerificationUnixMs;
@@ -68,26 +69,30 @@ public sealed class ConsistencyVerificationMiddleware :
         }
 
         var expectedHash = SHA256.HashData(value);
-        var result = await EvaluateVerificationAsync(key, () => _verifier.VerifyContentHashAsync(reference, expectedHash, cancellationToken), cancellationToken).ConfigureAwait(false);
-        if (result is not null)
+        var violation = await EvaluateVerificationAsync(key, () => _verifier.VerifyContentHashAsync(reference, expectedHash, cancellationToken), cancellationToken).ConfigureAwait(false);
+        if (violation is not null)
         {
-            return value;
+            return await HandleViolationAndRefetchAsync(key, violation, cancellationToken).ConfigureAwait(false);
         }
 
         var feedRevision = _options.ExpectedFeedRevisionResolver?.Invoke(key);
         if (feedRevision is { } expectedRevision)
         {
-            result = await EvaluateVerificationAsync(key, () => _verifier.VerifyFeedRevisionAsync(reference, expectedRevision, cancellationToken), cancellationToken).ConfigureAwait(false);
-            if (result is not null)
+            violation = await EvaluateVerificationAsync(key, () => _verifier.VerifyFeedRevisionAsync(reference, expectedRevision, cancellationToken), cancellationToken).ConfigureAwait(false);
+            if (violation is not null)
             {
-                return value;
+                return await HandleViolationAndRefetchAsync(key, violation, cancellationToken).ConfigureAwait(false);
             }
         }
 
         var manifestLineage = _options.ExpectedManifestLineageResolver?.Invoke(key);
         if (manifestLineage is { } lineage)
         {
-            _ = await EvaluateVerificationAsync(key, () => _verifier.VerifyManifestLineageAsync(lineage.ManifestRef, lineage.Ancestors, cancellationToken), cancellationToken).ConfigureAwait(false);
+            violation = await EvaluateVerificationAsync(key, () => _verifier.VerifyManifestLineageAsync(lineage.ManifestRef, lineage.Ancestors, cancellationToken), cancellationToken).ConfigureAwait(false);
+            if (violation is not null)
+            {
+                return await HandleViolationAndRefetchAsync(key, violation, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         return value;
@@ -122,7 +127,8 @@ public sealed class ConsistencyVerificationMiddleware :
             TotalVerifications: total,
             ViolationCount: violations,
             SuccessRate: successRate,
-            WorstLatencyMs: Interlocked.Read(ref _worstLatencyMs));
+            WorstLatencyMs: Interlocked.Read(ref _worstLatencyMs),
+            EvictionByVerificationTotal: Interlocked.Read(ref _cacheEvictionsByVerification));
     }
 
     private async Task<string?> TryGetBackendReferenceAsync(string key, CancellationToken cancellationToken)
@@ -146,18 +152,22 @@ public sealed class ConsistencyVerificationMiddleware :
                 return null;
             }
 
-            return await HandleViolationAsync(key, result, cancellationToken).ConfigureAwait(false);
+            return await RecordViolationAsync(key, result, cancellationToken).ConfigureAwait(false);
         }
         catch (QuorumNotMetException ex)
         {
             var result = ex.Results.OrderByDescending(static item => item.Latency).FirstOrDefault()
                          ?? VerificationResult.Failed(ex.VerificationType, "quorum", TimeSpan.Zero, ex.Threshold.ToString(), ex.Succeeded.ToString(), ex.Message);
             TrackResult(result);
-            return await HandleViolationAsync(key, result, cancellationToken).ConfigureAwait(false);
+            return await RecordViolationAsync(key, result, cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private Task<VerificationResult?> HandleViolationAsync(string key, VerificationResult result, CancellationToken cancellationToken)
+    /// <summary>
+    /// Records a violation, logs a warning, and — in strict mode — throws immediately.
+    /// Returns the <see cref="VerificationResult"/> so the caller can act on it in warn mode.
+    /// </summary>
+    private Task<VerificationResult?> RecordViolationAsync(string key, VerificationResult result, CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref _violations);
         _logger.LogWarning(
@@ -177,6 +187,31 @@ public sealed class ConsistencyVerificationMiddleware :
 
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult<VerificationResult?>(result);
+    }
+
+    /// <summary>
+    /// Called when verification fails in warn mode.  Evicts the stale cache entry,
+    /// invokes the operator callback, and re-fetches the value from the backend so
+    /// the next read bypasses the (now-evicted) cache entry.
+    /// </summary>
+    private async Task<byte[]?> HandleViolationAndRefetchAsync(string key, VerificationResult violation, CancellationToken cancellationToken)
+    {
+        // Evict from the in-memory cache (if the inner chain supports it) so the next
+        // read goes through to Swarm instead of serving a stale/divergent cached value.
+        if (_inner is ICacheEviction cacheEviction)
+        {
+            cacheEviction.EvictFromCache(key);
+            Interlocked.Increment(ref _cacheEvictionsByVerification);
+            _logger.LogInformation(
+                "Evicted cache entry for key {Key} after consistency verification failure.", key);
+        }
+
+        // Invoke the operator-supplied callback (if any) for observability / alerting.
+        _options.OnVerificationFailure?.Invoke(key, violation);
+
+        // Re-fetch from the backend; this will be a cache miss (the entry was just evicted)
+        // and will return the authoritative value directly from Swarm.
+        return await _inner.GetAsync(key, cancellationToken).ConfigureAwait(false);
     }
 
     private void TrackResult(VerificationResult result)

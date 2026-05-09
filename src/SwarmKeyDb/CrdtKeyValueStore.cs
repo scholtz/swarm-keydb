@@ -6,7 +6,7 @@ namespace SwarmKeyDb;
 /// <summary>
 /// Decorator that stores values as CRDT envelopes and merges concurrent writes deterministically.
 /// </summary>
-public sealed class CrdtKeyValueStore : IKeyValueStore, IAccessControlVerifier
+public sealed class CrdtKeyValueStore : IKeyValueStore, IAccessControlVerifier, IBackendMetadataProvider
 {
     private const string EnvelopeType = "swarm-keydb/crdt-v1";
     private static readonly StoredEnvelope InvalidEnvelope = new(
@@ -181,4 +181,7 @@ public sealed class CrdtKeyValueStore : IKeyValueStore, IAccessControlVerifier
         string WriterNodeId);
 
     private sealed record StoredEnvelope(CrdtValue Value, string MergeStrategy);
+
+    public Task<string?> GetBackendMetadataAsync(string key, CancellationToken cancellationToken = default) =>
+        (_inner as IBackendMetadataProvider)?.GetBackendMetadataAsync(key, cancellationToken) ?? Task.FromResult<string?>(null);
 }

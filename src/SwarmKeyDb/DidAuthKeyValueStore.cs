@@ -17,7 +17,7 @@ namespace SwarmKeyDb;
 /// A failed check throws <see cref="DidAuthorizationException"/>.
 /// </para>
 /// </summary>
-public sealed class DidAuthKeyValueStore : IKeyValueStore
+public sealed class DidAuthKeyValueStore : IKeyValueStore, IBackendMetadataProvider
 {
     private readonly IKeyValueStore _inner;
     private readonly IDecentralizedIdentityProvider _provider;
@@ -162,4 +162,7 @@ public sealed class DidAuthKeyValueStore : IKeyValueStore
                 $"DID authorization denied: '{context.Did}' does not have {operation.ToString().ToLowerInvariant()} permission on '{resolvedKey}'.");
         }
     }
+
+    public Task<string?> GetBackendMetadataAsync(string key, CancellationToken cancellationToken = default) =>
+        (_inner as IBackendMetadataProvider)?.GetBackendMetadataAsync(key, cancellationToken) ?? Task.FromResult<string?>(null);
 }

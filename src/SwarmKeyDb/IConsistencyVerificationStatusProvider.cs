@@ -10,7 +10,8 @@ public readonly record struct ConsistencyVerificationSnapshot(
     long TotalVerifications,
     long ViolationCount,
     double SuccessRate,
-    double WorstLatencyMs);
+    double WorstLatencyMs,
+    long EvictionByVerificationTotal);
 
 public sealed class NoOpConsistencyVerificationStatusProvider : IConsistencyVerificationStatusProvider
 {
@@ -22,5 +23,6 @@ public sealed class NoOpConsistencyVerificationStatusProvider : IConsistencyVeri
             TotalVerifications: 0,
             ViolationCount: 0,
             SuccessRate: 1D,
-            WorstLatencyMs: 0D);
+            WorstLatencyMs: 0D,
+            EvictionByVerificationTotal: 0);
 }

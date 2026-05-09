@@ -56,6 +56,34 @@ public static class ServiceCollectionExtensions
         Action<ConsistencyOptions>? configure = null) =>
         AddSwarmConsistency(services, beeNodeUrls, configure);
 
+    /// <summary>
+    /// Convenience fluent method for registering Swarm consistency verification with a
+    /// single primary Bee node URL.  Equivalent to
+    /// <c>AddSwarmConsistency(services, new[] { beeNodeUrl }, configure)</c>.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// builder.Services
+    ///     .AddSwarmKeyDbStore(swarmClient, index)
+    ///     .WithConsistencyVerification(new Uri("http://localhost:1633/"));
+    /// </code>
+    /// </example>
+    public static IServiceCollection WithConsistencyVerification(
+        this IServiceCollection services,
+        Uri beeNodeUrl,
+        Action<ConsistencyOptions>? configure = null) =>
+        AddSwarmConsistency(services, [beeNodeUrl], configure);
+
+    /// <summary>
+    /// Convenience fluent method for registering Swarm consistency verification with
+    /// multiple Bee node URLs (quorum mode).
+    /// </summary>
+    public static IServiceCollection WithConsistencyVerification(
+        this IServiceCollection services,
+        IEnumerable<Uri> beeNodeUrls,
+        Action<ConsistencyOptions>? configure = null) =>
+        AddSwarmConsistency(services, beeNodeUrls, configure);
+
     private static void DecorateKeyValueStore(IServiceCollection services)
     {
         var descriptor = services.LastOrDefault(static service => service.ServiceType == typeof(IKeyValueStore));
