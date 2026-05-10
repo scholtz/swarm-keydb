@@ -243,7 +243,8 @@ public class CoreStoreTests
         var ex = NUnit.Framework.Assert.Throws<InvalidOperationException>(
             () => new BeeSwarmClient(new Uri("https://bzz.limo"), "batch-id"));
 
-        Assert(ex is not null && ex.Message.Contains("read gateway", StringComparison.OrdinalIgnoreCase),
+        NUnit.Framework.Assert.That(ex, Is.Not.Null);
+        NUnit.Framework.Assert.That(ex!.Message, Does.Contain("read gateway").IgnoreCase,
             "Expected a clear error for bzz.limo upload misconfiguration.");
     }
 
@@ -258,7 +259,8 @@ public class CoreStoreTests
         var ex = NUnit.Framework.Assert.Throws<InvalidOperationException>(
             () => new BeeSwarmClient(httpClient, "batch-id"));
 
-        Assert(ex is not null && ex.Message.Contains("read gateway", StringComparison.OrdinalIgnoreCase),
+        NUnit.Framework.Assert.That(ex, Is.Not.Null);
+        NUnit.Framework.Assert.That(ex!.Message, Does.Contain("read gateway").IgnoreCase,
             "Expected a clear error for read gateway upload misconfiguration.");
     }
 
