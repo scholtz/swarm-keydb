@@ -6,7 +6,11 @@ public sealed class RespWriter
 {
     private static readonly byte[] CrLf = "\r\n"u8.ToArray();
 
-    /// <summary>Minimum number of bytes in a VerbatimString payload: 3-char encoding + ':' = 4.</summary>
+    /// <summary>
+    /// Minimum length of a <see cref="RespType.VerbatimString"/> Text payload:
+    /// 3-character encoding identifier + colon separator = 4 bytes (e.g., <c>"txt:"</c>).
+    /// Any text shorter than this cannot be split into a valid encoding/data pair.
+    /// </summary>
     private const int MinVerbatimStringLength = 4;
 
     private readonly Stream _stream;
@@ -119,20 +123,23 @@ public sealed class RespWriter
                 break;
 
             case RespType.VerbatimString:
-                if (ProtocolVersion >= 3 && value.Text is { Length: >= MinVerbatimStringLength })
+                var verbatimText = value.Text;
+                var hasValidEncoding = verbatimText is { Length: >= MinVerbatimStringLength };
+                if (ProtocolVersion >= 3 && hasValidEncoding)
                 {
-                    var rawBytes = Encoding.UTF8.GetBytes(value.Text);
+                    var rawBytes = Encoding.UTF8.GetBytes(verbatimText!);
                     await WriteAsciiAsync($"={rawBytes.Length}\r\n", cancellationToken).ConfigureAwait(false);
                     await _stream.WriteAsync(rawBytes, cancellationToken).ConfigureAwait(false);
                     await _stream.WriteAsync(CrLf, cancellationToken).ConfigureAwait(false);
                 }
                 else
                 {
-                    var data = value.Text;
-                    if (data is { Length: >= MinVerbatimStringLength })
+                    // RESP2 degradation: strip the 3-char encoding prefix and ':' separator, return data only.
+                    string? data = null;
+                    if (hasValidEncoding)
                     {
-                        var colonIndex = data.IndexOf(':', StringComparison.Ordinal);
-                        data = colonIndex >= 0 ? data[(colonIndex + 1)..] : data;
+                        var colonIndex = verbatimText!.IndexOf(':', StringComparison.Ordinal);
+                        data = colonIndex >= 0 ? verbatimText[(colonIndex + 1)..] : verbatimText;
                     }
 
                     await WriteBulkStringAsync(data is null ? null : Encoding.UTF8.GetBytes(data), cancellationToken).ConfigureAwait(false);

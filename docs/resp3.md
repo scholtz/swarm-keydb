@@ -193,6 +193,6 @@ redis-cli -3 HELLO
 
 ## Limitations (current release)
 
-- RESP3 is supported on the **TCP** interface only. WebSocket and HTTP REST gateways remain on RESP2.
+- **RESP3 is TCP-only.** The WebSocket gateway uses a JSON-over-WebSocket framing protocol that is separate from the RESP wire format; bridging RESP3 push frames through that protocol requires a dedicated follow-on effort. The HTTP REST API similarly operates at a higher level and is not affected by the RESP wire format. Both are tracked as follow-on issues.
 - `CLIENT TRACKING REDIRECT` (redirecting invalidations to a different connection) is not yet implemented.
 - Cluster-mode shard tracking is out of scope.

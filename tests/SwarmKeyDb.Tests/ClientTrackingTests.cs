@@ -63,7 +63,7 @@ public class ClientTrackingTests
         pipeA.Writer.Complete();
         try
         {
-            await sessionATask.WaitAsync(TimeSpan.FromSeconds(3));
+            await sessionATask.WaitAsync(TimeSpan.FromSeconds(TestTimeoutSeconds));
         }
         catch (TimeoutException)
         {
@@ -145,7 +145,7 @@ public class ClientTrackingTests
         pipeA.Writer.Complete();
         try
         {
-            await sessionATask.WaitAsync(TimeSpan.FromSeconds(3));
+            await sessionATask.WaitAsync(TimeSpan.FromSeconds(TestTimeoutSeconds));
         }
         catch (TimeoutException) { }
 

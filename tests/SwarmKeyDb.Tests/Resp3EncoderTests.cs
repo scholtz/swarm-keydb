@@ -241,9 +241,10 @@ public class Resp3EncoderTests
     [Test]
     public async Task BlobError_Resp3_EmitsBang()
     {
-        var result = await EncodeAsync(RespValue.BlobError("ERR some error"), 3);
+        const string message = "ERR some error";
+        var result = await EncodeAsync(RespValue.BlobError(message), 3);
         // Format: !<len>\r\n<msg>\r\n
-        var expected = $"!{Encoding.UTF8.GetByteCount("ERR some error")}\r\nERR some error\r\n";
+        var expected = $"!{Encoding.UTF8.GetByteCount(message)}\r\n{message}\r\n";
         AssertEqual(expected, result);
     }
 

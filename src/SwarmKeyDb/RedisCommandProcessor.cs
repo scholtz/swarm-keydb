@@ -3869,8 +3869,11 @@ public sealed class RedisCommandProcessor : IDisposable
                 continue;
             }
 
-            // HELLO proto AUTH username password → password is args[i+2] (if it exists)
-            // HELLO proto AUTH password         → password is args[i+1]
+            // Disambiguate AUTH <password> (2 args) from AUTH <username> <password> (3 args).
+            // We treat args[i+1] as the password in the 2-arg form, unless args[i+1] looks like
+            // a non-SETNAME token that is followed by another argument — in which case args[i+1]
+            // is the username and args[i+2] is the password.
+            // The SETNAME check guards against accidentally treating the SETNAME keyword as a username.
             string password;
             if (i + 2 < args.Count && args[i + 2].AsString().Length > 0 &&
                 args[i + 1].AsString().ToUpperInvariant() != "SETNAME")
