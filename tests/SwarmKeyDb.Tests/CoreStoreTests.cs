@@ -177,6 +177,33 @@ public class CoreStoreTests
     }
 
     [Test]
+    public async Task SwarmStoreDeleteRemovesBackendObjectWhenClientSupportsDeletionAsync()
+    {
+        var swarm = new MutableSwarmClient();
+        var index = new InMemoryKeyIndex();
+        var store = new SwarmKeyValueStore(swarm, index);
+
+        await store.PutAsync("delete:me", Encoding.UTF8.GetBytes("value"));
+        var reference = await index.GetReferenceAsync("delete:me");
+        Assert(reference is not null, "Expected backend reference before delete.");
+
+        Assert(await store.DeleteAsync("delete:me"), "Delete should return true for existing key.");
+        AssertEqual(null, await index.GetReferenceAsync("delete:me"));
+        AssertEqual(1, swarm.DeleteCalls);
+        NUnit.Framework.Assert.ThrowsAsync<KeyNotFoundException>(async () => await swarm.DownloadAsync(reference!));
+    }
+
+    [Test]
+    public async Task SwarmStoreDeleteMissingKeyDoesNotAttemptBackendDeletionAsync()
+    {
+        var swarm = new MutableSwarmClient();
+        var store = new SwarmKeyValueStore(swarm, new InMemoryKeyIndex());
+
+        Assert(!await store.DeleteAsync("missing:key"), "Delete should return false for missing key.");
+        AssertEqual(0, swarm.DeleteCalls);
+    }
+
+    [Test]
     public async Task BeeClientParsesUploadReferenceAsync()
     {
         var handler = new StubHttpMessageHandler(request =>

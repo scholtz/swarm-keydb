@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 
 namespace SwarmKeyDb;
 
-public sealed class InMemorySwarmClient : ISwarmClient
+public sealed class InMemorySwarmClient : ISwarmClient, ISwarmDeletionClient
 {
     private readonly Dictionary<string, byte[]> _objects = new(StringComparer.Ordinal);
 
@@ -24,5 +24,11 @@ public sealed class InMemorySwarmClient : ISwarmClient
         }
 
         return Task.FromResult(data.ToArray());
+    }
+
+    public Task<bool> DeleteAsync(string reference, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(_objects.Remove(reference));
     }
 }

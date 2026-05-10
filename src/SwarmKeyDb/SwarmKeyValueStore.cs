@@ -77,7 +77,19 @@ public sealed class SwarmKeyValueStore : IKeyValueStore, IBackendMetadataProvide
     public async Task<bool> DeleteAsync(string key, CancellationToken cancellationToken = default)
     {
         ValidateKey(key);
-        return await _index.RemoveAsync(key, cancellationToken).ConfigureAwait(false);
+        var reference = await _index.GetReferenceAsync(key, cancellationToken).ConfigureAwait(false);
+        var removed = await _index.RemoveAsync(key, cancellationToken).ConfigureAwait(false);
+        if (!removed || string.IsNullOrWhiteSpace(reference))
+        {
+            return removed;
+        }
+
+        if (_swarmClient is ISwarmDeletionClient deletionClient)
+        {
+            await deletionClient.DeleteAsync(reference, cancellationToken).ConfigureAwait(false);
+        }
+
+        return removed;
     }
 
     public Task<IReadOnlyList<string>> ListKeysAsync(CancellationToken cancellationToken = default) =>

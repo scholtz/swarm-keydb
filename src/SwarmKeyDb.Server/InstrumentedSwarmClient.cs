@@ -2,7 +2,7 @@ using SwarmKeyDb;
 
 namespace SwarmKeyDb.Server;
 
-public sealed class InstrumentedSwarmClient : ISwarmClient
+public sealed class InstrumentedSwarmClient : ISwarmClient, ISwarmDeletionClient
 {
     private readonly ISwarmClient _inner;
     private readonly MonitoringMetrics _metrics;
@@ -25,5 +25,15 @@ public sealed class InstrumentedSwarmClient : ISwarmClient
         var payload = await _inner.DownloadAsync(reference, cancellationToken).ConfigureAwait(false);
         _metrics.OnSwarmRead();
         return payload;
+    }
+
+    public Task<bool> DeleteAsync(string reference, CancellationToken cancellationToken = default)
+    {
+        if (_inner is ISwarmDeletionClient deletable)
+        {
+            return deletable.DeleteAsync(reference, cancellationToken);
+        }
+
+        return Task.FromResult(false);
     }
 }

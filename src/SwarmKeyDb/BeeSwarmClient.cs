@@ -4,7 +4,7 @@ using System.Text.Json.Serialization;
 
 namespace SwarmKeyDb;
 
-public sealed class BeeSwarmClient : ISwarmClient, IDisposable
+public sealed class BeeSwarmClient : ISwarmClient, ISwarmDeletionClient, IDisposable
 {
     private readonly HttpClient _httpClient;
     private readonly string _postageBatchId;
@@ -61,6 +61,23 @@ public sealed class BeeSwarmClient : ISwarmClient, IDisposable
         return await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<bool> DeleteAsync(string reference, CancellationToken cancellationToken = default)
+    {
+        using var response = await _httpClient.DeleteAsync($"pins/{Uri.EscapeDataString(reference)}", cancellationToken).ConfigureAwait(false);
+        if (response.IsSuccessStatusCode)
+        {
+            return true;
+        }
+
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return true;
+        }
+
+        response.EnsureSuccessStatusCode();
+        return false;
+    }
+
     public void Dispose()
     {
         if (_disposeClient)
@@ -84,6 +101,8 @@ public sealed class BeeSwarmClient : ISwarmClient, IDisposable
 
         return host.Equals("bzz.link", StringComparison.OrdinalIgnoreCase)
             || host.EndsWith(".bzz.link", StringComparison.OrdinalIgnoreCase)
+            || host.Equals("bzz.limo", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".bzz.limo", StringComparison.OrdinalIgnoreCase)
             || host.Equals("gateway.ethswarm.org", StringComparison.OrdinalIgnoreCase);
     }
 }

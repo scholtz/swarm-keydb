@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 
 namespace SwarmKeyDb;
 
-public sealed class FileSwarmClient : ISwarmClient
+public sealed class FileSwarmClient : ISwarmClient, ISwarmDeletionClient
 {
     private readonly string _directory;
 
@@ -34,6 +34,19 @@ public sealed class FileSwarmClient : ISwarmClient
         }
 
         return File.ReadAllBytesAsync(path, cancellationToken);
+    }
+
+    public Task<bool> DeleteAsync(string reference, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var path = GetPath(reference);
+        if (!File.Exists(path))
+        {
+            return Task.FromResult(false);
+        }
+
+        File.Delete(path);
+        return Task.FromResult(true);
     }
 
     private string GetPath(string reference) => Path.Combine(_directory, reference);

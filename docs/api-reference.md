@@ -34,6 +34,8 @@ This reference covers the public Redis protocol surface and `SwarmKeyDbClient` m
 
 ## Stable protocol-visible errors
 
+`DEL`/`MDEL` remove index entries and, when the configured backend client supports deletion, also trigger backend reference cleanup (for example Bee/IPFS unpin operations).
+
 | Error | Meaning |
 | --- | --- |
 | `ERR wrong number of arguments for '<COMMAND>' command` | Command arity mismatch. |

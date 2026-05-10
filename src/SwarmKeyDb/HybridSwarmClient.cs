@@ -3,7 +3,7 @@ using System.Text.Json;
 
 namespace SwarmKeyDb;
 
-public sealed class HybridSwarmClient : ISwarmClient
+public sealed class HybridSwarmClient : ISwarmClient, ISwarmDeletionClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -45,6 +45,27 @@ public sealed class HybridSwarmClient : ISwarmClient
         }
 
         return await DownloadFromEitherAsync(parsed.SwarmReference, parsed.IpfsCid, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<bool> DeleteAsync(string reference, CancellationToken cancellationToken = default)
+    {
+        if (!HybridReferenceCodec.TryDecode(reference, out var parsed))
+        {
+            return await DeleteFromClientAsync(_swarmClient, reference, cancellationToken).ConfigureAwait(false);
+        }
+
+        var deletedAny = false;
+        if (!string.IsNullOrWhiteSpace(parsed.SwarmReference))
+        {
+            deletedAny |= await DeleteFromClientAsync(_swarmClient, parsed.SwarmReference!, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!string.IsNullOrWhiteSpace(parsed.IpfsCid))
+        {
+            deletedAny |= await DeleteFromClientAsync(_ipfsClient, parsed.IpfsCid!, cancellationToken).ConfigureAwait(false);
+        }
+
+        return deletedAny;
     }
 
     private async Task<byte[]> DownloadFromEitherAsync(string? swarmReference, string? ipfsCid, CancellationToken cancellationToken)
@@ -121,6 +142,16 @@ public sealed class HybridSwarmClient : ISwarmClient
         {
             return (backend, null, ex.Message);
         }
+    }
+
+    private static Task<bool> DeleteFromClientAsync(ISwarmClient client, string reference, CancellationToken cancellationToken)
+    {
+        if (client is ISwarmDeletionClient deletable)
+        {
+            return deletable.DeleteAsync(reference, cancellationToken);
+        }
+
+        return Task.FromResult(false);
     }
 }
 

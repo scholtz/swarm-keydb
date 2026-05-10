@@ -4,7 +4,7 @@ using System.Text.Json.Serialization;
 
 namespace SwarmKeyDb;
 
-public sealed class IpfsSwarmClient : ISwarmClient, IDisposable
+public sealed class IpfsSwarmClient : ISwarmClient, ISwarmDeletionClient, IDisposable
 {
     private readonly HttpClient _httpClient;
     private readonly bool _disposeClient;
@@ -49,6 +49,25 @@ public sealed class IpfsSwarmClient : ISwarmClient, IDisposable
         using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<bool> DeleteAsync(string reference, CancellationToken cancellationToken = default)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"api/v0/pin/rm?arg={Uri.EscapeDataString(reference)}");
+        using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        if (response.IsSuccessStatusCode)
+        {
+            return true;
+        }
+
+        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        if (body.Contains("not pinned", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        response.EnsureSuccessStatusCode();
+        return false;
     }
 
     public void Dispose()

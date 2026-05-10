@@ -24,9 +24,12 @@ internal sealed class StubHttpMessageHandler : HttpMessageHandler
         Task.FromResult(_handler(request));
 }
 
-internal sealed class MutableSwarmClient : ISwarmClient
+internal sealed class MutableSwarmClient : ISwarmClient, ISwarmDeletionClient
 {
     private readonly Dictionary<string, byte[]> _objects = new(StringComparer.Ordinal);
+    private int _deleteCalls;
+
+    public int DeleteCalls => Volatile.Read(ref _deleteCalls);
 
     public Task<string> UploadAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
     {
@@ -46,6 +49,13 @@ internal sealed class MutableSwarmClient : ISwarmClient
         }
 
         return Task.FromResult(data.ToArray());
+    }
+
+    public Task<bool> DeleteAsync(string reference, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Interlocked.Increment(ref _deleteCalls);
+        return Task.FromResult(_objects.Remove(reference));
     }
 
     public void Corrupt(string reference, Func<byte[], byte[]> mutator)
