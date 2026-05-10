@@ -154,11 +154,11 @@ public class WebSocketGatewayTests
         await SendTextAsync(client, """["HELLO","3"]""", cts.Token);
         var helloPayload = await ReceiveTextAsync(client, cts.Token);
         using var helloJson = JsonDocument.Parse(helloPayload);
-        Assert.That(helloJson.RootElement.ValueKind, Is.EqualTo(JsonValueKind.Object), $"Expected HELLO 3 map payload. Payload: {helloPayload}");
-        Assert.That(helloJson.RootElement.GetProperty("proto").GetInt32(), Is.EqualTo(3));
+        Assert(helloJson.RootElement.ValueKind == JsonValueKind.Object, $"Expected HELLO 3 map payload. Payload: {helloPayload}");
+        AssertEqual(3, helloJson.RootElement.GetProperty("proto").GetInt32());
 
         var metricsPayload = metrics.CollectPrometheus();
-        Assert.That(metricsPayload.Contains("swarmkeydb_ws_resp3_connections_total", StringComparison.Ordinal), Is.True);
+        Assert(metricsPayload.Contains("swarmkeydb_ws_resp3_connections_total", StringComparison.Ordinal), "Expected ws RESP3 metric.");
 
         await StopGatewayAsync(gateway, cts, runTask);
     }
@@ -183,15 +183,15 @@ public class WebSocketGatewayTests
         _ = await ReceiveTextAsync(writer, cts.Token);
         var push = await ReceiveTextAsync(tracked, cts.Token);
         using var pushJson = JsonDocument.Parse(push);
-        Assert.That(pushJson.RootElement.GetProperty("type").GetString(), Is.EqualTo("push"));
-        Assert.That(pushJson.RootElement.GetProperty("data")[0].GetString(), Is.EqualTo("invalidate"));
+        AssertEqual("push", pushJson.RootElement.GetProperty("type").GetString());
+        AssertEqual("invalidate", pushJson.RootElement.GetProperty("data")[0].GetString());
 
         await SendTextAsync(tracked, """["RESET"]""", cts.Token);
         var reset = await ReceiveTextAsync(tracked, cts.Token);
-        Assert.That(reset, Is.EqualTo("\"RESET\""));
+        AssertEqual("\"RESET\"", reset);
 
         var metricsPayload = metrics.CollectPrometheus();
-        Assert.That(metricsPayload.Contains("swarmkeydb_ws_client_tracking_connections", StringComparison.Ordinal), Is.True);
+        Assert(metricsPayload.Contains("swarmkeydb_ws_client_tracking_connections", StringComparison.Ordinal), "Expected ws tracking metric.");
 
         await StopGatewayAsync(gateway, cts, runTask);
     }

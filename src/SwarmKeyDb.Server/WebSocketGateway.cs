@@ -151,6 +151,7 @@ public sealed class WebSocketGateway : IDisposable
         WebSocketResponseMode outputMode = WebSocketResponseMode.Json;
         var protocolVersion = 2;
         var isTrackingEnabled = false;
+        var clientId = Math.Abs(Guid.NewGuid().GetHashCode());
         var isAuthenticated = _requiredPassword is null;
         var pendingCommands = Channel.CreateUnbounded<PendingCommand>();
         var inputPipe = new Pipe();
@@ -209,6 +210,19 @@ public sealed class WebSocketGateway : IDisposable
                     }
 
                     await SendResponseAsync(socket, outputMode, authResponse, command, sendLock, protocolVersion, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (command == "HELLO")
+                {
+                    var previousProtocol = protocolVersion;
+                    var helloResponse = HandleHello(args, ref protocolVersion, clientId);
+                    if (helloResponse.Type != RespType.Error && previousProtocol != 3 && protocolVersion == 3)
+                    {
+                        _metrics.OnWebSocketResp3Negotiated();
+                    }
+
+                    await SendResponseAsync(socket, outputMode, helloResponse, command, sendLock, protocolVersion, cancellationToken).ConfigureAwait(false);
                     continue;
                 }
 
@@ -288,7 +302,7 @@ public sealed class WebSocketGateway : IDisposable
     {
         while (!cancellationToken.IsCancellationRequested && socket.State == WebSocketState.Open)
         {
-            RespValue value;
+            RespValue? value;
             try
             {
                 value = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
@@ -298,6 +312,11 @@ public sealed class WebSocketGateway : IDisposable
                 break;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            if (value is null)
             {
                 break;
             }
@@ -655,6 +674,36 @@ public sealed class WebSocketGateway : IDisposable
         }
 
         return false;
+    }
+
+    private static RespValue HandleHello(string[] args, ref int protocolVersion, long clientId)
+    {
+        var requestedProtocol = protocolVersion;
+        if (args.Length >= 1 && !string.IsNullOrWhiteSpace(args[0]))
+        {
+            if (!int.TryParse(args[0], out requestedProtocol) || requestedProtocol is not (2 or 3))
+            {
+                return RespValue.Error("NOPROTO unsupported protocol version");
+            }
+        }
+
+        protocolVersion = requestedProtocol;
+        return BuildHelloResponse(clientId, protocolVersion);
+    }
+
+    private static RespValue BuildHelloResponse(long clientId, int proto)
+    {
+        var pairs = new List<RespValue>
+        {
+            RespValue.BulkString("server"), RespValue.BulkString("swarmkeydb"),
+            RespValue.BulkString("version"), RespValue.BulkString("7.0.0"),
+            RespValue.BulkString("proto"), RespValue.IntegerValue(proto),
+            RespValue.BulkString("id"), RespValue.IntegerValue(clientId),
+            RespValue.BulkString("mode"), RespValue.BulkString("standalone"),
+            RespValue.BulkString("role"), RespValue.BulkString("master"),
+            RespValue.BulkString("modules"), RespValue.Array(Array.Empty<RespValue>())
+        };
+        return proto == 3 ? RespValue.Map(pairs) : RespValue.Array(pairs);
     }
 
     private void ApplyCommandOutcome(PendingCommand pending, RespValue response, ref int protocolVersion, ref bool trackingEnabled)
