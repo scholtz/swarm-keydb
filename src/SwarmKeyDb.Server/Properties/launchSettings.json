@@ -2,7 +2,7 @@
   "profiles": {
     "SwarmKeyDb.Server": {
       "commandName": "Project",
-      "commandLineArgs": "BEE_POSTAGE_BATCH_ID=BATCH_ID BEE_URL=https://bzz.limo SWARM_KEYDB_BACKEND=bee"
+      "commandLineArgs": "BEE_POSTAGE_BATCH_ID=NULL_STAMP BEE_URL=https://bzz.limo SWARM_KEYDB_BACKEND=bee"
     }
   }
 }

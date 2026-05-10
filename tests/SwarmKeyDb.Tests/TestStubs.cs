@@ -68,6 +68,24 @@ internal sealed class MutableSwarmClient : ISwarmClient
     }
 }
 
+internal sealed class FailingSwarmClient : ISwarmClient
+{
+    private readonly Exception _uploadException;
+    private readonly Exception _downloadException;
+
+    public FailingSwarmClient(Exception uploadException, Exception? downloadException = null)
+    {
+        _uploadException = uploadException;
+        _downloadException = downloadException ?? uploadException;
+    }
+
+    public Task<string> UploadAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default) =>
+        Task.FromException<string>(_uploadException);
+
+    public Task<byte[]> DownloadAsync(string reference, CancellationToken cancellationToken = default) =>
+        Task.FromException<byte[]>(_downloadException);
+}
+
 internal sealed class CountingKeyValueStore : IKeyValueStore
 {
     private readonly Dictionary<string, byte[]> _values = new(StringComparer.Ordinal);

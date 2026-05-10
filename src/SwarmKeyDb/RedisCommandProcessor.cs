@@ -1099,6 +1099,14 @@ public sealed class RedisCommandProcessor : IDisposable
         {
             response = RespValue.Error("ERR value is not an integer or out of range");
         }
+        catch (HttpRequestException)
+        {
+            response = RespValue.Error("ERR backend storage unavailable");
+        }
+        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            response = RespValue.Error("ERR backend storage timeout");
+        }
 
         Interlocked.Increment(ref _totalCommandsProcessed);
         if (response.Type == RespType.Error)

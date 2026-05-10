@@ -149,4 +149,33 @@ public class StringCommandTests
             "Expected correlationId in command logging scope.");
     }
 
+    [Test]
+    public async Task RedisSetReturnsErrorWhenBackendUploadFailsAsync()
+    {
+        var failingStore = new SwarmKeyValueStore(
+            new FailingSwarmClient(new HttpRequestException("Not Found", null, HttpStatusCode.NotFound)),
+            new InMemoryKeyIndex());
+        var processor = new RedisCommandProcessor(failingStore);
+
+        var response = await ExecuteAsync(processor, RespCommand("SET", "bee:key", "value"));
+        AssertEqual("-ERR backend storage unavailable\r\n", response);
+    }
+
+    [Test]
+    public async Task RedisGetReturnsErrorWhenBackendDownloadFailsAsync()
+    {
+        var index = new InMemoryKeyIndex();
+        await index.SetReferenceAsync("bee:key", "swarm-ref");
+
+        var failingStore = new SwarmKeyValueStore(
+            new FailingSwarmClient(
+                new HttpRequestException("Not Found", null, HttpStatusCode.NotFound),
+                new HttpRequestException("Not Found", null, HttpStatusCode.NotFound)),
+            index);
+        var processor = new RedisCommandProcessor(failingStore);
+
+        var response = await ExecuteAsync(processor, RespCommand("GET", "bee:key"));
+        AssertEqual("-ERR backend storage unavailable\r\n", response);
+    }
+
 }

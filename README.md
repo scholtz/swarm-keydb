@@ -210,35 +210,44 @@ XTRIM events MAXLEN ~ 10000         -> :<trimmed-count>
 XTRIM events MINID 1715200000000-0  -> :<trimmed-count>
 ```
 
-## Check the bee
+## Check Bee writes end-to-end
 
-For sample demonstration run the server with
+Use a writable Bee API endpoint for writes (typically your own Bee node), then optionally verify reads through a gateway.
 
 ```
-BEE_POSTAGE_BATCH_ID=BATCH_ID BEE_URL=https://bzz.limo SWARM_KEYDB_BACKEND=bee 
+SWARM_KEYDB_BACKEND=bee BEE_URL=http://localhost:1633 BEE_POSTAGE_BATCH_ID=<funded-batch-id>
 ```
+
+Notes:
+
+- `BEE_URL` must point to a Bee API that accepts `POST /bytes`.
+- `BEE_POSTAGE_BATCH_ID` must be a real funded postage batch.
+- `https://bzz.limo` is commonly used as a read gateway; it is not a general-purpose upload endpoint for your node/batch.
 
 Write a test key
 Use redis-cli against your running server:
 ```
-redis-cli -p 6379 -h 172.22.112.1 SET test:swarm-check hello
+redis-cli -p 6379 SET test:swarm-check hello
 ```
 
 Get the backend metadata for that key
 SwarmKeyDb exposes a Redis command for this:
 ```
-redis-cli -p 6379 -h 172.22.112.1 BACKENDMETA test:swarm-check
+redis-cli -p 6379 BACKENDMETA test:swarm-check
 ```
 
-outputs:
+Expected output shape:
 
 ```
 "{\"type\":\"swarm\",\"swarmReference\":\"b0b862080619b0993308f361d44b1a2fb5f11a981f7023f9ecc689a0016e7b2b\"}"
 ```
 
-To test written to sample bee you can do 
+To validate the referenced object is retrievable:
 
 ```
+curl -fSL "http://localhost:1633/bytes/b0b862080619b0993308f361d44b1a2fb5f11a981f7023f9ecc689a0016e7b2b" -o swarm-object.bin
+
+# Optional gateway verification (can lag; 404 immediately after write is possible)
 curl -fSL "https://bzz.limo/bytes/b0b862080619b0993308f361d44b1a2fb5f11a981f7023f9ecc689a0016e7b2b" -o swarm-object.bin
 ```
 

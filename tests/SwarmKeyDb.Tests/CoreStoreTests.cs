@@ -195,6 +195,49 @@ public class CoreStoreTests
     }
 
     [Test]
+    public async Task BeeClientUploadAndDownloadRoundTripAsync()
+    {
+        var payload = Encoding.UTF8.GetBytes("bee-payload");
+        var handler = new StubHttpMessageHandler(request =>
+        {
+            if (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/bytes")
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("{\"reference\":\"abc123\"}")
+                };
+            }
+
+            if (request.Method == HttpMethod.Get && request.RequestUri?.AbsolutePath == "/bytes/abc123")
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(payload)
+                };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        });
+
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://bzz.limo") };
+        var client = new BeeSwarmClient(httpClient, "NULL_STAMP");
+
+        var reference = await client.UploadAsync(payload);
+        AssertEqual("abc123", reference);
+        AssertSequenceEqual(payload, await client.DownloadAsync(reference));
+    }
+
+    [Test]
+    public void BeeClientUploadThrowsOnHttpFailureAsync()
+    {
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://bzz.limo") };
+        var client = new BeeSwarmClient(httpClient, "NULL_STAMP");
+
+        NUnit.Framework.Assert.ThrowsAsync<HttpRequestException>(async () => await client.UploadAsync(Encoding.UTF8.GetBytes("v")));
+    }
+
+    [Test]
     public async Task BeeConsistencyVerifierValidatesFeedRevisionAsync()
     {
         var handler = new StubHttpMessageHandler(request =>
