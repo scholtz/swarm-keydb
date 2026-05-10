@@ -82,8 +82,7 @@ public sealed class BeeSwarmClient : ISwarmClient, IDisposable
             return false;
         }
 
-        return host.Equals("bzz.limo", StringComparison.OrdinalIgnoreCase)
-            || host.Equals("bzz.link", StringComparison.OrdinalIgnoreCase)
+        return host.Equals("bzz.link", StringComparison.OrdinalIgnoreCase)
             || host.EndsWith(".bzz.link", StringComparison.OrdinalIgnoreCase)
             || host.Equals("gateway.ethswarm.org", StringComparison.OrdinalIgnoreCase);
     }
