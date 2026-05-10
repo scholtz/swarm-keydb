@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>SwarmKeyDb WebSocket Demo</title>
+  <style>
+    body { font-family: sans-serif; margin: 1rem; }
+    input, button { margin: 0.25rem; }
+    pre { background: #f5f5f5; padding: 0.5rem; min-height: 14rem; }
+  </style>
+</head>
+<body>
+  <h1>SwarmKeyDb WebSocket Demo</h1>
+  <label>URL <input id="url" value="ws://localhost:8765/" size="36" /></label>
+  <label>Channel <input id="channel" value="demo-channel" /></label>
+  <button id="connect">Connect</button>
+  <button id="subscribe">Subscribe</button>
+  <button id="publish">Publish</button>
+  <pre id="log"></pre>
+
+  <script>
+    const log = (line) => {
+      const el = document.getElementById("log");
+      el.textContent += `${line}\n`;
+    };
+
+    let ws = null;
+    const channel = () => document.getElementById("channel").value;
+
+    document.getElementById("connect").onclick = () => {
+      ws = new WebSocket(document.getElementById("url").value);
+      ws.onopen = () => log("connected");
+      ws.onmessage = (event) => log(`<= ${event.data}`);
+      ws.onclose = () => log("closed");
+      ws.onerror = () => log("error");
+    };
+
+    document.getElementById("subscribe").onclick = () => {
+      if (!ws) return;
+      const frame = JSON.stringify({ cmd: "SUBSCRIBE", args: [channel()] });
+      log(`=> ${frame}`);
+      ws.send(frame);
+    };
+
+    document.getElementById("publish").onclick = () => {
+      if (!ws) return;
+      const payload = `hello-${Date.now()}`;
+      const frame = JSON.stringify({ cmd: "PUBLISH", args: [channel(), payload] });
+      log(`=> ${frame}`);
+      ws.send(frame);
+    };
+  </script>
+</body>
+</html>

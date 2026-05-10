@@ -23,6 +23,11 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
     private readonly Func<CompatibilityMetricsSnapshot> _compatibilityMetricsAccessor;
     private readonly string _privacyMode;
     private long _activeConnections;
+    private long _activeWebSocketConnections;
+    private long _webSocketConnectionsTotal;
+    private long _webSocketMessagesReceivedTotal;
+    private long _webSocketMessagesSentTotal;
+    private long _webSocketErrorsTotal;
     private long _swarmReads;
     private long _swarmWrites;
     private long _resyncPartialTotal;
@@ -61,6 +66,20 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
     public void OnConnectionOpened() => Interlocked.Increment(ref _activeConnections);
 
     public void OnConnectionClosed() => Interlocked.Decrement(ref _activeConnections);
+
+    public void OnWebSocketConnectionOpened()
+    {
+        Interlocked.Increment(ref _activeWebSocketConnections);
+        Interlocked.Increment(ref _webSocketConnectionsTotal);
+    }
+
+    public void OnWebSocketConnectionClosed() => Interlocked.Decrement(ref _activeWebSocketConnections);
+
+    public void OnWebSocketMessageReceived() => Interlocked.Increment(ref _webSocketMessagesReceivedTotal);
+
+    public void OnWebSocketMessageSent() => Interlocked.Increment(ref _webSocketMessagesSentTotal);
+
+    public void OnWebSocketError() => Interlocked.Increment(ref _webSocketErrorsTotal);
 
     public void OnSwarmRead() => Interlocked.Increment(ref _swarmReads);
 
@@ -135,6 +154,16 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine("# TYPE swarmkeydb_swarm_reads_total counter");
         builder.AppendLine("# HELP swarmkeydb_swarm_writes_total Total Swarm writes.");
         builder.AppendLine("# TYPE swarmkeydb_swarm_writes_total counter");
+        builder.AppendLine("# HELP swarmkeydb_ws_active_connections Active WebSocket gateway connections.");
+        builder.AppendLine("# TYPE swarmkeydb_ws_active_connections gauge");
+        builder.AppendLine("# HELP swarmkeydb_ws_connections_total Total accepted WebSocket gateway connections.");
+        builder.AppendLine("# TYPE swarmkeydb_ws_connections_total counter");
+        builder.AppendLine("# HELP swarmkeydb_ws_messages_received_total Total WebSocket frames received by the gateway.");
+        builder.AppendLine("# TYPE swarmkeydb_ws_messages_received_total counter");
+        builder.AppendLine("# HELP swarmkeydb_ws_messages_sent_total Total WebSocket frames sent by the gateway.");
+        builder.AppendLine("# TYPE swarmkeydb_ws_messages_sent_total counter");
+        builder.AppendLine("# HELP swarmkeydb_ws_errors_total Total WebSocket gateway errors.");
+        builder.AppendLine("# TYPE swarmkeydb_ws_errors_total counter");
         builder.AppendLine("# HELP swarmkeydb_offline_queue_depth Pending offline journal entries.");
         builder.AppendLine("# TYPE swarmkeydb_offline_queue_depth gauge");
         builder.AppendLine("# HELP swarmkeydb_offline_last_sync_unix_time Last successful offline sync time.");
@@ -285,6 +314,11 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine(FormatMetric("swarmkeydb_active_connections", Interlocked.Read(ref _activeConnections)));
         builder.AppendLine(FormatMetric("swarmkeydb_swarm_reads_total", Interlocked.Read(ref _swarmReads)));
         builder.AppendLine(FormatMetric("swarmkeydb_swarm_writes_total", Interlocked.Read(ref _swarmWrites)));
+        builder.AppendLine(FormatMetric("swarmkeydb_ws_active_connections", Interlocked.Read(ref _activeWebSocketConnections)));
+        builder.AppendLine(FormatMetric("swarmkeydb_ws_connections_total", Interlocked.Read(ref _webSocketConnectionsTotal)));
+        builder.AppendLine(FormatMetric("swarmkeydb_ws_messages_received_total", Interlocked.Read(ref _webSocketMessagesReceivedTotal)));
+        builder.AppendLine(FormatMetric("swarmkeydb_ws_messages_sent_total", Interlocked.Read(ref _webSocketMessagesSentTotal)));
+        builder.AppendLine(FormatMetric("swarmkeydb_ws_errors_total", Interlocked.Read(ref _webSocketErrorsTotal)));
         var offlineStatus = _offlineStatusAccessor();
         builder.AppendLine(FormatMetric("swarmkeydb_offline_queue_depth", offlineStatus.QueueDepth));
         builder.AppendLine(FormatMetric(
