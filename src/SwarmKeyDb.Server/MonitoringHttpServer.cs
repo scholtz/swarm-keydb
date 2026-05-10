@@ -465,11 +465,17 @@ public sealed class MonitoringHttpServer : IDisposable
                                                  <button id="resync-trigger-full" type="button">Trigger full resync</button>
                                                </p>
                                                <pre id="resync-result">idle</pre>
-                                                <h2>Pub/Sub Status</h2>
-                                                 <p>Active Subscriber Connections: <strong id="pubsub-subscribers">0</strong></p>
-                                                 <p>Messages Published (total): <strong id="pubsub-published">0</strong></p>
-                                                 <p>Messages Dropped (total): <strong id="pubsub-dropped">0</strong></p>
-                                                  <h2>Stream Groups</h2>
+                                                 <h2>Pub/Sub Status</h2>
+                                                  <p>Active Subscriber Connections: <strong id="pubsub-subscribers">0</strong></p>
+                                                  <p>Messages Published (total): <strong id="pubsub-published">0</strong></p>
+                                                  <p>Messages Dropped (total): <strong id="pubsub-dropped">0</strong></p>
+                                                  <h2>WebSocket Gateway</h2>
+                                                  <p>Total Connections: <strong id="ws-connections-total">0</strong></p>
+                                                  <p>Active Connections: <strong id="ws-active-connections">0</strong></p>
+                                                  <p>Messages Received (total): <strong id="ws-messages-received-total">0</strong></p>
+                                                  <p>Messages Sent (total): <strong id="ws-messages-sent-total">0</strong></p>
+                                                  <p>Errors (total): <strong id="ws-errors-total">0</strong></p>
+                                                   <h2>Stream Groups</h2>
                                                   <p>Group Count: <strong id="stream-group-count">0</strong></p>
                                                   <p>Pending Entries: <strong id="stream-pending-total">0</strong></p>
                                                    <p>XACK Total: <strong id="stream-xack-total">0</strong></p>
@@ -546,10 +552,15 @@ public sealed class MonitoringHttpServer : IDisposable
                                                const resyncResultEl = document.getElementById('resync-result');
                                                const resyncTriggerPartialButton = document.getElementById('resync-trigger-partial');
                                                const resyncTriggerFullButton = document.getElementById('resync-trigger-full');
-                                                const pubSubSubscribersEl = document.getElementById('pubsub-subscribers');
-                                                const pubSubPublishedEl = document.getElementById('pubsub-published');
-                                                const pubSubDroppedEl = document.getElementById('pubsub-dropped');
-                                                const streamGroupCountEl = document.getElementById('stream-group-count');
+                                                 const pubSubSubscribersEl = document.getElementById('pubsub-subscribers');
+                                                 const pubSubPublishedEl = document.getElementById('pubsub-published');
+                                                 const pubSubDroppedEl = document.getElementById('pubsub-dropped');
+                                                 const wsConnectionsTotalEl = document.getElementById('ws-connections-total');
+                                                 const wsActiveConnectionsEl = document.getElementById('ws-active-connections');
+                                                 const wsMessagesReceivedTotalEl = document.getElementById('ws-messages-received-total');
+                                                 const wsMessagesSentTotalEl = document.getElementById('ws-messages-sent-total');
+                                                 const wsErrorsTotalEl = document.getElementById('ws-errors-total');
+                                                 const streamGroupCountEl = document.getElementById('stream-group-count');
                                                  const streamPendingTotalEl = document.getElementById('stream-pending-total');
                                                  const streamXAckTotalEl = document.getElementById('stream-xack-total');
                                                  const streamXClaimTotalEl = document.getElementById('stream-xclaim-total');
@@ -586,10 +597,15 @@ public sealed class MonitoringHttpServer : IDisposable
                                                    'swarmkeydb_resync_full_total',
                                                    'swarmkeydb_resync_duration_seconds',
                                                    'swarmkeydb_resync_keys_replayed_total',
-                                                    'swarmkeydb_pubsub_subscribers_total',
-                                                    'swarmkeydb_pubsub_messages_published_total',
-                                                    'swarmkeydb_pubsub_messages_dropped_total',
-                                                    'swarmkeydb_stream_pending_entries_total',
+                                                     'swarmkeydb_pubsub_subscribers_total',
+                                                     'swarmkeydb_pubsub_messages_published_total',
+                                                     'swarmkeydb_pubsub_messages_dropped_total',
+                                                     'swarmkeydb_ws_connections_total',
+                                                     'swarmkeydb_ws_active_connections',
+                                                     'swarmkeydb_ws_messages_received_total',
+                                                     'swarmkeydb_ws_messages_sent_total',
+                                                     'swarmkeydb_ws_errors_total',
+                                                     'swarmkeydb_stream_pending_entries_total',
                                                     'swarmkeydb_stream_xack_total',
                                                      'swarmkeydb_stream_xclaim_total',
                                                      'swarmkeydb_stream_group_count',
@@ -647,10 +663,15 @@ public sealed class MonitoringHttpServer : IDisposable
                                                   const line = text.split('\n').find(l => l.startsWith(name + ' '));
                                                   return line ? line.split(' ')[1] : '0';
                                                 };
-                                                 pubSubSubscribersEl.textContent = extractMetric('swarmkeydb_pubsub_subscribers_total');
-                                                 pubSubPublishedEl.textContent = extractMetric('swarmkeydb_pubsub_messages_published_total');
-                                                 pubSubDroppedEl.textContent = extractMetric('swarmkeydb_pubsub_messages_dropped_total');
-                                                 streamGroupCountEl.textContent = extractMetric('swarmkeydb_stream_group_count');
+                                                  pubSubSubscribersEl.textContent = extractMetric('swarmkeydb_pubsub_subscribers_total');
+                                                  pubSubPublishedEl.textContent = extractMetric('swarmkeydb_pubsub_messages_published_total');
+                                                  pubSubDroppedEl.textContent = extractMetric('swarmkeydb_pubsub_messages_dropped_total');
+                                                  wsConnectionsTotalEl.textContent = extractMetric('swarmkeydb_ws_connections_total');
+                                                  wsActiveConnectionsEl.textContent = extractMetric('swarmkeydb_ws_active_connections');
+                                                  wsMessagesReceivedTotalEl.textContent = extractMetric('swarmkeydb_ws_messages_received_total');
+                                                  wsMessagesSentTotalEl.textContent = extractMetric('swarmkeydb_ws_messages_sent_total');
+                                                  wsErrorsTotalEl.textContent = extractMetric('swarmkeydb_ws_errors_total');
+                                                  streamGroupCountEl.textContent = extractMetric('swarmkeydb_stream_group_count');
                                                   streamPendingTotalEl.textContent = extractMetric('swarmkeydb_stream_pending_entries_total');
                                                   streamXAckTotalEl.textContent = extractMetric('swarmkeydb_stream_xack_total');
                                                   streamXClaimTotalEl.textContent = extractMetric('swarmkeydb_stream_xclaim_total');

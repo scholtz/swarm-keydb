@@ -11,6 +11,9 @@ using SwarmKeyDb.Server;
 
 var appSettings = LoadAppSettings();
 var port = GetInt("SWARM_KEYDB_PORT", 6379);
+var webSocketPort = GetInt("SWARM_KEYDB_WS_PORT", 8765);
+var webSocketCorsOrigins = ParseCsv(GetFirstSetting("SWARM_KEYDB_WS_CORS_ORIGINS", "SWARM_KEYDB_WS_ALLOWED_ORIGINS")) ?? ["*"];
+var requirePass = GetFirstSetting("SWARM_KEYDB_REQUIREPASS", "REQUIREPASS");
 var bind = IPAddress.Parse(GetString("SWARM_KEYDB_BIND", "0.0.0.0"));
 var dataDir = GetString("SWARM_KEYDB_DATA_DIR", Path.Combine(AppContext.BaseDirectory, "data"));
 var backend = (GetFirstSetting("BACKEND", "SWARM_KEYDB_BACKEND") ?? "local").ToLowerInvariant();
@@ -518,6 +521,19 @@ var server = new RedisServer(
     monitoringMetrics.OnConnectionOpened,
     monitoringMetrics.OnConnectionClosed,
     provider.GetRequiredService<ILogger<RedisServer>>());
+WebSocketGateway? webSocketGateway = null;
+if (webSocketPort > 0)
+{
+    webSocketGateway = new WebSocketGateway(
+        bind,
+        webSocketPort,
+        processor,
+        monitoringMetrics,
+        pubSubManager,
+        requirePass,
+        webSocketCorsOrigins,
+        provider.GetRequiredService<ILogger<WebSocketGateway>>());
+}
 
 // Create the Ethereum bridge (opt-in: only active when ETH_BRIDGE_ENABLED=true)
 EthereumBridgeService? ethereumBridge = null;
@@ -636,7 +652,11 @@ if (metricsEnabled && (!dashboardEnabled || metricsPort != dashboardPort))
     monitoringTasks.Add(metricsServer.RunAsync(cts.Token));
 }
 
-await server.RunAsync(cts.Token);
+var serverTask = server.RunAsync(cts.Token);
+var webSocketTask = webSocketGateway is null
+    ? Task.CompletedTask
+    : webSocketGateway.RunAsync(cts.Token);
+await Task.WhenAll(serverTask, webSocketTask);
 await Task.WhenAll(monitoringTasks);
 
 if (ethereumBridge is not null)
@@ -665,6 +685,7 @@ foreach (var monitoringServer in monitoringServers)
 {
     monitoringServer.Dispose();
 }
+webSocketGateway?.Dispose();
 foreach (var resource in ownedResources)
 {
     resource.Dispose();
@@ -838,6 +859,19 @@ string? GetFirstSetting(params string[] names)
     }
 
     return null;
+}
+
+static IReadOnlyList<string>? ParseCsv(string? raw)
+{
+    if (string.IsNullOrWhiteSpace(raw))
+    {
+        return null;
+    }
+
+    return raw
+        .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+        .Where(static value => !string.IsNullOrWhiteSpace(value))
+        .ToArray();
 }
 
 int? GetNullableIntFromMany(params string[] names)

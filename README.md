@@ -34,6 +34,8 @@ Project documentation lives under `docs/`:
 - `docs/deployment.md`
 - `docs/operations/cache-consistency-runbook.md`
 - `docs/stream-sizing-guide.md`
+- `docs/websocket-gateway.md`
+- `docs/ws-protocol.md`
 - `docs/faq.md`
 
 ## Quickstart (put/get round-trip)
@@ -68,7 +70,7 @@ Console.WriteLine((await db.GetSyncStatusAsync("profile:name"))?.Chains.Count);
 
 ```bash
 dotnet build SwarmKeyDb.slnx
-dotnet run --project tests/SwarmKeyDb.Tests/SwarmKeyDb.Tests.csproj
+dotnet test tests/SwarmKeyDb.Tests/SwarmKeyDb.Tests.csproj
 ```
 
 ## Multi-language SDKs

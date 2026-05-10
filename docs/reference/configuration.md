@@ -6,6 +6,9 @@
 | --- | --- | --- |
 | `SWARM_KEYDB_BIND` | `0.0.0.0` | Bind address for the Redis-compatible TCP server. |
 | `SWARM_KEYDB_PORT` | `6379` | TCP port exposed by the Redis-compatible server. |
+| `SWARM_KEYDB_WS_PORT` | `8765` | WebSocket gateway port for browser-native JSON/RESP commands (`0` disables gateway). |
+| `SWARM_KEYDB_WS_CORS_ORIGINS` | `*` | Comma-separated allowed WebSocket `Origin` values (use `*` to allow any origin). |
+| `SWARM_KEYDB_REQUIREPASS` | unset | Optional password required by WebSocket `AUTH` before non-auth commands are accepted. |
 | `SWARM_KEYDB_DATA_DIR` | platform-dependent | Local data directory for index and object storage. |
 | `BACKEND` | unset | Preferred backend selector (`swarm`, `ipfs`, `hybrid`); overrides `SWARM_KEYDB_BACKEND` when set. |
 | `SWARM_KEYDB_BACKEND` | `local` | Legacy backend selector (`local`, `bee`, `swarm`, `ipfs`, `hybrid`). |
