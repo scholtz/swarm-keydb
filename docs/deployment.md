@@ -33,16 +33,16 @@ docker run --rm -p 6379:6379 -p 8080:8080 -p 9090:9090 \
 - `SWARM_KEYDB_ASYNC_ENABLED=true`
 - `LOG_LEVEL=Information`
 - `METRICS_ENABLED=true`, `METRICS_PORT=9090`
-- `DASHBOARD_ENABLED=true`, `DASHBOARD_PORT=8080`
+- `DASHBOARD_ENABLED=true`, `DASHBOARD_PORT=8081`
 
 See full variable reference in `docs/reference/configuration.md`.
 
 ## Health checks
 
 ```bash
-curl http://localhost:8080/health
-curl http://localhost:8080/ready
-curl http://localhost:8080/backend
+curl http://localhost:8081/health
+curl http://localhost:8081/ready
+curl http://localhost:8081/backend
 ```
 
 ## Prometheus integration

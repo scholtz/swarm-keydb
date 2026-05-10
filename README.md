@@ -36,6 +36,7 @@ Project documentation lives under `docs/`:
 - `docs/stream-sizing-guide.md`
 - `docs/websocket-gateway.md`
 - `docs/ws-protocol.md`
+- `docs/http-rest-api.md`
 - `docs/faq.md`
 
 ## Quickstart (put/get round-trip)
@@ -46,6 +47,16 @@ var db = new SwarmKeyDbClient(new SwarmKeyValueStore(new InMemorySwarmClient(), 
 await db.PutStringAsync("hello", "world");
 var value = await db.GetStringAsync("hello");
 Console.WriteLine(value == "world" ? "round-trip ok" : "round-trip failed");
+```
+
+## Quick Start (HTTP REST API)
+
+```bash
+curl -sS -X POST http://localhost:8080/set/hello \
+  -H 'Content-Type: application/json' \
+  -d '{"value":"world"}'
+curl -sS http://localhost:8080/get/hello
+curl -sS -X DELETE http://localhost:8080/del/hello
 ```
 
 ## Cross-chain quick start
@@ -458,10 +469,10 @@ Quick check:
 
 ```bash
 curl http://localhost:9090/metrics
-curl http://localhost:8080/health
-curl http://localhost:8080/ready
-curl http://localhost:8080/backend
-open http://localhost:8080/dashboard
+curl http://localhost:8081/health
+curl http://localhost:8081/ready
+curl http://localhost:8081/backend
+open http://localhost:8081/dashboard
 ```
 
 Prometheus scrape example:

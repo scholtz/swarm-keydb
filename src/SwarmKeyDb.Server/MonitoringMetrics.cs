@@ -8,8 +8,10 @@ namespace SwarmKeyDb.Server;
 public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsReporter
 {
     private static readonly double[] LatencyBuckets = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
+    private static readonly double[] HttpLatencyBuckets = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
     private readonly ConcurrentDictionary<string, OperationStats> _operations = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, long> _errors = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<HttpMetricKey, HttpRequestStats> _httpRequests = new();
     private readonly ConcurrentQueue<MonitoringLogEntry> _logs = new();
     private readonly int _maxLogEntries;
     private readonly Func<ICacheStats> _cacheStatsAccessor;
@@ -80,6 +82,16 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
     public void OnWebSocketMessageSent() => Interlocked.Increment(ref _webSocketMessagesSentTotal);
 
     public void OnWebSocketError() => Interlocked.Increment(ref _webSocketErrorsTotal);
+
+    public void OnHttpRequestCompleted(string method, string route, int statusCode, TimeSpan elapsed)
+    {
+        var key = new HttpMetricKey(
+            string.IsNullOrWhiteSpace(method) ? "UNKNOWN" : method.ToUpperInvariant(),
+            string.IsNullOrWhiteSpace(route) ? "unknown" : route,
+            statusCode.ToString(CultureInfo.InvariantCulture));
+        var stats = _httpRequests.GetOrAdd(key, static _ => new HttpRequestStats(HttpLatencyBuckets));
+        stats.Increment(elapsed.TotalSeconds);
+    }
 
     public void OnSwarmRead() => Interlocked.Increment(ref _swarmReads);
 
@@ -164,6 +176,10 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine("# TYPE swarmkeydb_ws_messages_sent_total counter");
         builder.AppendLine("# HELP swarmkeydb_ws_errors_total Total WebSocket gateway errors.");
         builder.AppendLine("# TYPE swarmkeydb_ws_errors_total counter");
+        builder.AppendLine("# HELP swarmkeydb_http_requests_total Total HTTP REST gateway requests.");
+        builder.AppendLine("# TYPE swarmkeydb_http_requests_total counter");
+        builder.AppendLine("# HELP swarmkeydb_http_request_duration_seconds HTTP REST gateway request duration histogram.");
+        builder.AppendLine("# TYPE swarmkeydb_http_request_duration_seconds histogram");
         builder.AppendLine("# HELP swarmkeydb_offline_queue_depth Pending offline journal entries.");
         builder.AppendLine("# TYPE swarmkeydb_offline_queue_depth gauge");
         builder.AppendLine("# HELP swarmkeydb_offline_last_sync_unix_time Last successful offline sync time.");
@@ -319,6 +335,49 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine(FormatMetric("swarmkeydb_ws_messages_received_total", Interlocked.Read(ref _webSocketMessagesReceivedTotal)));
         builder.AppendLine(FormatMetric("swarmkeydb_ws_messages_sent_total", Interlocked.Read(ref _webSocketMessagesSentTotal)));
         builder.AppendLine(FormatMetric("swarmkeydb_ws_errors_total", Interlocked.Read(ref _webSocketErrorsTotal)));
+        foreach (var entry in _httpRequests.OrderBy(static pair => pair.Key.Method, StringComparer.Ordinal)
+                                           .ThenBy(static pair => pair.Key.Route, StringComparer.Ordinal)
+                                           .ThenBy(static pair => pair.Key.Status, StringComparer.Ordinal))
+        {
+            var key = entry.Key;
+            var snapshot = entry.Value.Snapshot();
+            builder.AppendLine(FormatMetric(
+                "swarmkeydb_http_requests_total",
+                snapshot.Count,
+                ("method", key.Method),
+                ("route", key.Route),
+                ("status", key.Status)));
+            for (var i = 0; i < HttpLatencyBuckets.Length; i++)
+            {
+                builder.AppendLine(FormatMetric(
+                    "swarmkeydb_http_request_duration_seconds_bucket",
+                    snapshot.BucketCounts[i],
+                    ("method", key.Method),
+                    ("route", key.Route),
+                    ("status", key.Status),
+                    ("le", HttpLatencyBuckets[i].ToString(CultureInfo.InvariantCulture))));
+            }
+
+            builder.AppendLine(FormatMetric(
+                "swarmkeydb_http_request_duration_seconds_bucket",
+                snapshot.Count,
+                ("method", key.Method),
+                ("route", key.Route),
+                ("status", key.Status),
+                ("le", "+Inf")));
+            builder.AppendLine(FormatMetric(
+                "swarmkeydb_http_request_duration_seconds_sum",
+                snapshot.SumSeconds,
+                ("method", key.Method),
+                ("route", key.Route),
+                ("status", key.Status)));
+            builder.AppendLine(FormatMetric(
+                "swarmkeydb_http_request_duration_seconds_count",
+                snapshot.Count,
+                ("method", key.Method),
+                ("route", key.Route),
+                ("status", key.Status)));
+        }
         var offlineStatus = _offlineStatusAccessor();
         builder.AppendLine(FormatMetric("swarmkeydb_offline_queue_depth", offlineStatus.QueueDepth));
         builder.AppendLine(FormatMetric(
@@ -595,6 +654,48 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         double P50Seconds,
         double P95Seconds,
         double P99Seconds);
+
+    private readonly record struct HttpMetricKey(string Method, string Route, string Status);
+
+    private sealed class HttpRequestStats
+    {
+        private readonly object _gate = new();
+        private readonly double[] _latencyBuckets;
+        private readonly long[] _bucketCounts;
+        private long _count;
+        private double _sumSeconds;
+
+        public HttpRequestStats(double[] latencyBuckets)
+        {
+            _latencyBuckets = latencyBuckets;
+            _bucketCounts = new long[latencyBuckets.Length];
+        }
+
+        public void Increment(double elapsedSeconds)
+        {
+            var duration = Math.Max(0D, elapsedSeconds);
+            lock (_gate)
+            {
+                _count++;
+                _sumSeconds += duration;
+                for (var i = 0; i < _latencyBuckets.Length; i++)
+                {
+                    if (duration <= _latencyBuckets[i])
+                    {
+                        _bucketCounts[i]++;
+                    }
+                }
+            }
+        }
+
+        public (long Count, double SumSeconds, IReadOnlyList<long> BucketCounts) Snapshot()
+        {
+            lock (_gate)
+            {
+                return (_count, _sumSeconds, _bucketCounts.ToArray());
+            }
+        }
+    }
 }
 
 public sealed record MonitoringLogEntry(

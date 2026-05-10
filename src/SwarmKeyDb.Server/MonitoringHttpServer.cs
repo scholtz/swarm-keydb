@@ -475,6 +475,9 @@ public sealed class MonitoringHttpServer : IDisposable
                                                   <p>Messages Received (total): <strong id="ws-messages-received-total">0</strong></p>
                                                   <p>Messages Sent (total): <strong id="ws-messages-sent-total">0</strong></p>
                                                   <p>Errors (total): <strong id="ws-errors-total">0</strong></p>
+                                                  <h2>HTTP REST Gateway</h2>
+                                                  <p>Requests (total): <strong id="http-requests-total">0</strong></p>
+                                                  <p>Average Latency: <strong id="http-latency-avg-ms">0 ms</strong></p>
                                                    <h2>Stream Groups</h2>
                                                   <p>Group Count: <strong id="stream-group-count">0</strong></p>
                                                   <p>Pending Entries: <strong id="stream-pending-total">0</strong></p>
@@ -557,10 +560,12 @@ public sealed class MonitoringHttpServer : IDisposable
                                                  const pubSubDroppedEl = document.getElementById('pubsub-dropped');
                                                  const wsConnectionsTotalEl = document.getElementById('ws-connections-total');
                                                  const wsActiveConnectionsEl = document.getElementById('ws-active-connections');
-                                                 const wsMessagesReceivedTotalEl = document.getElementById('ws-messages-received-total');
-                                                 const wsMessagesSentTotalEl = document.getElementById('ws-messages-sent-total');
-                                                 const wsErrorsTotalEl = document.getElementById('ws-errors-total');
-                                                 const streamGroupCountEl = document.getElementById('stream-group-count');
+                                                  const wsMessagesReceivedTotalEl = document.getElementById('ws-messages-received-total');
+                                                  const wsMessagesSentTotalEl = document.getElementById('ws-messages-sent-total');
+                                                  const wsErrorsTotalEl = document.getElementById('ws-errors-total');
+                                                  const httpRequestsTotalEl = document.getElementById('http-requests-total');
+                                                  const httpLatencyAvgMsEl = document.getElementById('http-latency-avg-ms');
+                                                  const streamGroupCountEl = document.getElementById('stream-group-count');
                                                  const streamPendingTotalEl = document.getElementById('stream-pending-total');
                                                  const streamXAckTotalEl = document.getElementById('stream-xack-total');
                                                  const streamXClaimTotalEl = document.getElementById('stream-xclaim-total');
@@ -601,11 +606,14 @@ public sealed class MonitoringHttpServer : IDisposable
                                                      'swarmkeydb_pubsub_messages_published_total',
                                                      'swarmkeydb_pubsub_messages_dropped_total',
                                                      'swarmkeydb_ws_connections_total',
-                                                     'swarmkeydb_ws_active_connections',
-                                                     'swarmkeydb_ws_messages_received_total',
-                                                     'swarmkeydb_ws_messages_sent_total',
-                                                     'swarmkeydb_ws_errors_total',
-                                                     'swarmkeydb_stream_pending_entries_total',
+                                                      'swarmkeydb_ws_active_connections',
+                                                      'swarmkeydb_ws_messages_received_total',
+                                                      'swarmkeydb_ws_messages_sent_total',
+                                                      'swarmkeydb_ws_errors_total',
+                                                      'swarmkeydb_http_requests_total',
+                                                      'swarmkeydb_http_request_duration_seconds_sum',
+                                                      'swarmkeydb_http_request_duration_seconds_count',
+                                                      'swarmkeydb_stream_pending_entries_total',
                                                     'swarmkeydb_stream_xack_total',
                                                      'swarmkeydb_stream_xclaim_total',
                                                      'swarmkeydb_stream_group_count',
@@ -666,12 +674,25 @@ public sealed class MonitoringHttpServer : IDisposable
                                                   pubSubSubscribersEl.textContent = extractMetric('swarmkeydb_pubsub_subscribers_total');
                                                   pubSubPublishedEl.textContent = extractMetric('swarmkeydb_pubsub_messages_published_total');
                                                   pubSubDroppedEl.textContent = extractMetric('swarmkeydb_pubsub_messages_dropped_total');
-                                                  wsConnectionsTotalEl.textContent = extractMetric('swarmkeydb_ws_connections_total');
-                                                  wsActiveConnectionsEl.textContent = extractMetric('swarmkeydb_ws_active_connections');
-                                                  wsMessagesReceivedTotalEl.textContent = extractMetric('swarmkeydb_ws_messages_received_total');
-                                                  wsMessagesSentTotalEl.textContent = extractMetric('swarmkeydb_ws_messages_sent_total');
-                                                  wsErrorsTotalEl.textContent = extractMetric('swarmkeydb_ws_errors_total');
-                                                  streamGroupCountEl.textContent = extractMetric('swarmkeydb_stream_group_count');
+                                                   wsConnectionsTotalEl.textContent = extractMetric('swarmkeydb_ws_connections_total');
+                                                   wsActiveConnectionsEl.textContent = extractMetric('swarmkeydb_ws_active_connections');
+                                                   wsMessagesReceivedTotalEl.textContent = extractMetric('swarmkeydb_ws_messages_received_total');
+                                                   wsMessagesSentTotalEl.textContent = extractMetric('swarmkeydb_ws_messages_sent_total');
+                                                   wsErrorsTotalEl.textContent = extractMetric('swarmkeydb_ws_errors_total');
+                                                   const metricLines = text.split('\n');
+                                                   const httpRequestsTotal = metricLines
+                                                     .filter(line => line.startsWith('swarmkeydb_http_requests_total{'))
+                                                     .reduce((total, line) => total + Number(line.trim().split(' ').pop() || '0'), 0);
+                                                   const httpDurationSum = metricLines
+                                                     .filter(line => line.startsWith('swarmkeydb_http_request_duration_seconds_sum{'))
+                                                     .reduce((total, line) => total + Number(line.trim().split(' ').pop() || '0'), 0);
+                                                   const httpDurationCount = metricLines
+                                                     .filter(line => line.startsWith('swarmkeydb_http_request_duration_seconds_count{'))
+                                                     .reduce((total, line) => total + Number(line.trim().split(' ').pop() || '0'), 0);
+                                                   httpRequestsTotalEl.textContent = String(httpRequestsTotal);
+                                                   const averageLatencyMs = httpDurationCount > 0 ? (httpDurationSum / httpDurationCount) * 1000 : 0;
+                                                   httpLatencyAvgMsEl.textContent = `${Math.round(averageLatencyMs * 100) / 100} ms`;
+                                                   streamGroupCountEl.textContent = extractMetric('swarmkeydb_stream_group_count');
                                                   streamPendingTotalEl.textContent = extractMetric('swarmkeydb_stream_pending_entries_total');
                                                   streamXAckTotalEl.textContent = extractMetric('swarmkeydb_stream_xack_total');
                                                   streamXClaimTotalEl.textContent = extractMetric('swarmkeydb_stream_xclaim_total');

@@ -8,7 +8,9 @@
 | `SWARM_KEYDB_PORT` | `6379` | TCP port exposed by the Redis-compatible server. |
 | `SWARM_KEYDB_WS_PORT` | `8765` | WebSocket gateway port for browser-native JSON/RESP commands (`0` disables gateway). |
 | `SWARM_KEYDB_WS_CORS_ORIGINS` | `*` | Comma-separated allowed WebSocket `Origin` values (use `*` to allow any origin). |
-| `SWARM_KEYDB_REQUIREPASS` | unset | Optional password required by WebSocket `AUTH` before non-auth commands are accepted. |
+| `SWARM_KEYDB_HTTP_PORT` | `8080` | HTTP REST gateway port for JSON command endpoints (`0` disables gateway). |
+| `SWARM_KEYDB_HTTP_CORS_ORIGINS` | `*` | Comma-separated allowed HTTP `Origin` values (use `*` to allow any origin). |
+| `SWARM_KEYDB_REQUIREPASS` | unset | Optional password required by WebSocket `AUTH` and HTTP REST bearer/query-token auth before non-auth commands are accepted. |
 | `SWARM_KEYDB_DATA_DIR` | platform-dependent | Local data directory for index and object storage. |
 | `BACKEND` | unset | Preferred backend selector (`swarm`, `ipfs`, `hybrid`); overrides `SWARM_KEYDB_BACKEND` when set. |
 | `SWARM_KEYDB_BACKEND` | `local` | Legacy backend selector (`local`, `bee`, `swarm`, `ipfs`, `hybrid`). |
@@ -69,7 +71,7 @@
 | `METRICS_ENABLED` | `true` | Enables `/metrics` endpoint. |
 | `METRICS_PORT` | `9090` | HTTP port used for Prometheus metrics exposure. |
 | `DASHBOARD_ENABLED` | `true` | Enables `/dashboard`, `/health`, `/ready`, and `/logs` endpoints. |
-| `DASHBOARD_PORT` | `8080` | HTTP port used by dashboard and health endpoints. |
+| `DASHBOARD_PORT` | `8081` | HTTP port used by dashboard and health endpoints. |
 | `SWARM_KEYDB_CROSS_CHAIN_ENABLED` | `false` | Enables cross-chain replication and reconciliation. |
 | `SWARM_KEYDB_CROSS_CHAIN_DEFAULT_CHAIN_IDS` | unset | Comma-separated or JSON array of chain ids replicated by default. |
 | `SWARM_KEYDB_CROSS_CHAIN_CHAINS` | unset | JSON array of chain definitions (`chainId`, `name`, optional `rpcUrl`, optional `bridgeContractAddress`). |
