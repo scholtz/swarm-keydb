@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -105,6 +106,7 @@ public sealed class HttpGateway : IDisposable
 
             var path = request.Url?.AbsolutePath ?? "/";
             var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            var resp3Requested = WantsResp3Json(request.Headers["Accept"]);
 
             if (path.Equals("/openapi.json", StringComparison.OrdinalIgnoreCase))
             {
@@ -140,6 +142,7 @@ public sealed class HttpGateway : IDisposable
                 statusCode = await ExecuteRouteAsync(
                     response,
                     origin,
+                    resp3Requested,
                     cancellationToken,
                     "GET",
                     DecodeSegment(segments[1])).ConfigureAwait(false);
@@ -179,7 +182,7 @@ public sealed class HttpGateway : IDisposable
                     args.Add(exSeconds.ToString());
                 }
 
-                statusCode = await ExecuteRouteAsync(response, origin, cancellationToken, "SET", args.ToArray()).ConfigureAwait(false);
+                statusCode = await ExecuteRouteAsync(response, origin, resp3Requested, cancellationToken, "SET", args.ToArray()).ConfigureAwait(false);
                 return;
             }
 
@@ -189,6 +192,7 @@ public sealed class HttpGateway : IDisposable
                 statusCode = await ExecuteRouteAsync(
                     response,
                     origin,
+                    resp3Requested,
                     cancellationToken,
                     "DEL",
                     DecodeSegment(segments[1])).ConfigureAwait(false);
@@ -201,6 +205,7 @@ public sealed class HttpGateway : IDisposable
                 statusCode = await ExecuteRouteAsync(
                     response,
                     origin,
+                    resp3Requested,
                     cancellationToken,
                     "EXISTS",
                     DecodeSegment(segments[1])).ConfigureAwait(false);
@@ -224,6 +229,7 @@ public sealed class HttpGateway : IDisposable
                 statusCode = await ExecuteRouteAsync(
                     response,
                     origin,
+                    resp3Requested,
                     cancellationToken,
                     "EXPIRE",
                     DecodeSegment(segments[1]),
@@ -237,6 +243,7 @@ public sealed class HttpGateway : IDisposable
                 statusCode = await ExecuteRouteAsync(
                     response,
                     origin,
+                    resp3Requested,
                     cancellationToken,
                     "TTL",
                     DecodeSegment(segments[1])).ConfigureAwait(false);
@@ -249,6 +256,7 @@ public sealed class HttpGateway : IDisposable
                 statusCode = await ExecuteRouteAsync(
                     response,
                     origin,
+                    resp3Requested,
                     cancellationToken,
                     "KEYS",
                     DecodeSegment(segments[1])).ConfigureAwait(false);
@@ -269,6 +277,7 @@ public sealed class HttpGateway : IDisposable
                 statusCode = await ExecuteRouteAsync(
                     response,
                     origin,
+                    resp3Requested,
                     cancellationToken,
                     "PUBLISH",
                     DecodeSegment(segments[1]),
@@ -310,7 +319,7 @@ public sealed class HttpGateway : IDisposable
                     return;
                 }
 
-                statusCode = await ExecuteRouteAsync(response, origin, cancellationToken, "XADD", args.ToArray()).ConfigureAwait(false);
+                statusCode = await ExecuteRouteAsync(response, origin, resp3Requested, cancellationToken, "XADD", args.ToArray()).ConfigureAwait(false);
                 return;
             }
 
@@ -356,7 +365,7 @@ public sealed class HttpGateway : IDisposable
                     }
                 }
 
-                statusCode = await ExecuteRouteAsync(response, origin, cancellationToken, command, args.ToArray()).ConfigureAwait(false);
+                statusCode = await ExecuteRouteAsync(response, origin, resp3Requested, cancellationToken, command, args.ToArray()).ConfigureAwait(false);
                 return;
             }
 
@@ -384,20 +393,35 @@ public sealed class HttpGateway : IDisposable
     private async Task<int> ExecuteRouteAsync(
         HttpListenerResponse response,
         string? origin,
+        bool resp3Requested,
         CancellationToken cancellationToken,
         string command,
         params string[] args)
     {
+        if (resp3Requested)
+        {
+            _metrics.OnHttpResp3Request();
+        }
+
         var requestItems = new List<RespValue> { RespValue.BulkString(command) };
         requestItems.AddRange(args.Select(RespValue.BulkString));
         var result = await _processor.ExecuteAsync(RespValue.Array(requestItems), cancellationToken).ConfigureAwait(false);
+        if (resp3Requested)
+        {
+            result = NormalizeResp3JsonResult(command, args, result);
+        }
         if (result.Type == RespType.Error)
         {
             await WriteErrorAsync(response, HttpStatusCode.BadRequest, result.Text ?? "ERR command failed.", origin, cancellationToken).ConfigureAwait(false);
             return (int)HttpStatusCode.BadRequest;
         }
 
-        await WriteJsonAsync(response, HttpStatusCode.OK, new { result = ToJsonCompatibleResult(result) }, origin, cancellationToken).ConfigureAwait(false);
+        await WriteJsonAsync(
+            response,
+            HttpStatusCode.OK,
+            new { result = ToJsonCompatibleResult(result, resp3Requested ? 3 : 2) },
+            origin,
+            cancellationToken).ConfigureAwait(false);
         return (int)HttpStatusCode.OK;
     }
 
@@ -522,16 +546,88 @@ public sealed class HttpGateway : IDisposable
         response.Close();
     }
 
-    private static object? ToJsonCompatibleResult(RespValue value) =>
+    private static object? ToJsonCompatibleResult(RespValue value, int protocolVersion) =>
         value.Type switch
         {
             RespType.SimpleString => value.Text,
             RespType.Integer => value.Integer,
             RespType.BulkString => value.Bytes is null ? null : Encoding.UTF8.GetString(value.Bytes),
-            RespType.Array => value.Items is null ? null : value.Items.Select(ToJsonCompatibleResult).ToArray(),
+            RespType.Array => value.Items is null ? null : value.Items.Select(item => ToJsonCompatibleResult(item, protocolVersion)).ToArray(),
+            RespType.Map => MapToJson(value.Items, protocolVersion),
+            RespType.Set => value.Items is null ? null : value.Items.Select(item => ToJsonCompatibleResult(item, protocolVersion)).ToArray(),
+            RespType.Double => protocolVersion >= 3 ? value.DoubleValue : value.AsDoubleString(),
+            RespType.Boolean => protocolVersion >= 3 ? value.BoolValue : (value.BoolValue ? 1 : 0),
+            RespType.BigNumber => value.Text,
+            RespType.VerbatimString => value.Text,
+            RespType.Null => null,
+            RespType.Push => value.Items is null ? null : value.Items.Select(item => ToJsonCompatibleResult(item, protocolVersion)).ToArray(),
             RespType.Error => value.Text,
             _ => null
         };
+
+    private static object? MapToJson(IReadOnlyList<RespValue>? items, int protocolVersion)
+    {
+        if (items is null)
+        {
+            return null;
+        }
+
+        if (protocolVersion < 3 || items.Count % 2 != 0)
+        {
+            return items.Select(item => ToJsonCompatibleResult(item, protocolVersion)).ToArray();
+        }
+
+        var result = new Dictionary<string, object?>(StringComparer.Ordinal);
+        for (var i = 0; i < items.Count; i += 2)
+        {
+            result[ToJsonKey(items[i])] = ToJsonCompatibleResult(items[i + 1], protocolVersion);
+        }
+
+        return result;
+    }
+
+    private static string ToJsonKey(RespValue value) =>
+        value.Type switch
+        {
+            RespType.SimpleString => value.Text ?? string.Empty,
+            RespType.BulkString => value.Bytes is null ? string.Empty : Encoding.UTF8.GetString(value.Bytes),
+            RespType.Integer => value.Integer.ToString(),
+            _ => ToJsonCompatibleResult(value, 3)?.ToString() ?? string.Empty
+        };
+
+    private static bool WantsResp3Json(string? acceptHeader) =>
+        !string.IsNullOrWhiteSpace(acceptHeader) &&
+        acceptHeader.Contains("application/json", StringComparison.OrdinalIgnoreCase) &&
+        acceptHeader.Contains("resp=3", StringComparison.OrdinalIgnoreCase);
+
+    private static RespValue NormalizeResp3JsonResult(string command, IReadOnlyList<string> args, RespValue result)
+    {
+        if (command.Equals("EXISTS", StringComparison.OrdinalIgnoreCase) && result.Type == RespType.Integer)
+        {
+            return RespValue.Boolean(result.Integer != 0);
+        }
+
+        if (command.Equals("ZSCORE", StringComparison.OrdinalIgnoreCase) &&
+            result.Type == RespType.BulkString &&
+            result.Bytes is not null &&
+            double.TryParse(Encoding.UTF8.GetString(result.Bytes), NumberStyles.Float, CultureInfo.InvariantCulture, out var score))
+        {
+            return RespValue.Double(score);
+        }
+
+        if ((command.Equals("HGETALL", StringComparison.OrdinalIgnoreCase) ||
+             (command.Equals("CONFIG", StringComparison.OrdinalIgnoreCase) &&
+              args.Count >= 1 &&
+              args[0].Equals("GET", StringComparison.OrdinalIgnoreCase))) &&
+            result.Type == RespType.Array &&
+            result.Items is { Count: > 0 } items &&
+            items.Count % 2 == 0)
+        {
+            return RespValue.Map(items);
+        }
+
+        return result;
+    }
 
     private static string DecodeSegment(string value) => WebUtility.UrlDecode(value);
 
@@ -545,6 +641,16 @@ public sealed class HttpGateway : IDisposable
         {
             title = "SwarmKeyDb HTTP REST Gateway",
             version = "1.0.0"
+        },
+        xResp3 = new
+        {
+            accept = "application/json; resp=3",
+            variants = new
+            {
+                map = new { resp2 = new[] { "field", "value" }, resp3 = new { field = "value" } },
+                number = new { resp2 = "1.5", resp3 = 1.5 },
+                boolean = new { resp2 = 1, resp3 = true }
+            }
         },
         paths = new Dictionary<string, object>(StringComparer.Ordinal)
         {

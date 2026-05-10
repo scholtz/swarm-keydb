@@ -38,6 +38,18 @@ All responses use:
 - Success: `{"result": ...}`
 - Error: `{"error":"ERR ..."}`
 
+## RESP3 content negotiation
+
+Set `Accept: application/json; resp=3` to request RESP3-typed JSON shapes.
+
+| Request | `Accept: application/json` (default / RESP2 shape) | `Accept: application/json; resp=3` |
+|---|---|---|
+| `GET /exists/{key}` | `{"result":0}` / `{"result":1}` | `{"result":false}` / `{"result":true}` |
+| `POST /cmd` with `{"cmd":"CONFIG","args":["GET","*"]}` | `{"result":["key","value",...]}` | `{"result":{"key":"value",...}}` |
+| `POST /cmd` with `{"cmd":"ZSCORE",...}` | `{"result":"1.5"}` | `{"result":1.5}` |
+
+When the header is omitted, existing RESP2-compatible JSON remains unchanged.
+
 ## OpenAPI and interactive docs
 
 - OpenAPI JSON: `GET /openapi.json`
