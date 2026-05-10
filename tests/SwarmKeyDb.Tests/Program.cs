@@ -257,6 +257,10 @@ var tests = new (string Name, Func<Task> Test)[]
     ("script load returns sha1 and caches script", ScriptLoadReturnsSha1Async),
     ("script exists returns correct presence flags", ScriptExistsAsync),
     ("script flush clears all cached scripts", ScriptFlushAsync),
+    ("script replication propagates evalsha across nodes", ScriptReplicationPropagatesEvalShaAcrossNodesAsync),
+    ("script flush propagates across nodes", ScriptFlushPropagatesAcrossNodesAsync),
+    ("evalsha fallback fetch recovers missing script from peer", EvalShaFallbackFetchRecoversMissingScriptFromPeerAsync),
+    ("script startup resync hydrates restarted node cache", ScriptStartupResyncHydratesRestartedNodeCacheAsync),
     ("script kill returns notbusy when no script running", ScriptKillNotBusyAsync),
     ("eval timeout returns busy error without blocking loop", EvalTimeoutReturnsBusyAsync),
     ("eval sandbox blocks io access", EvalSandboxBlocksIoAsync),
@@ -3065,6 +3069,31 @@ static async Task RedisManagementCommandsBackupRestoreAndRotateAsync()
 static RedisCommandProcessor CreateProcessor() =>
     new(new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()));
 
+static (RedisCommandProcessor Processor, ScriptReplicationManager ReplicationManager) CreateScriptReplicationProcessor(
+    ICacheSyncBus syncBus,
+    string nodeId,
+    params string[] peers)
+{
+    var cache = new ScriptCache();
+    var replicationManager = new ScriptReplicationManager(
+        cache,
+        syncBus,
+        new CacheSyncOptions
+        {
+            Enabled = true,
+            NodeId = nodeId,
+            Peers = peers,
+            SyncIntervalSeconds = 1
+        },
+        NullLogger<ScriptReplicationManager>.Instance);
+
+    var processor = new RedisCommandProcessor(
+        new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex()),
+        scriptCache: cache,
+        scriptReplicationManager: replicationManager);
+    return (processor, replicationManager);
+}
+
 static CachingKeyValueStore CreateCachingStore(
     CountingKeyValueStore inner,
     int maxEntries,
@@ -5559,6 +5588,10 @@ static async Task DashboardHtmlContainsStreamGroupPanelAsync()
     Assert(response.Contains("stream-trimmed-total", StringComparison.Ordinal), "Dashboard should include stream trimmed total element.");
     Assert(response.Contains("stream-length-bytes-total", StringComparison.Ordinal), "Dashboard should include stream length bytes total element.");
     Assert(response.Contains("stream-length-bytes-by-stream", StringComparison.Ordinal), "Dashboard should include stream length-by-stream table.");
+    Assert(response.Contains("Script Cache Replication", StringComparison.Ordinal), "Dashboard should include script cache replication section.");
+    Assert(response.Contains("script-cache-size", StringComparison.Ordinal), "Dashboard should include script cache size element.");
+    Assert(response.Contains("script-replication-sent", StringComparison.Ordinal), "Dashboard should include script replication sent element.");
+    Assert(response.Contains("script-cache-miss-recovered", StringComparison.Ordinal), "Dashboard should include script miss recovery element.");
 
     cts.Cancel();
     await runTask;
@@ -6120,6 +6153,123 @@ static async Task ScriptFlushAsync()
     Assert(afterFlush.Contains(":0\r\n", StringComparison.Ordinal), "Script should be absent after flush.");
 }
 
+static async Task ScriptReplicationPropagatesEvalShaAcrossNodesAsync()
+{
+    var bus = new InMemoryCacheSyncBus();
+    var (nodeA, replicationA) = CreateScriptReplicationProcessor(bus, "node-a", "node-b");
+    var (nodeB, replicationB) = CreateScriptReplicationProcessor(bus, "node-b", "node-a");
+    try
+    {
+        var script = "return 'replicated'";
+        var loadResp = await ExecuteAsync(nodeA, RespCommand("SCRIPT", "LOAD", script));
+        var sha1 = loadResp.Split("\r\n", StringSplitOptions.RemoveEmptyEntries)[1];
+
+        var evalShaResp = await WaitUntilValueAsync(
+            action: () => ExecuteAsync(nodeB, RespCommand("EVALSHA", sha1, "0")),
+            predicate: value => value == "$10\r\nreplicated\r\n",
+            timeout: TimeSpan.FromSeconds(1),
+            pollInterval: TimeSpan.FromMilliseconds(25));
+
+        AssertEqual("$10\r\nreplicated\r\n", evalShaResp);
+    }
+    finally
+    {
+        replicationA.Dispose();
+        replicationB.Dispose();
+    }
+}
+
+static async Task ScriptFlushPropagatesAcrossNodesAsync()
+{
+    var bus = new InMemoryCacheSyncBus();
+    var (nodeA, replicationA) = CreateScriptReplicationProcessor(bus, "node-a", "node-b");
+    var (nodeB, replicationB) = CreateScriptReplicationProcessor(bus, "node-b", "node-a");
+    try
+    {
+        var script = "return 'flush-propagation'";
+        var loadResp = await ExecuteAsync(nodeA, RespCommand("SCRIPT", "LOAD", script));
+        var sha1 = loadResp.Split("\r\n", StringSplitOptions.RemoveEmptyEntries)[1];
+        _ = await WaitUntilValueAsync(
+            action: () => ExecuteAsync(nodeB, RespCommand("SCRIPT", "EXISTS", sha1)),
+            predicate: value => value.Contains(":1\r\n", StringComparison.Ordinal),
+            timeout: TimeSpan.FromSeconds(1),
+            pollInterval: TimeSpan.FromMilliseconds(25));
+
+        AssertEqual("+OK\r\n", await ExecuteAsync(nodeA, RespCommand("SCRIPT", "FLUSH")));
+        var afterFlush = await WaitUntilValueAsync(
+            action: () => ExecuteAsync(nodeB, RespCommand("SCRIPT", "EXISTS", sha1)),
+            predicate: value => value.Contains(":0\r\n", StringComparison.Ordinal),
+            timeout: TimeSpan.FromSeconds(1),
+            pollInterval: TimeSpan.FromMilliseconds(25));
+
+        Assert(afterFlush.Contains(":0\r\n", StringComparison.Ordinal), $"Expected propagated flush on peer, got: {afterFlush}");
+    }
+    finally
+    {
+        replicationA.Dispose();
+        replicationB.Dispose();
+    }
+}
+
+static async Task EvalShaFallbackFetchRecoversMissingScriptFromPeerAsync()
+{
+    var bus = new InMemoryCacheSyncBus();
+    var (nodeA, replicationA) = CreateScriptReplicationProcessor(bus, "node-a", "node-b");
+    var (nodeB, replicationB) = CreateScriptReplicationProcessor(bus, "node-b", "node-a");
+    try
+    {
+        bus.SetNodeConnected("node-b", false);
+        var script = "return 'fetch-recovered'";
+        var loadResp = await ExecuteAsync(nodeA, RespCommand("SCRIPT", "LOAD", script));
+        var sha1 = loadResp.Split("\r\n", StringSplitOptions.RemoveEmptyEntries)[1];
+
+        bus.SetNodeConnected("node-b", true);
+        var evalShaResp = await ExecuteAsync(nodeB, RespCommand("EVALSHA", sha1, "0"));
+        AssertEqual("$15\r\nfetch-recovered\r\n", evalShaResp);
+    }
+    finally
+    {
+        replicationA.Dispose();
+        replicationB.Dispose();
+    }
+}
+
+static async Task ScriptStartupResyncHydratesRestartedNodeCacheAsync()
+{
+    var bus = new InMemoryCacheSyncBus();
+    var (nodeA, replicationA) = CreateScriptReplicationProcessor(bus, "node-a", "node-b");
+    var (_, replicationB) = CreateScriptReplicationProcessor(bus, "node-b", "node-a");
+    try
+    {
+        var script = "return 'startup-sync'";
+        var loadResp = await ExecuteAsync(nodeA, RespCommand("SCRIPT", "LOAD", script));
+        var sha1 = loadResp.Split("\r\n", StringSplitOptions.RemoveEmptyEntries)[1];
+
+        replicationB.Dispose();
+        var (restartedNodeB, restartedReplicationB) = CreateScriptReplicationProcessor(bus, "node-b", "node-a");
+        try
+        {
+            await restartedReplicationB.RequestStartupResyncAsync();
+
+            var evalShaResp = await WaitUntilValueAsync(
+                action: () => ExecuteAsync(restartedNodeB, RespCommand("EVALSHA", sha1, "0")),
+                predicate: value => value == "$12\r\nstartup-sync\r\n",
+                timeout: TimeSpan.FromSeconds(1),
+                pollInterval: TimeSpan.FromMilliseconds(25));
+            AssertEqual("$12\r\nstartup-sync\r\n", evalShaResp);
+        }
+        finally
+        {
+            restartedReplicationB.Dispose();
+        }
+    }
+    finally
+    {
+        replicationB.Dispose();
+        replicationA.Dispose();
+    }
+}
+
 static async Task ScriptKillNotBusyAsync()
 {
     var processor = CreateProcessor();
@@ -6204,53 +6354,81 @@ end";
 
 static async Task PrometheusMetricsExposeScriptTelemetryAsync()
 {
-    var store = new SwarmKeyValueStore(new InMemorySwarmClient(), new InMemoryKeyIndex());
-    var processor = new RedisCommandProcessor(store);
+    var bus = new InMemoryCacheSyncBus();
+    var (nodeA, replicationA) = CreateScriptReplicationProcessor(bus, "node-a", "node-b");
+    var (nodeB, replicationB) = CreateScriptReplicationProcessor(bus, "node-b", "node-a");
+    try
+    {
+        // Run two EVAL and one EVALSHA (after SCRIPT LOAD) on node B
+        await ExecuteAsync(nodeB, RespCommand("EVAL", "return 1", "0"));
+        await ExecuteAsync(nodeB, RespCommand("EVAL", "return 2", "0"));
+        var sha1 = ScriptCache.ComputeSha1("return 3");
+        await ExecuteAsync(nodeB, RespCommand("SCRIPT", "LOAD", "return 3"));
+        await ExecuteAsync(nodeB, RespCommand("EVALSHA", sha1, "0"));
+        // Trigger an error
+        await ExecuteAsync(nodeB, RespCommand("EVAL", "return redis.call('BADCMD')", "0"));
 
-    // Run two EVAL and one EVALSHA (after SCRIPT LOAD)
-    await ExecuteAsync(processor, RespCommand("EVAL", "return 1", "0"));
-    await ExecuteAsync(processor, RespCommand("EVAL", "return 2", "0"));
-    var sha1 = ScriptCache.ComputeSha1("return 3");
-    await ExecuteAsync(processor, RespCommand("SCRIPT", "LOAD", "return 3"));
-    await ExecuteAsync(processor, RespCommand("EVALSHA", sha1, "0"));
-    // Trigger an error
-    await ExecuteAsync(processor, RespCommand("EVAL", "return redis.call('BADCMD')", "0"));
+        // Force a cross-node EVALSHA miss recovery.
+        bus.SetNodeConnected("node-b", false);
+        var remoteLoad = await ExecuteAsync(nodeA, RespCommand("SCRIPT", "LOAD", "return 'replication-metric'"));
+        var replicatedSha = remoteLoad.Split("\r\n", StringSplitOptions.RemoveEmptyEntries)[1];
+        bus.SetNodeConnected("node-b", true);
+        await ExecuteAsync(nodeB, RespCommand("EVALSHA", replicatedSha, "0"));
 
-    var metrics = new MonitoringMetrics(
-        () => NoOpCacheStats.Instance,
-        scriptMetricsAccessor: () => processor.GetScriptMetrics());
+        // Emit script flush propagation metric from this node.
+        await ExecuteAsync(nodeB, RespCommand("SCRIPT", "FLUSH"));
 
-    var port = TestNetHelpers.GetFreePort();
-    var server = new MonitoringHttpServer(
-        IPAddress.Loopback,
-        port,
-        metrics,
-        new StaticReadinessProbe(ready: true, message: "ready"),
-        metricsEnabled: true,
-        dashboardEnabled: false,
-        NullLogger<MonitoringHttpServer>.Instance);
-    using var cts = new CancellationTokenSource();
-    var runTask = server.RunAsync(cts.Token);
-    using var client = new HttpClient();
+        var metrics = new MonitoringMetrics(
+            () => NoOpCacheStats.Instance,
+            scriptMetricsAccessor: () => nodeB.GetScriptMetrics());
 
-    var payload = await client.GetStringAsync($"http://127.0.0.1:{port}/metrics");
+        var port = TestNetHelpers.GetFreePort();
+        var server = new MonitoringHttpServer(
+            IPAddress.Loopback,
+            port,
+            metrics,
+            new StaticReadinessProbe(ready: true, message: "ready"),
+            metricsEnabled: true,
+            dashboardEnabled: false,
+            NullLogger<MonitoringHttpServer>.Instance);
+        using var cts = new CancellationTokenSource();
+        var runTask = server.RunAsync(cts.Token);
+        using var client = new HttpClient();
 
-    Assert(payload.Contains("swarmkeydb_script_eval_total{privacy_mode=\"none\"} 3", StringComparison.Ordinal),
-        $"Expected eval_total=3, got: {payload}");
-    Assert(payload.Contains("swarmkeydb_script_evalsha_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal),
-        $"Expected evalsha_total=1, got: {payload}");
-    Assert(payload.Contains("swarmkeydb_script_error_total", StringComparison.Ordinal),
-        "Expected error_total metric to be present.");
-    Assert(payload.Contains("swarmkeydb_script_timeout_total", StringComparison.Ordinal),
-        "Expected timeout_total metric to be present.");
-    Assert(payload.Contains("swarmkeydb_script_exec_duration_seconds_bucket", StringComparison.Ordinal),
-        "Expected exec_duration histogram buckets.");
-    Assert(payload.Contains("swarmkeydb_script_exec_duration_seconds_count", StringComparison.Ordinal),
-        "Expected exec_duration histogram count.");
+        var payload = await client.GetStringAsync($"http://127.0.0.1:{port}/metrics");
 
-    cts.Cancel();
-    await runTask;
-    server.Dispose();
+        Assert(payload.Contains("swarmkeydb_script_eval_total{privacy_mode=\"none\"} 3", StringComparison.Ordinal),
+            $"Expected eval_total=3, got: {payload}");
+        Assert(payload.Contains("swarmkeydb_script_evalsha_total{privacy_mode=\"none\"} 2", StringComparison.Ordinal),
+            $"Expected evalsha_total=2, got: {payload}");
+        Assert(payload.Contains("swarmkeydb_script_error_total", StringComparison.Ordinal),
+            "Expected error_total metric to be present.");
+        Assert(payload.Contains("swarmkeydb_script_timeout_total", StringComparison.Ordinal),
+            "Expected timeout_total metric to be present.");
+        Assert(payload.Contains("swarmkeydb_script_replication_sent_total", StringComparison.Ordinal),
+            "Expected script replication sent metric.");
+        Assert(payload.Contains("swarmkeydb_script_replication_received_total", StringComparison.Ordinal),
+            "Expected script replication received metric.");
+        Assert(payload.Contains("swarmkeydb_script_cache_miss_recovered_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal),
+            "Expected one recovered script cache miss.");
+        Assert(payload.Contains("swarmkeydb_script_flush_propagated_total{privacy_mode=\"none\"} 1", StringComparison.Ordinal),
+            "Expected one propagated script flush.");
+        Assert(payload.Contains("swarmkeydb_script_cache_size", StringComparison.Ordinal),
+            "Expected script cache size gauge.");
+        Assert(payload.Contains("swarmkeydb_script_exec_duration_seconds_bucket", StringComparison.Ordinal),
+            "Expected exec_duration histogram buckets.");
+        Assert(payload.Contains("swarmkeydb_script_exec_duration_seconds_count", StringComparison.Ordinal),
+            "Expected exec_duration histogram count.");
+
+        cts.Cancel();
+        await runTask;
+        server.Dispose();
+    }
+    finally
+    {
+        replicationA.Dispose();
+        replicationB.Dispose();
+    }
 }
 
 

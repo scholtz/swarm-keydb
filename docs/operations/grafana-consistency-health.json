@@ -168,6 +168,35 @@
         "x": 12,
         "y": 24
       }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Script Cache Replication",
+      "targets": [
+        {
+          "expr": "swarmkeydb_script_cache_size",
+          "legendFormat": "cache-size"
+        },
+        {
+          "expr": "rate(swarmkeydb_script_replication_sent_total[5m])",
+          "legendFormat": "sent/s"
+        },
+        {
+          "expr": "rate(swarmkeydb_script_replication_received_total[5m])",
+          "legendFormat": "received/s"
+        },
+        {
+          "expr": "rate(swarmkeydb_script_cache_miss_recovered_total[5m])",
+          "legendFormat": "miss-recovered/s"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      }
     }
   ]
 }

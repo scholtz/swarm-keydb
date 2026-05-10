@@ -406,6 +406,9 @@ Compatibility note: commands queued under `MULTI` execute against key state at `
 SwarmKeyDb supports Redis-compatible Lua scripting via `EVAL`, `EVALSHA`, and `SCRIPT` commands, powered by [MoonSharp](https://www.moonsharp.org/) (MIT licence).
 
 Scripts execute atomically — no other command interleaves during a single `EVAL`/`EVALSHA` run.
+With cache sync enabled (`SWARM_KEYDB_SYNC_*`), script cache entries and `SCRIPT FLUSH`
+events are replicated across nodes, and `EVALSHA` performs a peer-fetch fallback
+before returning `NOSCRIPT`.
 
 **Quick start:**
 
@@ -447,7 +450,7 @@ return 1
 
 **Sandbox:** `io`, `os`, `package`, `dofile`, `loadfile`, `require`, and `load` are stripped. Scripts that exceed `SWARM_KEYDB_SCRIPT_TIMEOUT_MS` (default 5 000 ms) receive `−BUSY Script exceeded time limit` and the command loop continues immediately.
 
-See [docs/lua-scripting.md](docs/lua-scripting.md) for full reference, type-mapping table, and all Prometheus script metrics.
+See [docs/lua-scripting.md](docs/lua-scripting.md) for full reference, type-mapping table, and all Prometheus script/replication metrics.
 
 Quick check:
 

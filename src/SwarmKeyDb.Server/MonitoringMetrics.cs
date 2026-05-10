@@ -213,6 +213,16 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine("# TYPE swarmkeydb_script_error_total counter");
         builder.AppendLine("# HELP swarmkeydb_script_timeout_total Total scripts terminated by the CPU-time guard.");
         builder.AppendLine("# TYPE swarmkeydb_script_timeout_total counter");
+        builder.AppendLine("# HELP swarmkeydb_script_replication_sent_total Total script replication events published.");
+        builder.AppendLine("# TYPE swarmkeydb_script_replication_sent_total counter");
+        builder.AppendLine("# HELP swarmkeydb_script_replication_received_total Total script replication events received from peer nodes.");
+        builder.AppendLine("# TYPE swarmkeydb_script_replication_received_total counter");
+        builder.AppendLine("# HELP swarmkeydb_script_cache_miss_recovered_total Total EVALSHA cache misses recovered from peer script replication.");
+        builder.AppendLine("# TYPE swarmkeydb_script_cache_miss_recovered_total counter");
+        builder.AppendLine("# HELP swarmkeydb_script_flush_propagated_total Total SCRIPT FLUSH events propagated to peer nodes.");
+        builder.AppendLine("# TYPE swarmkeydb_script_flush_propagated_total counter");
+        builder.AppendLine("# HELP swarmkeydb_script_cache_size Current number of cached scripts on this node.");
+        builder.AppendLine("# TYPE swarmkeydb_script_cache_size gauge");
         builder.AppendLine("# HELP swarmkeydb_script_exec_duration_seconds Script execution duration histogram.");
         builder.AppendLine("# TYPE swarmkeydb_script_exec_duration_seconds histogram");
         builder.AppendLine("# HELP swarmkeydb_expiry_scan_duration_seconds Average adaptive expiry scan duration in seconds.");
@@ -336,6 +346,11 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine(FormatMetric("swarmkeydb_script_evalsha_total", scriptMetrics.EvalShaTotal));
         builder.AppendLine(FormatMetric("swarmkeydb_script_error_total", scriptMetrics.ErrorTotal));
         builder.AppendLine(FormatMetric("swarmkeydb_script_timeout_total", scriptMetrics.TimeoutTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_script_replication_sent_total", scriptMetrics.ReplicationSentTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_script_replication_received_total", scriptMetrics.ReplicationReceivedTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_script_cache_miss_recovered_total", scriptMetrics.CacheMissRecoveredTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_script_flush_propagated_total", scriptMetrics.FlushPropagatedTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_script_cache_size", scriptMetrics.CacheSize));
         AppendScriptDurationHistogram(builder, "swarmkeydb_script_exec_duration_seconds", scriptMetrics.ExecDuration);
 
         return builder.ToString();
@@ -358,6 +373,11 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
             0));
     private static readonly StreamMetricsSnapshot EmptyStreamMetricsSnapshot = new(0, 0, 0, 0, 0, 0, 0, new Dictionary<string, long>(StringComparer.Ordinal), 0, 0, new Dictionary<string, long>(StringComparer.Ordinal));
     private static readonly ScriptMetricsSnapshot EmptyScriptMetricsSnapshot = new(
+        0,
+        0,
+        0,
+        0,
+        0,
         0,
         0,
         0,

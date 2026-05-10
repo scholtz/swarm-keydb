@@ -486,13 +486,19 @@ public sealed class MonitoringHttpServer : IDisposable
                                                      </thead>
                                                      <tbody id="stream-blocked-by-stream"></tbody>
                                                    </table>
-                                                   <table>
-                                                     <thead>
-                                                       <tr><th>Stream</th><th>Serialized bytes</th></tr>
-                                                     </thead>
-                                                     <tbody id="stream-length-bytes-by-stream"></tbody>
-                                                   </table>
-                                                   <h2>Cross-chain replication health</h2>
+                                                    <table>
+                                                      <thead>
+                                                        <tr><th>Stream</th><th>Serialized bytes</th></tr>
+                                                      </thead>
+                                                      <tbody id="stream-length-bytes-by-stream"></tbody>
+                                                    </table>
+                                                    <h2>Script Cache Replication</h2>
+                                                    <p>Cached Scripts: <strong id="script-cache-size">0</strong></p>
+                                                    <p>Replication Sent (total): <strong id="script-replication-sent">0</strong></p>
+                                                    <p>Replication Received (total): <strong id="script-replication-received">0</strong></p>
+                                                    <p>Recovered EVALSHA Misses (total): <strong id="script-cache-miss-recovered">0</strong></p>
+                                                    <p>Propagated Script Flushes (total): <strong id="script-flush-propagated">0</strong></p>
+                                                    <h2>Cross-chain replication health</h2>
                                             <table>
                                               <thead>
                                                 <tr><th>Chain</th><th>Pending</th><th>Synced</th><th>Failed</th><th>Health</th></tr>
@@ -550,10 +556,15 @@ public sealed class MonitoringHttpServer : IDisposable
                                                  const streamIdleConsumerCountEl = document.getElementById('stream-idle-consumer-count');
                                                  const streamBlockedReadersEl = document.getElementById('stream-blocked-readers');
                                                  const streamXReadWakeupTotalEl = document.getElementById('stream-xread-wakeup-total');
-                                                 const streamTrimmedTotalEl = document.getElementById('stream-trimmed-total');
-                                                 const streamLengthBytesTotalEl = document.getElementById('stream-length-bytes-total');
-                                                 const streamBlockedByStreamEl = document.getElementById('stream-blocked-by-stream');
-                                                 const streamLengthBytesByStreamEl = document.getElementById('stream-length-bytes-by-stream');
+                                                  const streamTrimmedTotalEl = document.getElementById('stream-trimmed-total');
+                                                  const streamLengthBytesTotalEl = document.getElementById('stream-length-bytes-total');
+                                                  const streamBlockedByStreamEl = document.getElementById('stream-blocked-by-stream');
+                                                  const streamLengthBytesByStreamEl = document.getElementById('stream-length-bytes-by-stream');
+                                                  const scriptCacheSizeEl = document.getElementById('script-cache-size');
+                                                  const scriptReplicationSentEl = document.getElementById('script-replication-sent');
+                                                  const scriptReplicationReceivedEl = document.getElementById('script-replication-received');
+                                                  const scriptCacheMissRecoveredEl = document.getElementById('script-cache-miss-recovered');
+                                                  const scriptFlushPropagatedEl = document.getElementById('script-flush-propagated');
                                                function parseCounters(metricsText) {
                                                const wanted = [
                                                  'swarmkeydb_operations_total{operation="get",status="success"}',
@@ -584,11 +595,16 @@ public sealed class MonitoringHttpServer : IDisposable
                                                      'swarmkeydb_stream_group_count',
                                                      'swarmkeydb_stream_idle_consumer_count',
                                                      'swarmkeydb_stream_blocked_readers',
-                                                     'swarmkeydb_stream_xread_wakeup_total',
-                                                     'swarmkeydb_stream_trimmed_total',
-                                                     'swarmkeydb_stream_length_bytes',
-                                                     'swarmkeydb_stream_blocked_readers_by_stream'
-                                                    ];
+                                                      'swarmkeydb_stream_xread_wakeup_total',
+                                                      'swarmkeydb_stream_trimmed_total',
+                                                      'swarmkeydb_stream_length_bytes',
+                                                      'swarmkeydb_stream_blocked_readers_by_stream',
+                                                      'swarmkeydb_script_replication_sent_total',
+                                                      'swarmkeydb_script_replication_received_total',
+                                                      'swarmkeydb_script_cache_miss_recovered_total',
+                                                      'swarmkeydb_script_flush_propagated_total',
+                                                      'swarmkeydb_script_cache_size'
+                                                     ];
                                                return metricsText.split('\n').filter(line => wanted.some(prefix => line.startsWith(prefix))).join('\n');
                                              }
                                              async function refreshReady() {
@@ -640,10 +656,15 @@ public sealed class MonitoringHttpServer : IDisposable
                                                   streamXClaimTotalEl.textContent = extractMetric('swarmkeydb_stream_xclaim_total');
                                                   streamIdleConsumerCountEl.textContent = extractMetric('swarmkeydb_stream_idle_consumer_count');
                                                   streamBlockedReadersEl.textContent = extractMetric('swarmkeydb_stream_blocked_readers');
-                                                  streamXReadWakeupTotalEl.textContent = extractMetric('swarmkeydb_stream_xread_wakeup_total');
-                                                  streamTrimmedTotalEl.textContent = extractMetric('swarmkeydb_stream_trimmed_total');
-                                                  streamLengthBytesTotalEl.textContent = extractMetric('swarmkeydb_stream_length_bytes');
-                                                  streamBlockedByStreamEl.innerHTML = '';
+                                                   streamXReadWakeupTotalEl.textContent = extractMetric('swarmkeydb_stream_xread_wakeup_total');
+                                                   streamTrimmedTotalEl.textContent = extractMetric('swarmkeydb_stream_trimmed_total');
+                                                   streamLengthBytesTotalEl.textContent = extractMetric('swarmkeydb_stream_length_bytes');
+                                                   scriptCacheSizeEl.textContent = extractMetric('swarmkeydb_script_cache_size');
+                                                   scriptReplicationSentEl.textContent = extractMetric('swarmkeydb_script_replication_sent_total');
+                                                   scriptReplicationReceivedEl.textContent = extractMetric('swarmkeydb_script_replication_received_total');
+                                                   scriptCacheMissRecoveredEl.textContent = extractMetric('swarmkeydb_script_cache_miss_recovered_total');
+                                                   scriptFlushPropagatedEl.textContent = extractMetric('swarmkeydb_script_flush_propagated_total');
+                                                   streamBlockedByStreamEl.innerHTML = '';
                                                   text.split('\n')
                                                     .filter(line => line.startsWith('swarmkeydb_stream_blocked_readers_by_stream{'))
                                                     .forEach(line => {
