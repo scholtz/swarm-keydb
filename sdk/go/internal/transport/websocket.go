@@ -21,7 +21,6 @@ func isPubSubType(t string) bool {
 	return false
 }
 
-
 type Frame struct {
 	Cmd  string   `json:"cmd"`
 	Args []string `json:"args"`
