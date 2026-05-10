@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8" /><title>SwarmKeyDb Browser Pub/Sub</title></head>
+<body>
+  <h1>Browser Pub/Sub Demo</h1>
+  <button id="connect">Connect + Subscribe</button>
+  <button id="publish">Publish</button>
+  <pre id="log"></pre>
+  <script type="module">
+    import { createClient } from '../../../sdk/js/dist/index.js';
+    const log = (m) => document.getElementById('log').textContent += `${m}\n`;
+    const client = createClient({ wsUrl: 'ws://127.0.0.1:8765/' });
+    document.getElementById('connect').onclick = async () => {
+      await client.connect();
+      await client.subscribe('chat', (_ch, msg) => log(`received: ${msg}`));
+      log('subscribed chat');
+    };
+    document.getElementById('publish').onclick = async () => {
+      await client.publish('chat', `hello-${Date.now()}`);
+      log('published');
+    };
+  </script>
+</body>
+</html>

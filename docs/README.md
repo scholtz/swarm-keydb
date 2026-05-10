@@ -8,6 +8,7 @@ This folder is the entrypoint for project documentation.
 - `api-reference.md` documents Redis commands and public C# client methods.
 - `tutorials/` contains end-to-end walkthroughs for common app patterns.
 - `sdk/` contains SDK/connectors quick references for JavaScript, React, Node.js, Python, and Go.
+- `js-sdk.md` documents the npm SDK package `@swarm-keydb/client` for browser and Node.js use.
 - `deployment.md` covers production Docker/Helm deployment and monitoring integration.
 - `faq.md` answers frequent setup/runtime questions.
 - `architecture/` explains the storage model and runtime components.
@@ -34,6 +35,7 @@ This folder is the entrypoint for project documentation.
 - `tutorials/encryption-user-keypair.md`
 - `tutorials/key-rotation-backup.md`
 - `privacy-preserving-queries.md`
+- `js-sdk.md`
 - `sdk/js.md`
 - `sdk/react.md`
 - `sdk/node.md`

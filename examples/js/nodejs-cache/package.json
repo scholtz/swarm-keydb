@@ -1,0 +1,8 @@
+{
+  "name": "swarm-keydb-nodejs-cache-example",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
