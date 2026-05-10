@@ -248,6 +248,21 @@ public class CoreStoreTests
     }
 
     [Test]
+    public void BeeClientRejectsReadGatewayWhenConfiguredViaHttpClient()
+    {
+        using var httpClient = new HttpClient
+        {
+            BaseAddress = new Uri("https://gateway.ethswarm.org/")
+        };
+
+        var ex = NUnit.Framework.Assert.Throws<InvalidOperationException>(
+            () => new BeeSwarmClient(httpClient, "batch-id"));
+
+        Assert(ex is not null && ex.Message.Contains("read gateway", StringComparison.OrdinalIgnoreCase),
+            "Expected a clear error for read gateway upload misconfiguration.");
+    }
+
+    [Test]
     public async Task BeeConsistencyVerifierValidatesFeedRevisionAsync()
     {
         var handler = new StubHttpMessageHandler(request =>
