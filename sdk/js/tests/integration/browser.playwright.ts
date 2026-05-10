@@ -27,8 +27,17 @@ test.beforeAll(async () => {
       return;
     }
 
-    const requested = url.startsWith('/') ? url.slice(1) : url;
-    const filePath = join(distDir, requested);
+    const safeFiles: Record<string, string> = {
+      '/index.js': 'index.js',
+      '/index.js.map': 'index.js.map'
+    };
+    const selectedFile = safeFiles[url];
+    if (!selectedFile) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('not found');
+      return;
+    }
+    const filePath = join(distDir, selectedFile);
     try {
       const content = await readFile(filePath);
       res.writeHead(200, { 'Content-Type': mimeType(filePath) });

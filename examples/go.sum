@@ -1,0 +1,4 @@
+github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
+github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
+github.com/scholtz/swarm-keydb/sdk/go v0.0.0-20260510060650-29c59cc14319 h1:iMXJ6L0OgVYcfey6nriP32hDtypeD5c7G8jmFkqu9Lo=
+github.com/scholtz/swarm-keydb/sdk/go v0.0.0-20260510060650-29c59cc14319/go.mod h1:T/obBQXTBiIYAtxkq1Z9gvJsvaWA1NmjNpZSRtGAl8Q=
