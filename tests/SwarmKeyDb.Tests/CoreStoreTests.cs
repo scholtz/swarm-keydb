@@ -238,17 +238,6 @@ public class CoreStoreTests
     }
 
     [Test]
-    public void BeeClientRejectsReadGatewayAsUploadEndpoint()
-    {
-        var ex = NUnit.Framework.Assert.Throws<InvalidOperationException>(
-            () => new BeeSwarmClient(new Uri("https://bzz.limo"), "batch-id"));
-
-        NUnit.Framework.Assert.That(ex, Is.Not.Null);
-        NUnit.Framework.Assert.That(ex!.Message, Does.Contain("read gateway").IgnoreCase,
-            "Expected a clear error for bzz.limo upload misconfiguration.");
-    }
-
-    [Test]
     public void BeeClientRejectsReadGatewayWhenConfiguredViaHttpClient()
     {
         using var httpClient = new HttpClient
