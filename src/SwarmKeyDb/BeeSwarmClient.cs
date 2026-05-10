@@ -23,6 +23,11 @@ public sealed class BeeSwarmClient : ISwarmClient, IDisposable
         }
 
         var host = httpClient.BaseAddress?.Host;
+        if (IsReadGatewayHost(host))
+        {
+            throw new InvalidOperationException(
+                $"Configured Bee endpoint '{httpClient.BaseAddress}' appears to be a read gateway and cannot be used for uploads. Configure a Bee API endpoint instead.");
+        }
 
         _httpClient = httpClient;
         _postageBatchId = postageBatchId;
@@ -68,5 +73,18 @@ public sealed class BeeSwarmClient : ISwarmClient, IDisposable
     {
         [JsonPropertyName("reference")]
         public string? Reference { get; set; }
+    }
+
+    private static bool IsReadGatewayHost(string? host)
+    {
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            return false;
+        }
+
+        return host.Equals("bzz.limo", StringComparison.OrdinalIgnoreCase)
+            || host.Equals("bzz.link", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".bzz.link", StringComparison.OrdinalIgnoreCase)
+            || host.Equals("gateway.ethswarm.org", StringComparison.OrdinalIgnoreCase);
     }
 }
