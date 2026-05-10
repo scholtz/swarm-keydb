@@ -25,62 +25,62 @@ A small C# key-value database that speaks the Redis RESP protocol and stores val
 
 SwarmKeyDb ships with broad documentation coverage across setup, architecture, deployment, operations, SDKs, protocols, and guided tutorials.
 
-Documentation portal: https://scholtz.github.io/swarm-keydb/
+Documentation portal: [https://scholtz.github.io/swarm-keydb/](https://scholtz.github.io/swarm-keydb/)
 
 Core docs:
 
-- Getting started: https://scholtz.github.io/swarm-keydb/docs/getting-started.html
-- API reference: https://scholtz.github.io/swarm-keydb/docs/api-reference.html
-- Deployment guide: https://scholtz.github.io/swarm-keydb/docs/deployment.html
-- FAQ: https://scholtz.github.io/swarm-keydb/docs/faq.html
-- Performance: https://scholtz.github.io/swarm-keydb/docs/performance.html
+- [Getting started](https://scholtz.github.io/swarm-keydb/docs/getting-started.html)
+- [API reference](https://scholtz.github.io/swarm-keydb/docs/api-reference.html)
+- [Deployment guide](https://scholtz.github.io/swarm-keydb/docs/deployment.html)
+- [FAQ](https://scholtz.github.io/swarm-keydb/docs/faq.html)
+- [Performance](https://scholtz.github.io/swarm-keydb/docs/performance.html)
 
 Protocols and runtime:
 
-- RESP3 protocol: https://scholtz.github.io/swarm-keydb/docs/resp3.html
-- WebSocket protocol: https://scholtz.github.io/swarm-keydb/docs/ws-protocol.html
-- WebSocket gateway: https://scholtz.github.io/swarm-keydb/docs/websocket-gateway.html
-- HTTP REST API: https://scholtz.github.io/swarm-keydb/docs/http-rest-api.html
-- Lua scripting: https://scholtz.github.io/swarm-keydb/docs/lua-scripting.html
-- Stream sizing guide: https://scholtz.github.io/swarm-keydb/docs/stream-sizing-guide.html
+- [RESP3 protocol](https://scholtz.github.io/swarm-keydb/docs/resp3.html)
+- [WebSocket protocol](https://scholtz.github.io/swarm-keydb/docs/ws-protocol.html)
+- [WebSocket gateway](https://scholtz.github.io/swarm-keydb/docs/websocket-gateway.html)
+- [HTTP REST API](https://scholtz.github.io/swarm-keydb/docs/http-rest-api.html)
+- [Lua scripting](https://scholtz.github.io/swarm-keydb/docs/lua-scripting.html)
+- [Stream sizing guide](https://scholtz.github.io/swarm-keydb/docs/stream-sizing-guide.html)
 
 Data, privacy, and consistency:
 
-- Offline-first: https://scholtz.github.io/swarm-keydb/docs/offline-first.html
-- Privacy-preserving queries: https://scholtz.github.io/swarm-keydb/docs/privacy-preserving-queries.html
-- Consistency verification: https://scholtz.github.io/swarm-keydb/docs/consistency-verification.html
-- Decentralized identity: https://scholtz.github.io/swarm-keydb/docs/decentralized-identity.html
+- [Offline-first](https://scholtz.github.io/swarm-keydb/docs/offline-first.html)
+- [Privacy-preserving queries](https://scholtz.github.io/swarm-keydb/docs/privacy-preserving-queries.html)
+- [Consistency verification](https://scholtz.github.io/swarm-keydb/docs/consistency-verification.html)
+- [Decentralized identity](https://scholtz.github.io/swarm-keydb/docs/decentralized-identity.html)
 
 SDK and language docs:
 
-- JavaScript SDK: https://scholtz.github.io/swarm-keydb/docs/js-sdk.html
-- Python SDK: https://scholtz.github.io/swarm-keydb/docs/python-sdk.html
-- Go SDK: https://scholtz.github.io/swarm-keydb/docs/go-sdk.html
-- SDK index: https://scholtz.github.io/swarm-keydb/docs/sdk/
-- SDK JavaScript: https://scholtz.github.io/swarm-keydb/docs/sdk/js.html
-- SDK React: https://scholtz.github.io/swarm-keydb/docs/sdk/react.html
-- SDK Node: https://scholtz.github.io/swarm-keydb/docs/sdk/node.html
-- SDK Python: https://scholtz.github.io/swarm-keydb/docs/sdk/python.html
-- SDK Go: https://scholtz.github.io/swarm-keydb/docs/sdk/go.html
+- [JavaScript SDK](https://scholtz.github.io/swarm-keydb/docs/js-sdk.html)
+- [Python SDK](https://scholtz.github.io/swarm-keydb/docs/python-sdk.html)
+- [Go SDK](https://scholtz.github.io/swarm-keydb/docs/go-sdk.html)
+- [SDK index](https://scholtz.github.io/swarm-keydb/docs/sdk/)
+- [SDK JavaScript](https://scholtz.github.io/swarm-keydb/docs/sdk/js.html)
+- [SDK React](https://scholtz.github.io/swarm-keydb/docs/sdk/react.html)
+- [SDK Node](https://scholtz.github.io/swarm-keydb/docs/sdk/node.html)
+- [SDK Python](https://scholtz.github.io/swarm-keydb/docs/sdk/python.html)
+- [SDK Go](https://scholtz.github.io/swarm-keydb/docs/sdk/go.html)
 
 Guides by discipline:
 
-- Architecture: https://scholtz.github.io/swarm-keydb/docs/architecture/
-- Development: https://scholtz.github.io/swarm-keydb/docs/development/
-- Deployment assets: https://scholtz.github.io/swarm-keydb/docs/deployment/
-- Operations runbooks: https://scholtz.github.io/swarm-keydb/docs/operations/
-- Configuration reference: https://scholtz.github.io/swarm-keydb/docs/reference/configuration.html
+- [Architecture](https://scholtz.github.io/swarm-keydb/docs/architecture/)
+- [Development](https://scholtz.github.io/swarm-keydb/docs/development/)
+- [Deployment assets](https://scholtz.github.io/swarm-keydb/docs/deployment/)
+- [Operations runbooks](https://scholtz.github.io/swarm-keydb/docs/operations/)
+- [Configuration reference](https://scholtz.github.io/swarm-keydb/docs/reference/configuration.html)
 
 Tutorials:
 
-- Tutorials index: https://scholtz.github.io/swarm-keydb/docs/tutorials/
-- User profile storage: https://scholtz.github.io/swarm-keydb/docs/tutorials/user-profile-storage.html
-- Chat history TTL: https://scholtz.github.io/swarm-keydb/docs/tutorials/chat-history-ttl.html
-- Shared config ACL: https://scholtz.github.io/swarm-keydb/docs/tutorials/shared-config-acl.html
-- Batch operations: https://scholtz.github.io/swarm-keydb/docs/tutorials/batch-operations.html
-- Encryption with user keypair: https://scholtz.github.io/swarm-keydb/docs/tutorials/encryption-user-keypair.html
-- Key rotation and backup: https://scholtz.github.io/swarm-keydb/docs/tutorials/key-rotation-backup.html
-- Ethereum bridge: https://scholtz.github.io/swarm-keydb/docs/tutorials/ethereum-bridge.html
+- [Tutorials index](https://scholtz.github.io/swarm-keydb/docs/tutorials/)
+- [User profile storage](https://scholtz.github.io/swarm-keydb/docs/tutorials/user-profile-storage.html)
+- [Chat history TTL](https://scholtz.github.io/swarm-keydb/docs/tutorials/chat-history-ttl.html)
+- [Shared config ACL](https://scholtz.github.io/swarm-keydb/docs/tutorials/shared-config-acl.html)
+- [Batch operations](https://scholtz.github.io/swarm-keydb/docs/tutorials/batch-operations.html)
+- [Encryption with user keypair](https://scholtz.github.io/swarm-keydb/docs/tutorials/encryption-user-keypair.html)
+- [Key rotation and backup](https://scholtz.github.io/swarm-keydb/docs/tutorials/key-rotation-backup.html)
+- [Ethereum bridge](https://scholtz.github.io/swarm-keydb/docs/tutorials/ethereum-bridge.html)
 
 ## Quickstart (put/get round-trip)
 
