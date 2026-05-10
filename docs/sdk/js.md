@@ -1,26 +1,18 @@
 # JavaScript SDK Quick Reference
 
-Install:
+Use the new npm SDK package:
 
-```bash
-cd swarm-keydb-js
-npm ci
+- Package: `@swarm-keydb/client`
+- Source in this repository: `sdk/js/`
+- Full documentation: `docs/js-sdk.md`
+
+Quick start:
+
+```ts
+import { createClient } from '@swarm-keydb/client';
+
+const client = createClient({ wsUrl: 'ws://127.0.0.1:8765/' });
+await client.connect();
+await client.set('hello', 'world');
+console.log(await client.get('hello'));
 ```
-
-Run a complete example:
-
-```bash
-node examples/user-profile.mjs
-```
-
-Core API:
-
-- `connect()`, `disconnect()`
-- `put(key, value)`, `get(key)`, `delete(key)`
-- `list(pattern?)`
-- `batchPut(entries)`, `batchGet(keys)`
-- `setWithTTL(key, value, ttlSeconds)`
-- `backup()`, `restore(ref, key?)`, `rotateKey(oldKey, newKey)`
-- privacy options: `privacyMode` + `privacyKey` (`none`, `oblivious_hashing`, `full_psi`)
-
-Error handling note: when the server rejects a command (invalid TTL, ACL denied, integrity/read failure), SDK methods reject with the Redis/server error.
