@@ -313,9 +313,13 @@ Set the backend to `bee` and provide the Bee API endpoint and postage batch id. 
 
 ```bash
 export SWARM_KEYDB_BACKEND=bee
-export BEE_URL=http://localhost:1633/
-export BEE_POSTAGE_BATCH_ID=<your-postage-batch-id>
+export BEE_URL=https://bzz.limo
+export BEE_POSTAGE_BATCH_ID=NULL_STAMP
 dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj
+```
+
+```
+docker run --rm -e SWARM_KEYDB_BACKEND=bee -e BEE_URL=https://bzz.limo -e BEE_POSTAGE_BATCH_ID=NULL_STAMP -p 6379:6379 shcoltz2/swarm-keydb
 ```
 
 The checked-in Docker Compose and Kubernetes manifests default to a Bee Sepolia testnet setup. Replace the RPC endpoint, Bee password, and postage batch id placeholders before use.
