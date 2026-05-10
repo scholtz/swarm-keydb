@@ -34,6 +34,11 @@ jobs:
         echo "package_id=${PACKAGE_ID}" >> "$GITHUB_OUTPUT"
         echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+    - name: Prepare NuGet artifacts directory
+      run: |
+        rm -rf ./artifacts/nuget
+        mkdir -p ./artifacts/nuget
+
     - name: Restore package project
       run: dotnet restore src/SwarmKeyDb.SwarmConsistency/SwarmKeyDb.SwarmConsistency.csproj
 
@@ -41,6 +46,7 @@ jobs:
       run: dotnet build src/SwarmKeyDb.SwarmConsistency/SwarmKeyDb.SwarmConsistency.csproj -c Release --no-restore
 
     - name: Pack NuGet package
+      id: pack
       run: |
         dotnet pack src/SwarmKeyDb.SwarmConsistency/SwarmKeyDb.SwarmConsistency.csproj \
           -c Release \
@@ -49,13 +55,22 @@ jobs:
           /p:Version=${{ steps.vars.outputs.version }} \
           /p:PackageVersion=${{ steps.vars.outputs.version }}
 
+        PACKAGE_PATH="$(find ./artifacts/nuget -maxdepth 1 -type f -name '${{ steps.vars.outputs.package_id }}*.nupkg' ! -name '*.snupkg' | head -n1)"
+        if [ -z "${PACKAGE_PATH}" ]; then
+          echo "Expected package was not produced in ./artifacts/nuget"
+          ls -la ./artifacts/nuget
+          exit 1
+        fi
+
+        echo "package_path=${PACKAGE_PATH}" >> "$GITHUB_OUTPUT"
+
     - name: Publish package to NuGet.org
       env:
         NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         NUGET_SOURCE_URL: ${{ vars.NUGET_SOURCE_URL }}
       run: |
         SOURCE_URL="${NUGET_SOURCE_URL:-https://api.nuget.org/v3/index.json}"
-        dotnet nuget push ./artifacts/nuget/${{ steps.vars.outputs.package_id }}.${{ steps.vars.outputs.version }}.nupkg \
+        dotnet nuget push "${{ steps.pack.outputs.package_path }}" \
           --api-key "$NUGET_API_KEY" \
           --source "$SOURCE_URL" \
           --skip-duplicate

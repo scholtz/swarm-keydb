@@ -42,9 +42,12 @@ Set these in **GitHub repository settings** before running the workflow.
 1. Checks out repository code.
 2. Sets up .NET 10 SDK.
 3. Computes version as `1.0.YYYYMMDD.HHMMSS` (UTC).
-4. Restores `src/SwarmKeyDb.SwarmConsistency/SwarmKeyDb.SwarmConsistency.csproj`.
-5. Packs the project into `./artifacts/nuget`.
-6. Pushes `.nupkg` to configured NuGet source with `--skip-duplicate`.
+4. Cleans and recreates `./artifacts/nuget` so only CI-built packages are present.
+5. Restores and builds `src/SwarmKeyDb.SwarmConsistency/SwarmKeyDb.SwarmConsistency.csproj`.
+6. Packs the project into `./artifacts/nuget`.
+7. Discovers the produced `.nupkg` path from the pack output directory and pushes that exact file to the configured NuGet source with `--skip-duplicate`.
+
+This avoids filename mismatch issues caused by NuGet version normalization and guarantees the publish step uses the artifact built in the same workflow run.
 
 ## Manual publish steps
 
