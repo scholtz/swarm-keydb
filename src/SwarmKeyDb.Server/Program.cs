@@ -13,6 +13,8 @@ var appSettings = LoadAppSettings();
 var port = GetInt("SWARM_KEYDB_PORT", 6379);
 var webSocketPort = GetInt("SWARM_KEYDB_WS_PORT", 8765);
 var webSocketCorsOrigins = ParseCsv(GetFirstSetting("SWARM_KEYDB_WS_CORS_ORIGINS", "SWARM_KEYDB_WS_ALLOWED_ORIGINS")) ?? ["*"];
+var httpPort = GetInt("SWARM_KEYDB_HTTP_PORT", 8080);
+var httpCorsOrigins = ParseCsv(GetFirstSetting("SWARM_KEYDB_HTTP_CORS_ORIGINS", "SWARM_KEYDB_HTTP_ALLOWED_ORIGINS")) ?? ["*"];
 var requirePass = GetFirstSetting("SWARM_KEYDB_REQUIREPASS", "REQUIREPASS");
 var bind = IPAddress.Parse(GetString("SWARM_KEYDB_BIND", "0.0.0.0"));
 var dataDir = GetString("SWARM_KEYDB_DATA_DIR", Path.Combine(AppContext.BaseDirectory, "data"));
@@ -22,7 +24,7 @@ var ipfsPinOnWrite = GetBoolFromMany(defaultValue: true, "IPFS_PIN_ON_WRITE", "I
 var metricsEnabled = GetBool("METRICS_ENABLED", true);
 var metricsPort = GetInt("METRICS_PORT", 9090);
 var dashboardEnabled = GetBool("DASHBOARD_ENABLED", true);
-var dashboardPort = GetInt("DASHBOARD_PORT", 8080);
+var dashboardPort = GetInt("DASHBOARD_PORT", 8081);
 var privacyMode = GetPrivacyModeFromSettings();
 var privacyKeyHex = GetFirstSetting("SWARM_KEYDB_PRIVACY_KEY", "SWARM_KEYDB_ENCRYPTION_ETH_KEY", "Privacy:KeyHex");
 var didMode = GetDidModeFromSettings();
@@ -534,6 +536,24 @@ if (webSocketPort > 0)
         webSocketCorsOrigins,
         provider.GetRequiredService<ILogger<WebSocketGateway>>());
 }
+HttpGateway? httpGateway = null;
+if (httpPort > 0)
+{
+    var metricsServerPort = metricsEnabled && (!dashboardEnabled || metricsPort != dashboardPort) ? metricsPort : 0;
+    if ((dashboardEnabled && dashboardPort == httpPort) || (metricsServerPort > 0 && metricsServerPort == httpPort))
+    {
+        throw new InvalidOperationException("SWARM_KEYDB_HTTP_PORT conflicts with existing monitoring listener port. Configure distinct ports.");
+    }
+
+    httpGateway = new HttpGateway(
+        bind,
+        httpPort,
+        processor,
+        monitoringMetrics,
+        requirePass,
+        httpCorsOrigins,
+        provider.GetRequiredService<ILogger<HttpGateway>>());
+}
 
 // Create the Ethereum bridge (opt-in: only active when ETH_BRIDGE_ENABLED=true)
 EthereumBridgeService? ethereumBridge = null;
@@ -656,7 +676,10 @@ var serverTask = server.RunAsync(cts.Token);
 var webSocketTask = webSocketGateway is null
     ? Task.CompletedTask
     : webSocketGateway.RunAsync(cts.Token);
-await Task.WhenAll(serverTask, webSocketTask);
+var httpTask = httpGateway is null
+    ? Task.CompletedTask
+    : httpGateway.RunAsync(cts.Token);
+await Task.WhenAll(serverTask, webSocketTask, httpTask);
 await Task.WhenAll(monitoringTasks);
 
 if (ethereumBridge is not null)
@@ -686,6 +709,7 @@ foreach (var monitoringServer in monitoringServers)
     monitoringServer.Dispose();
 }
 webSocketGateway?.Dispose();
+httpGateway?.Dispose();
 foreach (var resource in ownedResources)
 {
     resource.Dispose();
