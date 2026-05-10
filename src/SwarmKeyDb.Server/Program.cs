@@ -113,7 +113,8 @@ var monitoringMetrics = new MonitoringMetrics(
             new long[RedisCommandProcessor.ScriptExecDurationBucketUpperBounds.Length],
             0,
             0)),
-    compatibilityMetricsAccessor: () => processorRef?.GetCompatibilityMetrics() ?? new CompatibilityMetricsSnapshot(0, 0, 0, 0, 0, 0));
+    compatibilityMetricsAccessor: () => processorRef?.GetCompatibilityMetrics() ?? new CompatibilityMetricsSnapshot(0, 0, 0, 0, 0, 0),
+    resp3MetricsAccessor: () => processorRef?.GetResp3Metrics() ?? new Resp3MetricsSnapshot(0, 0, 0));
 
 var cacheOptions = new CacheOptions
 {
