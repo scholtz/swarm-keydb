@@ -29,6 +29,10 @@ import (
 	"github.com/scholtz/swarm-keydb/sdk/go/internal/transport"
 )
 
+// maxBackoffShift caps the bit-shift in retryBackoff to prevent overflow
+// when MaxRetries is configured to a very large value.
+const maxBackoffShift = 30
+
 // Options configures a SwarmKeyDb client.
 type Options struct {
 	// Addr is the WebSocket address, e.g. "ws://localhost:8765".
@@ -133,8 +137,9 @@ func NewClient(opts *Options) *Client {
 		opts:     o,
 		pool:     make(chan *poolConn, o.PoolSize),
 		closedCh: make(chan struct{}),
-		//nolint:gosec // non-cryptographic jitter only
-		rng: rand.New(rand.NewSource(time.Now().UnixNano())),
+		// In Go 1.20+ the global rand source is auto-seeded; use it via rand.New
+		// with a random source seeded from the global pool for per-client isolation.
+		rng: rand.New(rand.NewSource(rand.Int63())),
 	}
 	if o.HTTPFallback {
 		c.http = transport.NewHTTPTransport(o.HTTPAddr, o.Password, o.ReadTimeout)
@@ -270,7 +275,11 @@ func (c *Client) do(ctx context.Context, cmd string, args []string) (*transport.
 func (c *Client) retryBackoff(attempt int) time.Duration {
 	base := float64(c.opts.MinRetryBackoff)
 	max := float64(c.opts.MaxRetryBackoff)
-	d := base * float64(uint(1)<<uint(attempt-1))
+	shift := attempt - 1
+	if shift > maxBackoffShift {
+		shift = maxBackoffShift
+	}
+	d := base * float64(uint(1)<<uint(shift))
 	if d > max {
 		d = max
 	}

@@ -12,7 +12,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Frame is the JSON wire format for a SwarmKeyDb command.
+// isPubSubType reports whether the response type represents a pub/sub push frame.
+func isPubSubType(t string) bool {
+	switch t {
+	case "message", "pmessage", "subscribe", "unsubscribe", "psubscribe", "punsubscribe":
+		return true
+	}
+	return false
+}
+
+
 type Frame struct {
 	Cmd  string   `json:"cmd"`
 	Args []string `json:"args"`
@@ -105,9 +114,8 @@ func (c *Conn) readLoop() {
 		if err := json.Unmarshal(msg, &r); err != nil {
 			continue
 		}
-		// PubSub push
-		if r.Type == "message" || r.Type == "pmessage" || r.Type == "subscribe" ||
-			r.Type == "unsubscribe" || r.Type == "psubscribe" || r.Type == "punsubscribe" {
+		// PubSub push: route to push channel, do not dequeue a pending request.
+		if isPubSubType(r.Type) {
 			pm := &PushMessage{
 				Type:    r.Type,
 				Channel: r.Channel,
