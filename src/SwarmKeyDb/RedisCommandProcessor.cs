@@ -50,6 +50,13 @@ public sealed class RedisCommandProcessor : IDisposable
     private long _totalCommandsProcessed;
     private readonly Random _random = new();
 
+    // RESP3 / client-tracking telemetry
+    private long _resp3ConnectionsTotal;
+    private long _activeResp3Connections;
+
+    // Per-connection tracking registrations: clientId → push channel writer
+    private readonly ConcurrentDictionary<long, TrackingRegistration> _trackingConnections = new();
+
     private static readonly IReadOnlyDictionary<string, CommandSpec> CommandSpecs = CreateCommandSpecs();
 
     // Scripting
@@ -138,6 +145,7 @@ public sealed class RedisCommandProcessor : IDisposable
         var writer = new RespWriter(output);
         string? currentAddress = null;
         DidContext? currentDidContext = null;
+        int protocolVersion = 2; // negotiated per connection; upgrades via HELLO
 
         if (_ethAddressAccessor is not null)
         {
@@ -263,12 +271,84 @@ public sealed class RedisCommandProcessor : IDisposable
                     continue;
                 }
 
-                // In subscription mode only PING, RESET, and QUIT are permitted
-                if (isSubscribed && command is not ("PING" or "RESET" or "QUIT"))
+                // In subscription mode only PING, RESET, HELLO, and QUIT are permitted
+                if (isSubscribed && command is not ("PING" or "RESET" or "HELLO" or "QUIT"))
                 {
                     await writer.WriteAsync(
                         RespValue.Error($"ERR Can't call '{command.ToLowerInvariant()}' in subscribe mode"),
                         cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                // HELLO: per-connection protocol negotiation (must not be queued in MULTI)
+                if (command == "HELLO")
+                {
+                    if (tx.InMulti)
+                    {
+                        await writer.WriteAsync(RespValue.Error("ERR Command not allowed inside a transaction"), cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    var helloResult = HandleHello(request, clientId, ref protocolVersion, ref currentAddress, writer);
+                    await writer.WriteAsync(helloResult, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                // RESET: restore connection to factory state
+                if (command == "RESET")
+                {
+                    // Unsubscribe from all channels/patterns
+                    if (_pubSubManager is not null)
+                    {
+                        foreach (var ch in channelSubs.ToArray())
+                        {
+                            _pubSubManager.Unsubscribe(connectionId, ch);
+                        }
+
+                        foreach (var pat in patternSubs.ToArray())
+                        {
+                            _pubSubManager.PUnsubscribe(connectionId, pat);
+                        }
+                    }
+
+                    channelSubs.Clear();
+                    patternSubs.Clear();
+                    tx.Reset();
+
+                    // Downgrade from RESP3 → 2 if needed
+                    if (protocolVersion == 3)
+                    {
+                        Interlocked.Decrement(ref _activeResp3Connections);
+                        protocolVersion = 2;
+                        writer.ProtocolVersion = 2;
+                    }
+
+                    // Remove tracking registration
+                    _trackingConnections.TryRemove(clientId, out _);
+
+                    // Clear auth state
+                    currentAddress = null;
+                    currentDidContext = null;
+                    if (_ethAddressAccessor is not null)
+                    {
+                        _ethAddressAccessor.CurrentAddress = null;
+                    }
+
+                    if (_didContextAccessor is not null)
+                    {
+                        _didContextAccessor.Current = null;
+                    }
+
+                    await writer.WriteAsync(RespValue.SimpleString("RESET"), cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                // CLIENT TRACKING requires access to the per-connection push channel
+                if (command == "CLIENT" && request.Items is { Count: >= 3 } clientItems
+                    && clientItems[1].AsString().ToUpperInvariant() == "TRACKING")
+                {
+                    var trackingResult = HandleClientTracking(request, clientId, pushChannel.Writer);
+                    await writer.WriteAsync(trackingResult, cancellationToken).ConfigureAwait(false);
                     continue;
                 }
 
@@ -293,7 +373,7 @@ public sealed class RedisCommandProcessor : IDisposable
                 // Bump key versions for successful mutations so WATCH can detect changes
                 if (response.Type != RespType.Error && request.Items is { Count: > 0 } mutatedItems)
                 {
-                    BumpMutatedKeys(command, mutatedItems);
+                    BumpMutatedKeys(command, mutatedItems, clientId);
                 }
 
                 if (TryGetAuthorizedAddress(request, response, out var authorizedAddress))
@@ -307,6 +387,13 @@ public sealed class RedisCommandProcessor : IDisposable
                 }
 
                 await writer.WriteAsync(response, cancellationToken).ConfigureAwait(false);
+
+                // Drain any queued push messages (CLIENT TRACKING invalidations) after each command reply.
+                while (pushChannel.Reader.TryRead(out var push))
+                {
+                    await writer.WriteAsync(push, cancellationToken).ConfigureAwait(false);
+                }
+
                 if (IsQuit(request))
                 {
                     break;
@@ -322,7 +409,13 @@ public sealed class RedisCommandProcessor : IDisposable
             }
 
             _clientConnections.TryRemove(clientId, out _);
+            _trackingConnections.TryRemove(clientId, out _);
             CurrentClientContext.Value = null;
+
+            if (protocolVersion == 3)
+            {
+                Interlocked.Decrement(ref _activeResp3Connections);
+            }
 
             pushChannel.Writer.TryComplete();
 
@@ -570,7 +663,7 @@ public sealed class RedisCommandProcessor : IDisposable
     /// Bumps the mutation version for all keys affected by a successful write command.
     /// Called after every successful non-transaction command execution.
     /// </summary>
-    private void BumpMutatedKeys(string command, IReadOnlyList<RespValue> args)
+    private void BumpMutatedKeys(string command, IReadOnlyList<RespValue> args, long sourceClientId = 0)
     {
         switch (command)
         {
@@ -587,7 +680,9 @@ public sealed class RedisCommandProcessor : IDisposable
             case "PERSIST":
                 if (args.Count >= 2)
                 {
-                    NotifyKeyMutated(args[1].AsString());
+                    var key = args[1].AsString();
+                    NotifyKeyMutated(key);
+                    NotifyTrackingClients(key, sourceClientId);
                 }
                 break;
 
@@ -595,7 +690,9 @@ public sealed class RedisCommandProcessor : IDisposable
             case "MDEL":
                 for (var i = 1; i < args.Count; i++)
                 {
-                    NotifyKeyMutated(args[i].AsString());
+                    var key = args[i].AsString();
+                    NotifyKeyMutated(key);
+                    NotifyTrackingClients(key, sourceClientId);
                 }
                 break;
 
@@ -603,7 +700,9 @@ public sealed class RedisCommandProcessor : IDisposable
             case "MSETNX":
                 for (var i = 1; i < args.Count - 1; i += 2)
                 {
-                    NotifyKeyMutated(args[i].AsString());
+                    var key = args[i].AsString();
+                    NotifyKeyMutated(key);
+                    NotifyTrackingClients(key, sourceClientId);
                 }
                 break;
 
@@ -616,9 +715,40 @@ public sealed class RedisCommandProcessor : IDisposable
             case "XAUTOCLAIM":
                 if (args.Count >= 2)
                 {
-                    NotifyKeyMutated(args[1].AsString());
+                    var key = args[1].AsString();
+                    NotifyKeyMutated(key);
+                    NotifyTrackingClients(key, sourceClientId);
                 }
                 break;
+        }
+    }
+
+    /// <summary>
+    /// Sends a RESP3 push invalidation message to all connections with active client tracking,
+    /// excluding the source connection (to implement default NOLOOP behaviour).
+    /// </summary>
+    private void NotifyTrackingClients(string key, long sourceClientId)
+    {
+        if (_trackingConnections.IsEmpty)
+        {
+            return;
+        }
+
+        var invalidateMsg = RespValue.Push(new[]
+        {
+            RespValue.BulkString("invalidate"),
+            RespValue.Array(new[] { RespValue.BulkString(key) })
+        });
+
+        foreach (var (id, reg) in _trackingConnections)
+        {
+            // Skip the connection that triggered the mutation (NOLOOP behaviour)
+            if (id == sourceClientId)
+            {
+                continue;
+            }
+
+            reg.PushWriter.TryWrite(invalidateMsg);
         }
     }
 
@@ -3705,6 +3835,142 @@ public sealed class RedisCommandProcessor : IDisposable
         return $"id={client.Id} addr={client.Address} name={client.Name ?? ""} age={age} idle={idle} flags=N db=0 cmd={client.LastCommand}";
     }
 
+    /// <summary>
+    /// Handles the HELLO command. Updates the per-connection protocol version and returns server info.
+    /// Modelled on Redis 7.x HELLO semantics.
+    /// </summary>
+    private RespValue HandleHello(
+        RespValue request,
+        long clientId,
+        ref int protocolVersion,
+        ref string? currentAddress,
+        RespWriter writer)
+    {
+        var args = request.Items ?? (IReadOnlyList<RespValue>)[];
+
+        // Parse requested protocol version (arg 1, optional)
+        int requestedProto = protocolVersion; // default: no change
+        if (args.Count >= 2)
+        {
+            var protoArg = args[1].AsString();
+            if (!int.TryParse(protoArg, out requestedProto) || requestedProto is not (2 or 3))
+            {
+                return RespValue.Error("NOPROTO unsupported protocol version");
+            }
+        }
+
+        // AUTH sub-option: HELLO [proto] AUTH <username> <password>
+        // We only support password-based auth; username is ignored (treated as default user).
+        if (args.Count >= 5 && args[2].AsString().ToUpperInvariant() == "AUTH")
+        {
+            // args[3] = username (ignored), args[4] = password
+            var password = args[4].AsString();
+            if (!string.IsNullOrEmpty(_compatibilityOptions.RequirePass) &&
+                password != _compatibilityOptions.RequirePass)
+            {
+                return RespValue.Error("WRONGPASS invalid username-password pair or user is disabled.");
+            }
+        }
+        else if (args.Count >= 4 && args[2].AsString().ToUpperInvariant() == "AUTH")
+        {
+            // HELLO proto AUTH password (without username)
+            var password = args[3].AsString();
+            if (!string.IsNullOrEmpty(_compatibilityOptions.RequirePass) &&
+                password != _compatibilityOptions.RequirePass)
+            {
+                return RespValue.Error("WRONGPASS invalid username-password pair or user is disabled.");
+            }
+        }
+
+        // SETNAME sub-option
+        // HELLO [proto] [AUTH …] SETNAME <name>
+        var setnameIdx = -1;
+        for (var i = 2; i < args.Count - 1; i++)
+        {
+            if (args[i].AsString().ToUpperInvariant() == "SETNAME")
+            {
+                setnameIdx = i;
+                break;
+            }
+        }
+
+        if (setnameIdx >= 0)
+        {
+            var nameArg = args[setnameIdx + 1].AsString();
+            SetClientName(CurrentClientContext.Value, nameArg);
+        }
+
+        // Apply the new protocol version
+        if (requestedProto != protocolVersion)
+        {
+            if (requestedProto == 3)
+            {
+                Interlocked.Increment(ref _resp3ConnectionsTotal);
+                Interlocked.Increment(ref _activeResp3Connections);
+            }
+            else if (protocolVersion == 3)
+            {
+                Interlocked.Decrement(ref _activeResp3Connections);
+            }
+
+            protocolVersion = requestedProto;
+            writer.ProtocolVersion = requestedProto;
+        }
+
+        return BuildHelloResponse(clientId, protocolVersion);
+    }
+
+    /// <summary>Builds the HELLO server-info response (Map in RESP3, flat array in RESP2).</summary>
+    private static RespValue BuildHelloResponse(long clientId, int proto)
+    {
+        // Key-value pairs matching Redis 7.x HELLO response shape
+        var pairs = new RespValue[]
+        {
+            RespValue.BulkString("server"),    RespValue.BulkString("swarmkeydb"),
+            RespValue.BulkString("version"),   RespValue.BulkString("7.0.0"),
+            RespValue.BulkString("proto"),     RespValue.IntegerValue(proto),
+            RespValue.BulkString("id"),        RespValue.IntegerValue(clientId),
+            RespValue.BulkString("mode"),      RespValue.BulkString("standalone"),
+            RespValue.BulkString("role"),      RespValue.BulkString("master"),
+            RespValue.BulkString("modules"),   RespValue.Array([])
+        };
+        return RespValue.Map(pairs);
+    }
+
+    /// <summary>
+    /// Handles CLIENT TRACKING ON|OFF [REDIRECT client-id] [BCAST] [PREFIX prefix] [NOLOOP].
+    /// Basic opt-in tracking that fires push invalidations when tracked keys are modified.
+    /// </summary>
+    private RespValue HandleClientTracking(RespValue request, long clientId, ChannelWriter<RespValue> pushWriter)
+    {
+        var args = request.Items ?? (IReadOnlyList<RespValue>)[];
+        if (args.Count < 3)
+        {
+            return RespValue.Error("ERR wrong number of arguments for 'CLIENT|TRACKING' command");
+        }
+
+        var onOff = args[2].AsString().ToUpperInvariant();
+        switch (onOff)
+        {
+            case "ON":
+                _trackingConnections[clientId] = new TrackingRegistration(pushWriter);
+                return RespValue.SimpleString("OK");
+
+            case "OFF":
+                _trackingConnections.TryRemove(clientId, out _);
+                return RespValue.SimpleString("OK");
+
+            default:
+                return RespValue.Error("ERR syntax error in CLIENT TRACKING command");
+        }
+    }
+
+    /// <summary>Returns a snapshot of RESP3 / client-tracking telemetry counters.</summary>
+    public Resp3MetricsSnapshot GetResp3Metrics() => new(
+        Interlocked.Read(ref _resp3ConnectionsTotal),
+        Interlocked.Read(ref _activeResp3Connections),
+        _trackingConnections.Count);
+
     private RespValue ConfigCommand(IReadOnlyList<RespValue> args)
     {
         if (args.Count < 2)
@@ -4524,6 +4790,9 @@ public sealed class RedisCommandProcessor : IDisposable
         {
         }
     }
+
+    /// <summary>Holds the push channel writer for a connection that has activated CLIENT TRACKING.</summary>
+    private sealed record TrackingRegistration(ChannelWriter<RespValue> PushWriter);
 }
 
 /// <summary>Snapshot of per-processor transaction telemetry counters.</summary>
@@ -4582,3 +4851,9 @@ public sealed record CompatibilityMetricsSnapshot(
     long MemoryUsedBytes,
     long MemoryLimitBytes,
     long EvictionTotal);
+
+/// <summary>Snapshot of RESP3 protocol and client-tracking telemetry counters.</summary>
+public sealed record Resp3MetricsSnapshot(
+    long Resp3ConnectionsTotal,
+    long ActiveResp3Connections,
+    long ClientTrackingConnections);

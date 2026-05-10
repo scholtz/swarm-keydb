@@ -16,4 +16,7 @@ public sealed class RedisCompatibilityOptions
     public int Hz { get; set; } = 10;
     public long MaxMemoryBytes { get; set; } = 0;
     public string MaxMemoryPolicy { get; set; } = "noeviction";
+
+    /// <summary>Optional server password. When non-empty, HELLO AUTH must supply this password.</summary>
+    public string? RequirePass { get; set; }
 }

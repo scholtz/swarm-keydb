@@ -23,6 +23,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
     private readonly Func<StreamMetricsSnapshot> _streamMetricsAccessor;
     private readonly Func<ScriptMetricsSnapshot> _scriptMetricsAccessor;
     private readonly Func<CompatibilityMetricsSnapshot> _compatibilityMetricsAccessor;
+    private readonly Func<Resp3MetricsSnapshot> _resp3MetricsAccessor;
     private readonly string _privacyMode;
     private long _activeConnections;
     private long _activeWebSocketConnections;
@@ -50,7 +51,8 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         Func<TransactionMetricsSnapshot>? transactionMetricsAccessor = null,
         Func<StreamMetricsSnapshot>? streamMetricsAccessor = null,
         Func<ScriptMetricsSnapshot>? scriptMetricsAccessor = null,
-        Func<CompatibilityMetricsSnapshot>? compatibilityMetricsAccessor = null)
+        Func<CompatibilityMetricsSnapshot>? compatibilityMetricsAccessor = null,
+        Func<Resp3MetricsSnapshot>? resp3MetricsAccessor = null)
     {
         _cacheStatsAccessor = cacheStatsAccessor;
         _offlineStatusAccessor = offlineStatusAccessor ?? (() => NoOpOfflineStatusProvider.Instance);
@@ -61,6 +63,7 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         _streamMetricsAccessor = streamMetricsAccessor ?? (() => EmptyStreamMetricsSnapshot);
         _scriptMetricsAccessor = scriptMetricsAccessor ?? (() => EmptyScriptMetricsSnapshot);
         _compatibilityMetricsAccessor = compatibilityMetricsAccessor ?? (() => new CompatibilityMetricsSnapshot(0, 0, 0, 0, 0, 0));
+        _resp3MetricsAccessor = resp3MetricsAccessor ?? (() => new Resp3MetricsSnapshot(0, 0, 0));
         _maxLogEntries = Math.Max(10, maxLogEntries);
         _privacyMode = privacyMode.ToString().ToLowerInvariant();
     }
@@ -282,6 +285,12 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine("# TYPE swarmkeydb_memory_limit_bytes gauge");
         builder.AppendLine("# HELP swarmkeydb_eviction_total Total key evictions caused by maxmemory enforcement.");
         builder.AppendLine("# TYPE swarmkeydb_eviction_total counter");
+        builder.AppendLine("# HELP swarmkeydb_resp3_connections_total Total connections that have negotiated RESP3 via HELLO 3.");
+        builder.AppendLine("# TYPE swarmkeydb_resp3_connections_total counter");
+        builder.AppendLine("# HELP swarmkeydb_resp3_active_connections Current connections running RESP3 protocol.");
+        builder.AppendLine("# TYPE swarmkeydb_resp3_active_connections gauge");
+        builder.AppendLine("# HELP swarmkeydb_client_tracking_keys_total Current connections with CLIENT TRACKING ON.");
+        builder.AppendLine("# TYPE swarmkeydb_client_tracking_keys_total gauge");
 
         foreach (var entry in _operations.OrderBy(static item => item.Key, StringComparer.Ordinal))
         {
@@ -317,6 +326,11 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine(FormatMetric("swarmkeydb_memory_used_bytes", compatibility.MemoryUsedBytes));
         builder.AppendLine(FormatMetric("swarmkeydb_memory_limit_bytes", compatibility.MemoryLimitBytes));
         builder.AppendLine(FormatMetric("swarmkeydb_eviction_total", compatibility.EvictionTotal));
+
+        var resp3 = _resp3MetricsAccessor();
+        builder.AppendLine(FormatMetric("swarmkeydb_resp3_connections_total", resp3.Resp3ConnectionsTotal));
+        builder.AppendLine(FormatMetric("swarmkeydb_resp3_active_connections", resp3.ActiveResp3Connections));
+        builder.AppendLine(FormatMetric("swarmkeydb_client_tracking_keys_total", resp3.ClientTrackingConnections));
 
         var cacheStats = _cacheStatsAccessor();
         var cacheHits = cacheStats.Hits;
