@@ -1,6 +1,6 @@
 # JavaScript/TypeScript SDK (`@swarm-keydb/client`)
 
-## Installation
+## Installation from package registry
 
 ```bash
 npm install @swarm-keydb/client
@@ -16,6 +16,8 @@ await client.connect();
 await client.set('hello', 'world');
 console.log(await client.get('hello'));
 ```
+
+See also runnable example: [`examples/js/quickstart.js`](../examples/js/quickstart.js).
 
 ## Connection options
 
@@ -58,3 +60,12 @@ Differences:
 - Runtime dependency footprint is intentionally small (`ws` in Node.js environments).
 - Browser usage relies on the native `WebSocket` and `fetch` APIs.
 - No `eval`/dynamic code execution is required by the SDK runtime.
+
+## Compatibility matrix
+
+| Environment | Status | Notes |
+|---|---|---|
+| Node.js 20+ | ✅ Supported | Uses `ws` transport automatically |
+| Modern browsers (Chromium/Firefox/WebKit) | ✅ Supported | Uses native `WebSocket` + `fetch` |
+| RESP3 server negotiation | ✅ Supported | Sends `HELLO 3` during connect handshake |
+| HTTP fallback (`GET` / `SET`) | ✅ Supported | Enabled by default when WebSocket is unavailable |
