@@ -114,6 +114,7 @@ jobs:
       uses: actions/setup-go@v6
       with:
         go-version: "1.22"
+        cache-dependency-path: sdk/go/go.sum
 
     - name: Go SDK tests
       run: |

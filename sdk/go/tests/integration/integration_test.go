@@ -201,8 +201,8 @@ func TestReconnectBackoffOnUnavailableServer(t *testing.T) {
 		DialTimeout:     20 * time.Millisecond,
 		ReadTimeout:     20 * time.Millisecond,
 		MaxRetries:      2,
-		MinRetryBackoff: 50 * time.Millisecond,
-		MaxRetryBackoff: 50 * time.Millisecond,
+		MinRetryBackoff: 100 * time.Millisecond,
+		MaxRetryBackoff: 100 * time.Millisecond,
 	})
 	defer c.Close()
 
@@ -213,7 +213,7 @@ func TestReconnectBackoffOnUnavailableServer(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected connection error")
 	}
-	if elapsed < 90*time.Millisecond {
+	if elapsed < 140*time.Millisecond {
 		t.Fatalf("expected retry backoff delay, elapsed only %v", elapsed)
 	}
 }
