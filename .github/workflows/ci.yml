@@ -36,7 +36,14 @@ jobs:
       run: dotnet build SwarmKeyDb.slnx --configuration Release --no-restore
 
     - name: Run tests
-      run: dotnet run --project tests/SwarmKeyDb.Tests/SwarmKeyDb.Tests.csproj
+      run: dotnet test tests/SwarmKeyDb.Tests/SwarmKeyDb.Tests.csproj --configuration Release --no-build --logger "trx;LogFileName=test-results.trx" --results-directory TestResults
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-${{ matrix.os }}
+        path: TestResults/*.trx
 
     - name: Run C# examples
       run: |

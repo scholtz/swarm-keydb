@@ -1,9 +1,9 @@
 # Roadmap for SwarmKeyDb
 
 ## Testing
-- [ ] Change the .net tests to NUnit test format and update copilot instructions
-- [ ] Split tests to multiple files according to the topic being tested
-- [ ] Update cicd pipelines to do the tests properly using NUnit testing framework
+- [x] Change the .net tests to NUnit test format and update copilot instructions (100%: migrated 253 tests from a monolithic console-runner `Program.cs` to 14 NUnit 4.x `[TestFixture]` classes; updated copilot instructions in `.github/copilot-instructions.md`)
+- [x] Split tests to multiple files according to the topic being tested (100%: split into `CoreStoreTests`, `CliTests`, `StringCommandTests`, `ExpiryCommandTests`, `BatchShardTests`, `OfflineCrdtTests`, `ConsistencyTests`, `EncryptionAclTests`, `OperabilityTests`, `StreamCommandTests`, `PubSubCommandTests`, `TransactionCommandTests`, `ScriptingCommandTests`, `ScriptReplicationTests`; shared helpers in `TestHelpers.cs` and stubs in `TestStubs.cs`)
+- [x] Update cicd pipelines to do the tests properly using NUnit testing framework (100%: replaced `dotnet run` with `dotnet test --logger trx` and added TRX artifact upload step in `.github/workflows/ci.yml`)
 
 ## Multi-Instance Availability and Cache Consistency
 - [x] Create a `SwarmKeyDb.SwarmConsistency` NuGet package that validates Swarm and Bee reads with content-hash verification, feed or manifest revision checks, optional quorum policies, and operator-friendly failure diagnostics before values reach callers. (100%)
