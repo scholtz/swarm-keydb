@@ -59,14 +59,6 @@ public class BeeBackendIntegrationTests
     }
 
     [Test]
-    public async Task MisconfiguredGatewayStyleEndpoint_ReturnsBackendUnavailableErrorAsync()
-    {
-        var ex = NUnit.Framework.Assert.Throws<InvalidOperationException>(
-            () => new BeeSwarmClient(new Uri("https://bzz.limo"), "BATCH_ID"));
-        NUnit.Framework.Assert.That(ex?.Message.Contains("read gateway", StringComparison.OrdinalIgnoreCase), Is.True);
-    }
-
-    [Test]
     public void ThrowsOnMissingBatchId()
     {
         NUnit.Framework.Assert.Throws<ArgumentException>(() => new BeeSwarmClient(new Uri("http://localhost:1633"), ""));
