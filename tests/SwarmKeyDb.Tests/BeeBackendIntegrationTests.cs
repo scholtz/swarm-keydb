@@ -34,12 +34,6 @@ public class BeeBackendIntegrationTests
         }
 
         var configuredUri = new Uri(beeUrl!, UriKind.Absolute);
-        if (batchId == "BATCH_ID")
-        {
-            NUnit.Framework.Assert.Ignore(
-                "Bee integration test requires a writable Bee API endpoint and real postage batch id.");
-        }
-
         var beeUri = configuredUri;
         var payload = Encoding.UTF8.GetBytes(TestValue + ":" + Guid.NewGuid().ToString("N"));
         var key = TestKey + ":" + Guid.NewGuid().ToString("N");
