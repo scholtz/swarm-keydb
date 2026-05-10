@@ -59,6 +59,16 @@ curl -sS http://localhost:8080/get/hello
 curl -sS -X DELETE http://localhost:8080/del/hello
 ```
 
+## Quick Start (WebSocket RESP3 from browser)
+
+```html
+<script>
+const ws = new WebSocket("ws://localhost:8765/");
+ws.onopen = () => ws.send(JSON.stringify(["HELLO", "3"]));
+ws.onmessage = (event) => console.log("SwarmKeyDb:", event.data);
+</script>
+```
+
 ## Cross-chain quick start
 
 ```csharp

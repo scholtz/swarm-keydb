@@ -137,6 +137,40 @@ Returns `+OK\r\n`. Future writes will no longer produce push frames on this conn
 | `swarmkeydb_resp3_connections_total` | counter | Total connections that have ever negotiated RESP3 via `HELLO 3`. |
 | `swarmkeydb_resp3_active_connections` | gauge | Current connections running in RESP3 mode. |
 | `swarmkeydb_client_tracking_keys_total` | gauge | Current connections with `CLIENT TRACKING ON`. |
+| `swarmkeydb_ws_resp3_connections_total` | counter | Total WebSocket connections that negotiated RESP3. |
+| `swarmkeydb_ws_client_tracking_connections` | gauge | Current WebSocket connections with client tracking enabled. |
+| `swarmkeydb_http_resp3_requests_total` | counter | Total HTTP requests using `Accept: application/json; resp=3`. |
+
+---
+
+## WebSocket RESP3
+
+The WebSocket gateway also supports RESP3 negotiation. Send either:
+
+- JSON array: `["HELLO","3"]`
+- Raw RESP frame over WebSocket: `*2\r\n$5\r\nHELLO\r\n$1\r\n3\r\n`
+
+In JSON mode, RESP3 push invalidations are emitted as:
+
+```json
+{"type":"push","data":["invalidate",["my-key"]]}
+```
+
+`RESET` returns `+RESET` in RESP mode and resets protocol/tracking state back to defaults.
+
+---
+
+## HTTP REST RESP3 negotiation
+
+The HTTP gateway supports RESP3-style JSON with:
+
+`Accept: application/json; resp=3`
+
+Examples:
+
+- `EXISTS` → boolean JSON
+- `CONFIG GET` → JSON object map
+- `ZSCORE` → JSON number
 
 ---
 
@@ -193,6 +227,5 @@ redis-cli -3 HELLO
 
 ## Limitations (current release)
 
-- **RESP3 is TCP-only.** The WebSocket gateway uses a JSON-over-WebSocket framing protocol that is separate from the RESP wire format; bridging RESP3 push frames through that protocol requires a dedicated follow-on effort. The HTTP REST API similarly operates at a higher level and is not affected by the RESP wire format. Both are tracked as follow-on issues.
 - `CLIENT TRACKING REDIRECT` (redirecting invalidations to a different connection) is not yet implemented.
 - Cluster-mode shard tracking is out of scope.

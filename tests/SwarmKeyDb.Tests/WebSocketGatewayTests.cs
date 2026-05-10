@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using NUnit.Framework;
 using SwarmKeyDb;
@@ -73,7 +74,7 @@ public class WebSocketGatewayTests
 
         await SendTextAsync(client, """{"cmd":"AUTH","args":["secret"]}""", cts.Token);
         var okAuth = await ReceiveTextAsync(client, cts.Token);
-        Assert(okAuth.Contains("\"cmd\":\"AUTH\"", StringComparison.Ordinal), $"Expected AUTH success payload. Payload: {okAuth}");
+        Assert(okAuth.Contains("OK", StringComparison.Ordinal), $"Expected AUTH success payload. Payload: {okAuth}");
 
         await SendTextAsync(client, """{"cmd":"PING"}""", cts.Token);
         var ping = await ReceiveTextAsync(client, cts.Token);
@@ -137,6 +138,60 @@ public class WebSocketGatewayTests
         Assert(payload.Contains("swarmkeydb_ws_messages_received_total{privacy_mode=\"none\"}", StringComparison.Ordinal), "WS received metric should be exposed.");
         Assert(payload.Contains("swarmkeydb_ws_messages_sent_total{privacy_mode=\"none\"}", StringComparison.Ordinal), "WS sent metric should be exposed.");
         Assert(payload.Contains("swarmkeydb_ws_errors_total{privacy_mode=\"none\"}", StringComparison.Ordinal), "WS error metric should be exposed.");
+        Assert(payload.Contains("swarmkeydb_ws_resp3_connections_total{privacy_mode=\"none\"}", StringComparison.Ordinal), "WS RESP3 metric should be exposed.");
+        Assert(payload.Contains("swarmkeydb_ws_client_tracking_connections{privacy_mode=\"none\"}", StringComparison.Ordinal), "WS tracking metric should be exposed.");
+
+        await StopGatewayAsync(gateway, cts, runTask);
+    }
+
+    [Test]
+    public async Task WebSocketGatewayJsonArrayHello3NegotiatesResp3AndReturnsMapAsync()
+    {
+        var (gateway, metrics, _, cts, runTask, port) = StartGateway();
+        using var client = new ClientWebSocket();
+        await client.ConnectAsync(new Uri($"ws://127.0.0.1:{port}/"), cts.Token);
+
+        await SendTextAsync(client, """["HELLO","3"]""", cts.Token);
+        var helloPayload = await ReceiveTextAsync(client, cts.Token);
+        using var helloJson = JsonDocument.Parse(helloPayload);
+        Assert(helloJson.RootElement.ValueKind == JsonValueKind.Object, $"Expected HELLO 3 map payload. Payload: {helloPayload}");
+        AssertEqual(3, helloJson.RootElement.GetProperty("proto").GetInt32());
+
+        var metricsPayload = metrics.CollectPrometheus();
+        Assert(metricsPayload.Contains("swarmkeydb_ws_resp3_connections_total", StringComparison.Ordinal), "Expected ws RESP3 metric.");
+
+        await StopGatewayAsync(gateway, cts, runTask);
+    }
+
+    [Test]
+    public async Task WebSocketGatewayClientTrackingPushAndResetRoundTripAsync()
+    {
+        var (gateway, metrics, _, cts, runTask, port) = StartGateway();
+        using var tracked = new ClientWebSocket();
+        using var writer = new ClientWebSocket();
+        await tracked.ConnectAsync(new Uri($"ws://127.0.0.1:{port}/"), cts.Token);
+        await writer.ConnectAsync(new Uri($"ws://127.0.0.1:{port}/"), cts.Token);
+
+        await SendTextAsync(tracked, """["HELLO","3"]""", cts.Token);
+        _ = await ReceiveTextAsync(tracked, cts.Token);
+        await SendTextAsync(tracked, """["CLIENT","TRACKING","ON"]""", cts.Token);
+        _ = await ReceiveTextAsync(tracked, cts.Token);
+        await SendTextAsync(tracked, """["GET","tracked:key"]""", cts.Token);
+        _ = await ReceiveTextAsync(tracked, cts.Token);
+
+        await SendTextAsync(writer, """{"cmd":"SET","args":["tracked:key","v1"]}""", cts.Token);
+        _ = await ReceiveTextAsync(writer, cts.Token);
+        var push = await ReceiveTextAsync(tracked, cts.Token);
+        using var pushJson = JsonDocument.Parse(push);
+        AssertEqual("push", pushJson.RootElement.GetProperty("type").GetString());
+        AssertEqual("invalidate", pushJson.RootElement.GetProperty("data")[0].GetString());
+
+        await SendTextAsync(tracked, """["RESET"]""", cts.Token);
+        var reset = await ReceiveTextAsync(tracked, cts.Token);
+        AssertEqual("\"RESET\"", reset);
+
+        var metricsPayload = metrics.CollectPrometheus();
+        Assert(metricsPayload.Contains("swarmkeydb_ws_client_tracking_connections", StringComparison.Ordinal), "Expected ws tracking metric.");
 
         await StopGatewayAsync(gateway, cts, runTask);
     }

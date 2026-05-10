@@ -31,6 +31,9 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
     private long _webSocketMessagesReceivedTotal;
     private long _webSocketMessagesSentTotal;
     private long _webSocketErrorsTotal;
+    private long _webSocketResp3ConnectionsTotal;
+    private long _webSocketClientTrackingConnections;
+    private long _httpResp3RequestsTotal;
     private long _swarmReads;
     private long _swarmWrites;
     private long _resyncPartialTotal;
@@ -85,6 +88,29 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
     public void OnWebSocketMessageSent() => Interlocked.Increment(ref _webSocketMessagesSentTotal);
 
     public void OnWebSocketError() => Interlocked.Increment(ref _webSocketErrorsTotal);
+
+    public void OnWebSocketResp3Negotiated() => Interlocked.Increment(ref _webSocketResp3ConnectionsTotal);
+
+    public void OnWebSocketClientTrackingEnabled() => Interlocked.Increment(ref _webSocketClientTrackingConnections);
+
+    public void OnWebSocketClientTrackingDisabled()
+    {
+        while (true)
+        {
+            var current = Interlocked.Read(ref _webSocketClientTrackingConnections);
+            if (current <= 0)
+            {
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref _webSocketClientTrackingConnections, current - 1, current) == current)
+            {
+                return;
+            }
+        }
+    }
+
+    public void OnHttpResp3Request() => Interlocked.Increment(ref _httpResp3RequestsTotal);
 
     public void OnHttpRequestCompleted(string method, string route, int statusCode, TimeSpan elapsed)
     {
@@ -179,8 +205,14 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine("# TYPE swarmkeydb_ws_messages_sent_total counter");
         builder.AppendLine("# HELP swarmkeydb_ws_errors_total Total WebSocket gateway errors.");
         builder.AppendLine("# TYPE swarmkeydb_ws_errors_total counter");
+        builder.AppendLine("# HELP swarmkeydb_ws_resp3_connections_total Total WebSocket connections that negotiated RESP3.");
+        builder.AppendLine("# TYPE swarmkeydb_ws_resp3_connections_total counter");
+        builder.AppendLine("# HELP swarmkeydb_ws_client_tracking_connections Current WebSocket connections with CLIENT TRACKING enabled.");
+        builder.AppendLine("# TYPE swarmkeydb_ws_client_tracking_connections gauge");
         builder.AppendLine("# HELP swarmkeydb_http_requests_total Total HTTP REST gateway requests.");
         builder.AppendLine("# TYPE swarmkeydb_http_requests_total counter");
+        builder.AppendLine("# HELP swarmkeydb_http_resp3_requests_total Total HTTP REST requests negotiated with Accept: application/json; resp=3.");
+        builder.AppendLine("# TYPE swarmkeydb_http_resp3_requests_total counter");
         builder.AppendLine("# HELP swarmkeydb_http_request_duration_seconds HTTP REST gateway request duration histogram.");
         builder.AppendLine("# TYPE swarmkeydb_http_request_duration_seconds histogram");
         builder.AppendLine("# HELP swarmkeydb_offline_queue_depth Pending offline journal entries.");
@@ -349,6 +381,9 @@ public sealed class MonitoringMetrics : IRedisCommandObserver, IResyncMetricsRep
         builder.AppendLine(FormatMetric("swarmkeydb_ws_messages_received_total", Interlocked.Read(ref _webSocketMessagesReceivedTotal)));
         builder.AppendLine(FormatMetric("swarmkeydb_ws_messages_sent_total", Interlocked.Read(ref _webSocketMessagesSentTotal)));
         builder.AppendLine(FormatMetric("swarmkeydb_ws_errors_total", Interlocked.Read(ref _webSocketErrorsTotal)));
+        builder.AppendLine(FormatMetric("swarmkeydb_ws_resp3_connections_total", Interlocked.Read(ref _webSocketResp3ConnectionsTotal)));
+        builder.AppendLine(FormatMetric("swarmkeydb_ws_client_tracking_connections", Interlocked.Read(ref _webSocketClientTrackingConnections)));
+        builder.AppendLine(FormatMetric("swarmkeydb_http_resp3_requests_total", Interlocked.Read(ref _httpResp3RequestsTotal)));
         foreach (var entry in _httpRequests.OrderBy(static pair => pair.Key.Method, StringComparer.Ordinal)
                                            .ThenBy(static pair => pair.Key.Route, StringComparer.Ordinal)
                                            .ThenBy(static pair => pair.Key.Status, StringComparer.Ordinal))

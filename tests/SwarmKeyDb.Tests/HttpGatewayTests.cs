@@ -43,6 +43,43 @@ public class HttpGatewayTests
         var metricsPayload = metrics.CollectPrometheus();
         Assert.That(metricsPayload.Contains("swarmkeydb_http_requests_total", StringComparison.Ordinal), Is.True, "Expected HTTP request counter metric.");
         Assert.That(metricsPayload.Contains("swarmkeydb_http_request_duration_seconds", StringComparison.Ordinal), Is.True, "Expected HTTP latency metric.");
+        Assert.That(metricsPayload.Contains("swarmkeydb_http_resp3_requests_total", StringComparison.Ordinal), Is.True, "Expected HTTP RESP3 request metric.");
+
+        await StopGatewayAsync(gateway, cts, runTask);
+    }
+
+    [Test]
+    public async Task HttpGatewayResp3AcceptHeaderReturnsTypedShapesAndKeepsResp2DefaultAsync()
+    {
+        var (gateway, _, cts, runTask, port) = StartGateway();
+        using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+
+        var defaultConfig = await client.PostAsJsonAsync("/cmd", new { cmd = "CONFIG", args = new[] { "GET", "*" } }, cts.Token);
+        var defaultConfigJson = await ReadJsonAsync(defaultConfig, cts.Token);
+        Assert.That(defaultConfig.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        Assert.That(defaultConfigJson.RootElement.GetProperty("result").ValueKind, Is.EqualTo(JsonValueKind.Array));
+
+        var resp3ConfigRequest = new HttpRequestMessage(HttpMethod.Post, "/cmd")
+        {
+            Content = JsonContent.Create(new { cmd = "CONFIG", args = new[] { "GET", "*" } })
+        };
+        resp3ConfigRequest.Headers.Accept.ParseAdd("application/json; resp=3");
+        var resp3Config = await client.SendAsync(resp3ConfigRequest, cts.Token);
+        var resp3ConfigJson = await ReadJsonAsync(resp3Config, cts.Token);
+        Assert.That(resp3Config.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        Assert.That(resp3ConfigJson.RootElement.GetProperty("result").ValueKind, Is.EqualTo(JsonValueKind.Object));
+
+        var resp3ExistsRequest = new HttpRequestMessage(HttpMethod.Get, "/exists/no-such-key");
+        resp3ExistsRequest.Headers.Accept.ParseAdd("application/json; resp=3");
+        var resp3Exists = await client.SendAsync(resp3ExistsRequest, cts.Token);
+        var resp3ExistsJson = await ReadJsonAsync(resp3Exists, cts.Token);
+        Assert.That(resp3Exists.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        Assert.That(resp3ExistsJson.RootElement.GetProperty("result").ValueKind, Is.EqualTo(JsonValueKind.False));
+
+        var defaultExists = await client.GetAsync("/exists/no-such-key", cts.Token);
+        var defaultExistsJson = await ReadJsonAsync(defaultExists, cts.Token);
+        Assert.That(defaultExists.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        Assert.That(defaultExistsJson.RootElement.GetProperty("result").ValueKind, Is.EqualTo(JsonValueKind.Number));
 
         await StopGatewayAsync(gateway, cts, runTask);
     }

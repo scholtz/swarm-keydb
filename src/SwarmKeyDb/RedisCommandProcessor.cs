@@ -180,8 +180,9 @@ public sealed class RedisCommandProcessor : IDisposable
             {
                 RespValue? request;
                 var isSubscribed = channelSubs.Count + patternSubs.Count > 0;
+                var hasClientTracking = _trackingConnections.ContainsKey(clientId);
 
-                if (isSubscribed)
+                if (isSubscribed || hasClientTracking)
                 {
                     // In subscription mode: interleave push message delivery with command reading.
                     // Drain any queued push messages before blocking on the next command.
