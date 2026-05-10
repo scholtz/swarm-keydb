@@ -118,6 +118,7 @@ type Client struct {
 	http     *transport.HTTPTransport
 	closed   bool
 	closedCh chan struct{}
+	rng      *rand.Rand // per-client PRNG for jitter; guarded by mu
 }
 
 // NewClient returns a new Client. Call Close when done.
@@ -132,6 +133,8 @@ func NewClient(opts *Options) *Client {
 		opts:     o,
 		pool:     make(chan *poolConn, o.PoolSize),
 		closedCh: make(chan struct{}),
+		//nolint:gosec // non-cryptographic jitter only
+		rng: rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	if o.HTTPFallback {
 		c.http = transport.NewHTTPTransport(o.HTTPAddr, o.Password, o.ReadTimeout)
@@ -271,9 +274,12 @@ func (c *Client) retryBackoff(attempt int) time.Duration {
 	if d > max {
 		d = max
 	}
-	// add jitter ±25%
+	// add jitter ±25% using per-client PRNG (guarded by mu)
 	jitter := d * 0.25
-	d = d - jitter + rand.Float64()*2*jitter
+	c.mu.Lock()
+	r := c.rng.Float64()
+	c.mu.Unlock()
+	d = d - jitter + r*2*jitter
 	return time.Duration(d)
 }
 

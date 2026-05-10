@@ -199,7 +199,10 @@ func (p *txPipeline) exec(ctx context.Context) ([]Cmder, error) {
 	if execResp.Result == nil {
 		return nil, WatchConflictError
 	}
-	arr, _ := execResp.Result.([]interface{})
+	arr, ok := execResp.Result.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("swarmkeydb: unexpected EXEC result type %T", execResp.Result)
+	}
 	result := make([]Cmder, len(cmds))
 	for i, c := range cmds {
 		if i < len(arr) {

@@ -104,6 +104,20 @@ func TestPing(t *testing.T) {
 	}
 }
 
+func TestPingError(t *testing.T) {
+	srv := mockWS(t, func(cmd string, args []string) wsResp {
+		return wsResp{Error: "ERR server busy"}
+	})
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	defer c.Close()
+
+	res := c.Ping(context.Background())
+	if res.Err() == nil {
+		t.Fatal("expected error from Ping, got nil")
+	}
+}
+
 func TestSetGet(t *testing.T) {
 	store := make(map[string]string)
 	srv := mockWS(t, func(cmd string, args []string) wsResp {
@@ -134,6 +148,38 @@ func TestSetGet(t *testing.T) {
 	}
 	if val != "world" {
 		t.Errorf("expected world, got %q", val)
+	}
+}
+
+func TestSetWithTTL(t *testing.T) {
+	var capturedArgs []string
+	srv := mockWS(t, func(cmd string, args []string) wsResp {
+		if cmd == "SET" {
+			capturedArgs = args
+			return wsResp{Result: "OK"}
+		}
+		return wsResp{Error: "unknown"}
+	})
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	defer c.Close()
+
+	ctx := context.Background()
+
+	// Test EX for >= 1s TTL
+	if err := c.Set(ctx, "k", "v", 2*time.Second).Err(); err != nil {
+		t.Fatalf("Set with EX error: %v", err)
+	}
+	if len(capturedArgs) < 4 || capturedArgs[2] != "EX" || capturedArgs[3] != "2" {
+		t.Errorf("expected EX 2, got args %v", capturedArgs)
+	}
+
+	// Test PX for sub-second TTL
+	if err := c.Set(ctx, "k", "v", 500*time.Millisecond).Err(); err != nil {
+		t.Fatalf("Set with PX error: %v", err)
+	}
+	if len(capturedArgs) < 4 || capturedArgs[2] != "PX" || capturedArgs[3] != "500" {
+		t.Errorf("expected PX 500, got args %v", capturedArgs)
 	}
 }
 
