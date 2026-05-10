@@ -219,7 +219,7 @@ public class CoreStoreTests
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         });
 
-        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://bzz.limo") };
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("http://bee.local/") };
         var client = new BeeSwarmClient(httpClient, "NULL_STAMP");
 
         var reference = await client.UploadAsync(payload);
@@ -231,10 +231,20 @@ public class CoreStoreTests
     public void BeeClientUploadThrowsOnHttpFailureAsync()
     {
         var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
-        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://bzz.limo") };
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("http://bee.local/") };
         var client = new BeeSwarmClient(httpClient, "NULL_STAMP");
 
         NUnit.Framework.Assert.ThrowsAsync<HttpRequestException>(async () => await client.UploadAsync(Encoding.UTF8.GetBytes("v")));
+    }
+
+    [Test]
+    public void BeeClientRejectsReadGatewayAsUploadEndpoint()
+    {
+        var ex = NUnit.Framework.Assert.Throws<InvalidOperationException>(
+            () => new BeeSwarmClient(new Uri("https://bzz.limo"), "batch-id"));
+
+        Assert(ex is not null && ex.Message.Contains("read gateway", StringComparison.OrdinalIgnoreCase),
+            "Expected a clear error for bzz.limo upload misconfiguration.");
     }
 
     [Test]

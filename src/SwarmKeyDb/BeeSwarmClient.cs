@@ -22,6 +22,8 @@ public sealed class BeeSwarmClient : ISwarmClient, IDisposable
             throw new ArgumentException("A Bee postage batch id is required for uploads.", nameof(postageBatchId));
         }
 
+        var host = httpClient.BaseAddress?.Host;
+
         _httpClient = httpClient;
         _postageBatchId = postageBatchId;
         _disposeClient = disposeClient;

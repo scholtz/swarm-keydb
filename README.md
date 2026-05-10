@@ -239,16 +239,20 @@ redis-cli -p 6379 BACKENDMETA test:swarm-check
 Expected output shape:
 
 ```
-"{\"type\":\"swarm\",\"swarmReference\":\"b0b862080619b0993308f361d44b1a2fb5f11a981f7023f9ecc689a0016e7b2b\"}"
+"{\"type\":\"swarm\",\"swarmReference\":\"50da14cf63f57773ca09a01c4484e14b8735ed1739362a4f6849252f00b1e027\\"}"
 ```
 
-To validate the referenced object is retrievable:
+To validate the referenced object is retrievable from the same Bee node that accepted the write:
 
 ```
-curl -fSL "http://localhost:1633/bytes/b0b862080619b0993308f361d44b1a2fb5f11a981f7023f9ecc689a0016e7b2b" -o swarm-object.bin
+curl -fSL "http://localhost:1633/bytes/50da14cf63f57773ca09a01c4484e14b8735ed1739362a4f6849252f00b1e027" -o swarm-object.bin
+```
 
-# Optional gateway verification (can lag; 404 immediately after write is possible)
-curl -fSL "https://bzz.limo/bytes/b0b862080619b0993308f361d44b1a2fb5f11a981f7023f9ecc689a0016e7b2b" -o swarm-object.bin
+Optional public gateway check:
+
+```
+# This can lag; a 404 immediately after write is possible.
+curl -fSL "https://bzz.limo/bytes/50da14cf63f57773ca09a01c4484e14b8735ed1739362a4f6849252f00b1e027" -o swarm-object.bin
 ```
 
 ## Stream retention configuration
