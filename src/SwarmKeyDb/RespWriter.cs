@@ -5,6 +5,10 @@ namespace SwarmKeyDb;
 public sealed class RespWriter
 {
     private static readonly byte[] CrLf = "\r\n"u8.ToArray();
+
+    /// <summary>Minimum number of bytes in a VerbatimString payload: 3-char encoding + ':' = 4.</summary>
+    private const int MinVerbatimStringLength = 4;
+
     private readonly Stream _stream;
 
     /// <summary>Negotiated RESP protocol version. 2 = RESP2 (default), 3 = RESP3.</summary>
@@ -115,7 +119,7 @@ public sealed class RespWriter
                 break;
 
             case RespType.VerbatimString:
-                if (ProtocolVersion >= 3 && value.Text is { Length: >= 4 })
+                if (ProtocolVersion >= 3 && value.Text is { Length: >= MinVerbatimStringLength })
                 {
                     var rawBytes = Encoding.UTF8.GetBytes(value.Text);
                     await WriteAsciiAsync($"={rawBytes.Length}\r\n", cancellationToken).ConfigureAwait(false);
@@ -125,7 +129,7 @@ public sealed class RespWriter
                 else
                 {
                     var data = value.Text;
-                    if (data is { Length: >= 4 })
+                    if (data is { Length: >= MinVerbatimStringLength })
                     {
                         var colonIndex = data.IndexOf(':', StringComparison.Ordinal);
                         data = colonIndex >= 0 ? data[(colonIndex + 1)..] : data;

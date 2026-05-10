@@ -3859,27 +3859,38 @@ public sealed class RedisCommandProcessor : IDisposable
             }
         }
 
-        // AUTH sub-option: HELLO [proto] AUTH <username> <password>
+        // AUTH sub-option: HELLO [proto] AUTH [username] <password>
         // We only support password-based auth; username is ignored (treated as default user).
-        if (args.Count >= 5 && args[2].AsString().ToUpperInvariant() == "AUTH")
+        // Locate the AUTH keyword (may appear at index 2 or later).
+        for (var i = 2; i < args.Count - 1; i++)
         {
-            // args[3] = username (ignored), args[4] = password
-            var password = args[4].AsString();
+            if (args[i].AsString().ToUpperInvariant() != "AUTH")
+            {
+                continue;
+            }
+
+            // HELLO proto AUTH username password → password is args[i+2] (if it exists)
+            // HELLO proto AUTH password         → password is args[i+1]
+            string password;
+            if (i + 2 < args.Count && args[i + 2].AsString().Length > 0 &&
+                args[i + 1].AsString().ToUpperInvariant() != "SETNAME")
+            {
+                // Three-argument form: AUTH <username> <password>
+                password = args[i + 2].AsString();
+            }
+            else
+            {
+                // Two-argument form: AUTH <password>
+                password = args[i + 1].AsString();
+            }
+
             if (!string.IsNullOrEmpty(_compatibilityOptions.RequirePass) &&
-                password != _compatibilityOptions.RequirePass)
+                !VerifyPasswordConstantTime(_compatibilityOptions.RequirePass, password))
             {
                 return RespValue.Error("WRONGPASS invalid username-password pair or user is disabled.");
             }
-        }
-        else if (args.Count >= 4 && args[2].AsString().ToUpperInvariant() == "AUTH")
-        {
-            // HELLO proto AUTH password (without username)
-            var password = args[3].AsString();
-            if (!string.IsNullOrEmpty(_compatibilityOptions.RequirePass) &&
-                password != _compatibilityOptions.RequirePass)
-            {
-                return RespValue.Error("WRONGPASS invalid username-password pair or user is disabled.");
-            }
+
+            break;
         }
 
         // SETNAME sub-option
@@ -4793,6 +4804,16 @@ public sealed class RedisCommandProcessor : IDisposable
 
     /// <summary>Holds the push channel writer for a connection that has activated CLIENT TRACKING.</summary>
     private sealed record TrackingRegistration(ChannelWriter<RespValue> PushWriter);
+
+    /// <summary>
+    /// Compares two passwords using a constant-time algorithm to prevent timing-based enumeration attacks.
+    /// </summary>
+    private static bool VerifyPasswordConstantTime(string expected, string actual)
+    {
+        var expectedBytes = System.Text.Encoding.UTF8.GetBytes(expected);
+        var actualBytes = System.Text.Encoding.UTF8.GetBytes(actual);
+        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(expectedBytes, actualBytes);
+    }
 }
 
 /// <summary>Snapshot of per-processor transaction telemetry counters.</summary>

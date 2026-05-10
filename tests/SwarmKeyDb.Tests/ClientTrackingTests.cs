@@ -13,6 +13,8 @@ namespace SwarmKeyDb.Tests;
 [Category("Integration")]
 public class ClientTrackingTests
 {
+    /// <summary>Maximum time per tracking-related test, to avoid hanging CI.</summary>
+    private const int TestTimeoutSeconds = 10;
     /// <summary>
     /// Opens two concurrent ProcessAsync loops on the same processor.
     /// Connection A activates CLIENT TRACKING ON.
@@ -24,7 +26,7 @@ public class ClientTrackingTests
     public async Task ClientTracking_WriteFromOtherConnection_DeliversInvalidationPush()
     {
         var processor = CreateProcessor();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(TestTimeoutSeconds));
 
         // ---------- connection A: HELLO 3, CLIENT TRACKING ON ----------
         var pipeA = new System.IO.Pipelines.Pipe();
@@ -110,7 +112,7 @@ public class ClientTrackingTests
     public async Task ClientTracking_Off_NoInvalidationDelivered()
     {
         var processor = CreateProcessor();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(TestTimeoutSeconds));
 
         var pipeA = new System.IO.Pipelines.Pipe();
         var pipeAOut = new System.IO.Pipelines.Pipe();
