@@ -200,6 +200,38 @@ XTRIM events MAXLEN ~ 10000         -> :<trimmed-count>
 XTRIM events MINID 1715200000000-0  -> :<trimmed-count>
 ```
 
+## Check the bee
+
+For sample demonstration run the server with
+
+```
+BEE_POSTAGE_BATCH_ID=BATCH_ID BEE_URL=https://bzz.limo SWARM_KEYDB_BACKEND=bee 
+```
+
+Write a test key
+Use redis-cli against your running server:
+```
+redis-cli -p 6379 -h 172.22.112.1 SET test:swarm-check hello
+```
+
+Get the backend metadata for that key
+SwarmKeyDb exposes a Redis command for this:
+```
+redis-cli -p 6379 -h 172.22.112.1 BACKENDMETA test:swarm-check
+```
+
+outputs:
+
+```
+"{\"type\":\"swarm\",\"swarmReference\":\"b0b862080619b0993308f361d44b1a2fb5f11a981f7023f9ecc689a0016e7b2b\"}"
+```
+
+To test written to sample bee you can do 
+
+```
+curl -fSL "https://bzz.limo/bytes/b0b862080619b0993308f361d44b1a2fb5f11a981f7023f9ecc689a0016e7b2b" -o swarm-object.bin
+```
+
 ## Stream retention configuration
 
 - Configure default stream retention for `XADD` without inline `MAXLEN`:
