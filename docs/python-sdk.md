@@ -3,7 +3,7 @@
 Python SDK for SwarmKeyDb — WebSocket-first, async/sync Redis-compatible client
 with HTTP fallback, Pub/Sub, Streams, and Transaction support.
 
-## Installation
+## Installation from package registry
 
 ```bash
 pip install swarm-keydb-client
@@ -32,6 +32,8 @@ async def main():
 
 asyncio.run(main())
 ```
+
+For a runnable quickstart with Pub/Sub, see [`examples/python/quickstart.py`](../examples/python/quickstart.py).
 
 ## Sync interface
 
@@ -310,8 +312,12 @@ pip install -e ".[dev]"
 # Unit tests only (no server required)
 pytest tests/unit/ -v
 
-# Integration tests (requires a running SwarmKeyDb)
-pytest tests/integration/ -v -m integration \
+# CI smoke integration tests (requires a running SwarmKeyDb)
+pytest tests/integration/test_ci_smoke.py -v -m integration \
+  --override-ini="asyncio_mode=auto"
+
+# Extended integration tests
+pytest tests/integration/test_integration.py -v -m integration \
   --override-ini="asyncio_mode=auto"
 ```
 

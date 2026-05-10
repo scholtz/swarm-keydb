@@ -7,6 +7,10 @@
   "main": "dist/index.cjs",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -21,12 +25,14 @@
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
+    "test:integration": "playwright test",
     "typecheck": "tsc --noEmit --strict"
   },
   "dependencies": {
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.54.1",
     "@types/ws": "^8.18.1",
     "tsup": "^8.5.0",
     "typescript": "^5.8.3",

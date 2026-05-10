@@ -120,11 +120,139 @@ jobs:
         cd swarm-keydb-go
         go test ./...
 
+  sdk-js-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: 10.0.x
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v5
+      with:
+        node-version: 22
+        registry-url: https://registry.npmjs.org
+
+    - name: JavaScript SDK build and unit tests
+      run: |
+        cd sdk/js
+        npm ci
+        npm run typecheck
+        npm test
+        npm run build
+        npm publish --dry-run
+
+    - name: Install Playwright Chromium
+      run: |
+        cd sdk/js
+        npx playwright install --with-deps chromium
+
+    - name: JavaScript SDK Playwright integration tests
+      run: |
+        set -euo pipefail
+        BACKEND=memory SWARM_KEYDB_WS_PORT=8765 SWARM_KEYDB_HTTP_PORT=8080 SWARM_KEYDB_WS_CORS_ORIGINS=* SWARM_KEYDB_HTTP_CORS_ORIGINS=* dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj --configuration Release > /tmp/swarmkeydb-js.log 2>&1 &
+        SERVER_PID=$!
+        trap 'kill ${SERVER_PID}' EXIT
+        for i in {1..60}; do
+          if nc -z 127.0.0.1 8765 && nc -z 127.0.0.1 8080; then
+            break
+          fi
+          sleep 1
+        done
+        cd sdk/js
+        npm run test:integration
+
+  sdk-python-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: 10.0.x
+
+    - name: Setup Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Python SDK unit tests and package dry-run checks
+      run: |
+        cd sdk/python
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]" build twine
+        pytest tests/unit/ -v
+        python -m build
+        twine check dist/*
+
+    - name: Python SDK integration tests
+      run: |
+        set -euo pipefail
+        BACKEND=memory SWARM_KEYDB_WS_PORT=8765 SWARM_KEYDB_HTTP_PORT=8080 SWARM_KEYDB_WS_CORS_ORIGINS=* SWARM_KEYDB_HTTP_CORS_ORIGINS=* dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj --configuration Release > /tmp/swarmkeydb-py.log 2>&1 &
+        SERVER_PID=$!
+        trap 'kill ${SERVER_PID}' EXIT
+        for i in {1..60}; do
+          if nc -z 127.0.0.1 8765 && nc -z 127.0.0.1 8080; then
+            break
+          fi
+          sleep 1
+        done
+        cd sdk/python
+        pytest tests/integration/test_ci_smoke.py -v -m integration --override-ini="asyncio_mode=auto"
+
+  sdk-go-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: 10.0.x
+
+    - name: Setup Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: "1.22"
+
+    - name: Go SDK unit tests
+      run: |
+        cd sdk/go
+        go test ./tests/unit/ -v -timeout 30s
+
+    - name: Go SDK integration tests
+      run: |
+        set -euo pipefail
+        BACKEND=memory SWARM_KEYDB_WS_PORT=8765 SWARM_KEYDB_HTTP_PORT=8080 SWARM_KEYDB_WS_CORS_ORIGINS=* SWARM_KEYDB_HTTP_CORS_ORIGINS=* dotnet run --project src/SwarmKeyDb.Server/SwarmKeyDb.Server.csproj --configuration Release > /tmp/swarmkeydb-go.log 2>&1 &
+        SERVER_PID=$!
+        trap 'kill ${SERVER_PID}' EXIT
+        for i in {1..60}; do
+          if nc -z 127.0.0.1 8765 && nc -z 127.0.0.1 8080; then
+            break
+          fi
+          sleep 1
+        done
+        cd sdk/go
+        go test ./tests/integration/ -v -timeout 120s
+
   docker-publish:
     runs-on: ubuntu-latest
     needs:
       - build-and-test
       - sdk-tests
+      - sdk-js-tests
+      - sdk-python-tests
+      - sdk-go-tests
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:

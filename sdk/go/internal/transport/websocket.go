@@ -109,24 +109,23 @@ func (c *Conn) readLoop() {
 		if err != nil {
 			return
 		}
-		var r Response
-		if err := json.Unmarshal(msg, &r); err != nil {
+		var decoded interface{}
+		if err := json.Unmarshal(msg, &decoded); err != nil {
 			continue
 		}
-		// PubSub push: route to push channel, do not dequeue a pending request.
-		if isPubSubType(r.Type) {
-			pm := &PushMessage{
-				Type:    r.Type,
-				Channel: r.Channel,
-				Pattern: r.Pattern,
-				Data:    r.Data,
-			}
+
+		resp, pm, isPush := parseIncomingFrame(decoded)
+		if isPush && pm != nil {
 			select {
 			case c.pushCh <- pm:
 			default:
 			}
 			continue
 		}
+		if resp == nil {
+			continue
+		}
+
 		// dequeue the next pending request
 		c.pendMu.Lock()
 		if len(c.pendQ) == 0 {
@@ -137,16 +136,91 @@ func (c *Conn) readLoop() {
 		c.pendQ = c.pendQ[1:]
 		c.pendMu.Unlock()
 		select {
-		case p.resp <- &r:
+		case p.resp <- resp:
 		default:
 		}
 	}
+}
+
+func parseIncomingFrame(decoded interface{}) (*Response, *PushMessage, bool) {
+	switch frame := decoded.(type) {
+	case map[string]interface{}:
+		if t, ok := frame["type"].(string); ok {
+			if t == "push" {
+				return nil, parsePushFrame(frame["data"]), true
+			}
+			if isPubSubType(t) {
+				return nil, &PushMessage{
+					Type:    t,
+					Channel: fmt.Sprintf("%v", frame["channel"]),
+					Pattern: fmt.Sprintf("%v", frame["pattern"]),
+					Data:    fmt.Sprintf("%v", frame["data"]),
+				}, true
+			}
+		}
+
+		if errText, ok := frame["error"].(string); ok && errText != "" {
+			return &Response{Error: errText}, nil, false
+		}
+
+		if result, ok := frame["result"]; ok {
+			return &Response{Result: result}, nil, false
+		}
+		if data, ok := frame["data"]; ok {
+			return &Response{Result: data}, nil, false
+		}
+		if len(frame) == 0 {
+			return &Response{Result: nil}, nil, false
+		}
+		return &Response{Result: frame}, nil, false
+	case []interface{}:
+		if pm := parsePushFrame(frame); pm != nil {
+			return nil, pm, true
+		}
+		return &Response{Result: frame}, nil, false
+	default:
+		return &Response{Result: frame}, nil, false
+	}
+}
+
+func parsePushFrame(payload interface{}) *PushMessage {
+	arr, ok := payload.([]interface{})
+	if !ok || len(arr) == 0 {
+		return nil
+	}
+	typ := fmt.Sprintf("%v", arr[0])
+	if !isPubSubType(typ) {
+		return nil
+	}
+
+	pm := &PushMessage{Type: typ}
+	if len(arr) >= 2 {
+		pm.Channel = fmt.Sprintf("%v", arr[1])
+	}
+	if len(arr) >= 3 {
+		pm.Data = fmt.Sprintf("%v", arr[2])
+	}
+	if typ == "pmessage" {
+		if len(arr) >= 2 {
+			pm.Pattern = fmt.Sprintf("%v", arr[1])
+		}
+		if len(arr) >= 3 {
+			pm.Channel = fmt.Sprintf("%v", arr[2])
+		}
+		if len(arr) >= 4 {
+			pm.Data = fmt.Sprintf("%v", arr[3])
+		}
+	}
+	return pm
 }
 
 // Send sends cmd+args and returns the server response.
 func (c *Conn) Send(ctx context.Context, cmd string, args []string) (*Response, error) {
 	if c.closed.Load() {
 		return nil, fmt.Errorf("connection closed")
+	}
+	if args == nil {
+		args = []string{}
 	}
 	f := Frame{Cmd: cmd, Args: args}
 	data, err := json.Marshal(f)
@@ -200,6 +274,9 @@ func (c *Conn) PushMessages() <-chan *PushMessage {
 func (c *Conn) Write(cmd string, args []string) error {
 	if c.closed.Load() {
 		return fmt.Errorf("connection closed")
+	}
+	if args == nil {
+		args = []string{}
 	}
 	f := Frame{Cmd: cmd, Args: args}
 	data, err := json.Marshal(f)

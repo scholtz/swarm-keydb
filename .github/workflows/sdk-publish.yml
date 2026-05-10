@@ -1,0 +1,83 @@
+name: SDK Publish
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  publish-js-sdk:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v5
+      with:
+        node-version: 22
+        registry-url: https://registry.npmjs.org
+
+    - name: Build and publish @swarm-keydb/client
+      env:
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      run: |
+        cd sdk/js
+        npm ci
+        npm run build
+        npm publish --access public
+
+  publish-python-sdk:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Setup Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.12"
+
+    - name: Build and validate package
+      run: |
+        python -m pip install --upgrade pip
+        pip install build twine
+        cd sdk/python
+        python -m build
+        twine check dist/*
+
+    - name: Publish swarm-keydb-client to PyPI
+      env:
+        PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+      run: |
+        cd sdk/python
+        python -m twine upload -u __token__ -p "$PYPI_API_TOKEN" dist/*
+
+  tag-go-module:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+
+    - name: Create module-aware Go tag for pkg.go.dev
+      run: |
+        VERSION="${GITHUB_REF_NAME#v}"
+        GO_TAG="sdk/go/v${VERSION}"
+
+        if git rev-parse "${GO_TAG}" >/dev/null 2>&1; then
+          echo "Tag ${GO_TAG} already exists; skipping"
+          exit 0
+        fi
+
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git tag "${GO_TAG}" "${GITHUB_SHA}"
+        git push origin "${GO_TAG}"

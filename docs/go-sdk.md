@@ -3,6 +3,35 @@
 Module path: `github.com/scholtz/swarm-keydb/sdk/go`  
 Package: `swarmkeydb`
 
+## Installation from package registry
+
+```bash
+go get github.com/scholtz/swarm-keydb/sdk/go@latest
+```
+
+## Quick start
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+
+    swarmkeydb "github.com/scholtz/swarm-keydb/sdk/go"
+)
+
+func main() {
+    client := swarmkeydb.NewClient(&swarmkeydb.Options{Addr: "ws://127.0.0.1:8765"})
+    defer client.Close()
+    _ = client.Set(context.Background(), "hello", "world", 0).Err()
+    value, _ := client.Get(context.Background(), "hello").Result()
+    fmt.Println(value)
+}
+```
+
+Runnable example: [`examples/go/main.go`](../examples/go/main.go).
+
 ## Overview
 
 The Go SDK provides a goroutine-safe client for SwarmKeyDb using a WebSocket connection pool as the primary transport, with an optional HTTP fallback. The API surface mirrors [go-redis](https://github.com/redis/go-redis) conventions so teams familiar with go-redis can adopt this SDK with minimal ramp-up.

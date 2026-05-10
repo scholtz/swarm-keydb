@@ -869,27 +869,40 @@ class AsyncSwarmKeyDbClient:
             logger.warning("Received non-JSON WebSocket frame: %r", raw)
             return
 
-        # Push message (Pub/Sub or client tracking)
-        if "push" in frame:
-            self._dispatch_push(frame["push"])
+        if isinstance(frame, dict):
+            # Push message (Pub/Sub or client tracking), legacy and current gateway shapes
+            if "push" in frame:
+                self._dispatch_push(frame["push"])
+                return
+            if frame.get("type") == "push" and "data" in frame:
+                self._dispatch_push(frame["data"])
+                return
+
+            if not self._pending_list:
+                return
+
+            req = self._pending_list.pop(0)
+
+            if "error" in frame:
+                error = str(frame["error"])
+                if not req.future.done():
+                    req.future.set_exception(
+                        SwarmKeyDbCommandError(req.command, error)
+                    )
+                return
+
+            # Gateway may return {"data": ...} envelopes or raw JSON values/maps.
+            data = frame["data"] if "data" in frame else frame
+            if not req.future.done():
+                req.future.set_result(data)
             return
 
         if not self._pending_list:
             return
 
         req = self._pending_list.pop(0)
-
-        if "error" in frame:
-            error = str(frame["error"])
-            if not req.future.done():
-                req.future.set_exception(
-                    SwarmKeyDbCommandError(req.command, error)
-                )
-            return
-
-        data = frame.get("data")
         if not req.future.done():
-            req.future.set_result(data)
+            req.future.set_result(frame)
 
     def _dispatch_push(self, push: Any) -> None:
         """Dispatch a push frame to Pub/Sub handlers."""

@@ -646,3 +646,25 @@ async def test_frame_serialization_shape():
     assert "args" in frame
     assert isinstance(frame["args"], list)
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_reader_accepts_scalar_json_result_frames():
+    ws = MockWebSocket()
+    client = _make_client(ws)
+    ws._replies.append(json.dumps("hello"))  # gateway may emit plain JSON scalar
+    result = await client.get("k")
+    assert result == b"hello"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_reader_handles_type_push_envelope():
+    ws = MockWebSocket()
+    client = _make_client(ws)
+    seen: list[dict[str, str]] = []
+
+    client._pubsub_handlers["updates"] = lambda message: seen.append(message)
+    client._handle_frame(json.dumps({"type": "push", "data": ["message", "updates", "payload"]}))
+    assert seen == [{"type": "message", "channel": "updates", "data": "payload"}]
+    await client.close()
